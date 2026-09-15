@@ -102,6 +102,7 @@ Raw socket method names use dot notation:
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
+| Service | `service.add`, `service.list`, `service.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
@@ -414,6 +415,38 @@ Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
 
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
+## Services
+
+Service methods register long-running development servers and listening ports with a workspace. Each service has a label, URL, optional source attribution, and a liveness status determined by periodic TCP connect probes.
+
+`service.add` registers a new service or updates an existing one by label (upsert behaviour). Accepted URL forms: `http://…`, `https://…`, `host:port`, `localhost:3000`, `:3000` (→ `http://localhost:3000`).
+
+Attribution happens automatically from the calling context: when invoked from a CLI pane via `herdr service add` inside Herdr, it resolves the workspace from the injected `HERDR_WORKSPACE_ID` environment variable (or falls back to `HERDR_PANE_ID` → the pane's workspace). Outside a pane, `workspace_id` is required.
+
+Register a service:
+
+```json
+{"id":"req_1","method":"service.add","params":{"workspace_id":"w1","label":"Rails server","url":":3000","source":"cli"}}
+```
+
+List services for a workspace:
+
+```json
+{"id":"req_2","method":"service.list","params":{"workspace_id":"w1"}}
+```
+
+Remove a service by ID or label:
+
+```json
+{"id":"req_3","method":"service.remove","params":{"workspace_id":"w1","id":1}}
+```
+
+Service responses include the service ID, label, URL, source, and liveness status (one of `unknown`, `up`, `down`). Liveness is unknown until the first probe succeeds or fails; it is not persisted across server restarts. Services persist in the session snapshot.
+
+`service.add` errors with `attribution_required` when workspace cannot be resolved, `workspace_not_found` when the specified workspace does not exist, `pane_not_found` when the caller references an unknown pane, or `invalid_url` when the URL is malformed.
+
+`service.remove` errors with `service_not_found` when neither the ID nor label matches an existing service.
+
 
 ## Agent view queries
 
@@ -838,6 +871,8 @@ updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
 `workspace_id` and `tab_id`.
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
+Service event subscriptions include `services_changed`, which is emitted when the service list for a workspace changes (service added, updated, or removed). `services_changed` includes the `workspace_id` of the affected workspace.
+
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 

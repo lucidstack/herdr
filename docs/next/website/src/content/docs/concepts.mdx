@@ -87,3 +87,17 @@ Herdr has terminal mode, prefix mode, and navigate mode.
 Terminal mode sends keys to the focused pane. Prefix mode waits for one Herdr action after the prefix key. Navigate mode is the persistent workspace navigation surface.
 
 Press the prefix key, default `ctrl+b`, then an action key such as `c` for a new tab or `w` for workspace navigation. See [Keyboard](/docs/keyboard/) if the prefix idea is new to you.
+## Services
+
+A service registers a long-running development server or listening port with a workspace. Services are shown in the sidebar under the workspace row when expanded, displaying the service label, URL, and a liveness indicator (dot: unknown, up, or down).
+
+Click a service row to open its URL in your system browser. Liveness is determined by periodic TCP connect probes; it starts as unknown and updates as probes succeed or fail.
+
+Register a service with:
+
+```bash
+herdr service add "Rails server" :3000
+```
+
+Services belong to one workspace, are named by label (re-adding updates the URL), and persist across server restarts but restore with unknown liveness until the first probe.
+

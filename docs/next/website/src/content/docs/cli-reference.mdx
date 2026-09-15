@@ -183,6 +183,24 @@ Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree cr
 `workspace close` closes only Herdr state. Closing a primary workspace while linked-worktree workspaces are open requires `--group`; without it, the command leaves the group open and returns `workspace_group_close_required`. To delete the checkout, run `worktree remove`. It runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
 
 Git rejects repositories owned by another user by default. If you have independently verified the repository, pass `--trust-repository` to trust its resolved path for that command only. Herdr does not change your Git configuration.
+## Services
+
+```bash
+herdr service add <label> <url> [--workspace <id>] [--source <text>] [--json]
+herdr service list [--workspace <id>] [--json]
+herdr service remove (<id> | --label <label>) [--workspace <id>] [--json]
+```
+
+Services register long-running development servers and listening ports with a workspace. Each service has a label, URL, and optional source attribution. Use `service add` to register a new service or update an existing one by label (upsert behaviour).
+
+URL forms accepted: `http://…`, `https://…`, `host:port`, `:3000` (→ `http://localhost:3000`).
+
+When called from inside a Herdr pane, `service add` uses the calling pane's workspace by default. Pass `--workspace <id>` to override. Outside a pane, `--workspace <id>` is required.
+
+The `--source` parameter is optional and records who registered the service (e.g. `"cli"`, `"plugin:example"`). It appears in the service list.
+
+Use `--json` with any command for deterministic automation in scripts.
+
 
 ## Tabs
 
