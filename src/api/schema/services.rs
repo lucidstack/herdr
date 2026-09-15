@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceAddParams {
@@ -40,7 +40,10 @@ pub struct ServiceListResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceRemoveParams {
-    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +60,16 @@ pub enum ServiceLivenessWire {
     Unknown,
     Up,
     Down,
+}
+
+impl From<crate::service::ServiceLiveness> for ServiceLivenessWire {
+    fn from(liveness: crate::service::ServiceLiveness) -> Self {
+        match liveness {
+            crate::service::ServiceLiveness::Unknown => ServiceLivenessWire::Unknown,
+            crate::service::ServiceLiveness::Up => ServiceLivenessWire::Up,
+            crate::service::ServiceLiveness::Down => ServiceLivenessWire::Down,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

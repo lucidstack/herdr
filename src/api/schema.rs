@@ -9,6 +9,7 @@ pub mod panes;
 pub mod plugins;
 pub mod response;
 pub mod server;
+pub mod services;
 pub mod session;
 pub mod tabs;
 pub mod workspaces;
@@ -23,6 +24,7 @@ pub use panes::*;
 pub use plugins::*;
 pub use response::*;
 pub use server::*;
+pub use services::*;
 pub use session::*;
 pub use tabs::*;
 pub use workspaces::*;
@@ -73,6 +75,12 @@ pub enum Method {
     ClientShellSurfaceSet(ClientShellSurfaceSetParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
+    #[serde(rename = "service.add")]
+    ServiceAdd(ServiceAddParams),
+    #[serde(rename = "service.list")]
+    ServiceList(ServiceListParams),
+    #[serde(rename = "service.remove")]
+    ServiceRemove(ServiceRemoveParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]

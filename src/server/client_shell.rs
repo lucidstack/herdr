@@ -72,6 +72,16 @@ pub(super) fn snapshot(
                         is_linked_worktree: worktree.is_linked_worktree,
                     }),
                 agent_status: workspace.agent_status,
+                services: state
+                    .services
+                    .iter()
+                    .map(|svc| protocol::ClientShellService {
+                        id: svc.id,
+                        label: svc.label.clone(),
+                        url: svc.url.clone(),
+                        liveness: protocol::ClientShellServiceLiveness::from(svc.liveness),
+                    })
+                    .collect(),
             }
         })
         .collect();

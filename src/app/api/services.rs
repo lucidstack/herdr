@@ -1,6 +1,6 @@
 use crate::api::schema::{
-    ResponseResult, ServiceAddParams, ServiceListEntry, ServiceListParams, ServiceLivenessWire,
-    ServiceRemoveParams,
+    EventData, EventEnvelope, EventKind, ResponseResult, ServiceAddParams, ServiceListEntry,
+    ServiceListParams, ServiceLivenessWire, ServiceRemoveParams,
 };
 use crate::service::{find_service_by_label, remove_service_by_id_or_label, Service};
 use super::responses;
@@ -11,35 +11,41 @@ pub(super) trait ServiceHandlers {
     fn handle_service_remove(&mut self, id: String, params: ServiceRemoveParams) -> String;
 }
 
+/// Resolve workspace_id from optional workspace_id or pane_id; attribution_required if neither available
+fn resolve_workspace_id(app: &crate::app::App, request_id: &str, workspace_id: Option<String>, pane_id: Option<String>) -> Result<String, String> {
+    match workspace_id {
+        Some(ws_id) => Ok(ws_id),
+        None => match pane_id {
+            Some(pane_id) => {
+                let (_ws_idx, _pane_id) = match app.parse_pane_id(&pane_id) {
+                    Some((ws_idx, pane_id)) => (ws_idx, pane_id),
+                    None => {
+                        return Err(responses::encode_error(
+                            request_id.to_string(),
+                            "pane_not_found",
+                            format!("pane {pane_id} not found"),
+                        ));
+                    }
+                };
+                Ok(app.public_workspace_id(_ws_idx))
+            }
+            None => {
+                Err(responses::encode_error(
+                    request_id.to_string(),
+                    "attribution_required",
+                    "workspace_id or pane_id required",
+                ))
+            }
+        },
+    }
+}
+
 impl ServiceHandlers for crate::app::App {
     fn handle_service_add(&mut self, id: String, params: ServiceAddParams) -> String {
-        // Attribution resolution: workspace_id > pane_id → owning workspace > error
-        let workspace_id = match params.workspace_id {
-            Some(ws_id) => ws_id,
-            None => match params.pane_id {
-                Some(pane_id) => {
-                    let (_ws_idx, _pane_id) = match self.parse_pane_id(&pane_id) {
-                        Some((ws_idx, pane_id)) => (ws_idx, pane_id),
-                        None => {
-                            return responses::encode_error(
-                                id,
-                                "pane_not_found",
-                                format!("pane {pane_id} not found"),
-                            );
-                        }
-                    };
-                    self.public_workspace_id(_ws_idx)
-                }
-                None => {
-                    return responses::encode_error(
-                        id,
-                        "attribution_required",
-                        "workspace_id or pane_id required",
-                    );
-                }
-            },
+        let workspace_id = match resolve_workspace_id(self, &id, params.workspace_id, params.pane_id) {
+            Ok(ws_id) => ws_id,
+            Err(err_response) => return err_response,
         };
-
         let ws_idx = match self.parse_workspace_id(&workspace_id) {
             Some(idx) => idx,
             None => {
@@ -71,9 +77,14 @@ impl ServiceHandlers for crate::app::App {
             let existing_id = workspace.services[pos].id;
             workspace.services[pos].url = url;
             workspace.services[pos].source = source;
-            self.event_tx.blocking_send(crate::AppEvent::ServicesChanged {
-                workspace_id: workspace_id.clone(),
-            }).ok();
+            let services = self.build_service_list_for_workspace(ws_idx);
+            self.emit_event(EventEnvelope {
+                event: EventKind::ServicesChanged,
+                data: EventData::ServicesChanged {
+                    workspace_id: workspace_id.clone(),
+                    services,
+                },
+            });
             return responses::encode_success(
                 id,
                 ResponseResult::ServiceAdd {
@@ -93,9 +104,14 @@ impl ServiceHandlers for crate::app::App {
             source,
         ));
 
-        self.event_tx.blocking_send(crate::AppEvent::ServicesChanged {
-            workspace_id: workspace_id.clone(),
-        }).ok();
+        let services = self.build_service_list_for_workspace(ws_idx);
+        self.emit_event(EventEnvelope {
+            event: EventKind::ServicesChanged,
+            data: EventData::ServicesChanged {
+                workspace_id: workspace_id.clone(),
+                services,
+            },
+        });
 
         responses::encode_success(
             id,
@@ -118,32 +134,13 @@ impl ServiceHandlers for crate::app::App {
                     );
                 }
             };
-            self.state.workspaces[ws_idx]
-                .services
-                .iter()
-                .map(|svc| ServiceListEntry {
-                    workspace_id: ws_id.clone(),
-                    id: svc.id,
-                    label: svc.label.clone(),
-                    url: svc.url.clone(),
-                    source: svc.source.clone(),
-                    liveness: ServiceLivenessWire::Unknown,
-                })
-                .collect()
+            self.build_service_list_for_workspace(ws_idx)
         } else {
             self.state
                 .workspaces
                 .iter()
-                .flat_map(|ws| {
-                    ws.services.iter().map(move |svc| ServiceListEntry {
-                        workspace_id: ws.id.clone(),
-                        id: svc.id,
-                        label: svc.label.clone(),
-                        url: svc.url.clone(),
-                        source: svc.source.clone(),
-                        liveness: ServiceLivenessWire::Unknown,
-                    })
-                })
+                .enumerate()
+                .flat_map(|(_, ws)| self.build_service_list_for_workspace_ref(ws))
                 .collect()
         };
 
@@ -154,13 +151,18 @@ impl ServiceHandlers for crate::app::App {
     }
 
     fn handle_service_remove(&mut self, id: String, params: ServiceRemoveParams) -> String {
-        let ws_idx = match self.parse_workspace_id(&params.workspace_id) {
+        let workspace_id = match resolve_workspace_id(self, &id, params.workspace_id, params.pane_id) {
+            Ok(ws_id) => ws_id,
+            Err(err_response) => return err_response,
+        };
+
+        let ws_idx = match self.parse_workspace_id(&workspace_id) {
             Some(idx) => idx,
             None => {
                 return responses::encode_error(
                     id,
                     "workspace_not_found",
-                    format!("workspace {} not found", params.workspace_id),
+                    format!("workspace {workspace_id} not found"),
                 );
             }
         };
@@ -188,10 +190,42 @@ impl ServiceHandlers for crate::app::App {
             );
         }
 
-        self.event_tx.blocking_send(crate::AppEvent::ServicesChanged {
-            workspace_id: params.workspace_id.clone(),
-        }).ok();
+        let services = self.build_service_list_for_workspace(ws_idx);
+        self.emit_event(EventEnvelope {
+            event: EventKind::ServicesChanged,
+            data: EventData::ServicesChanged {
+                workspace_id: workspace_id.clone(),
+                services,
+            },
+        });
 
         responses::encode_success(id, ResponseResult::ServiceRemove {})
+    }
+}
+
+impl crate::app::App {
+    fn build_service_list_for_workspace(&self, ws_idx: usize) -> Vec<ServiceListEntry> {
+        if let Some(ws) = self.state.workspaces.get(ws_idx) {
+            self.build_service_list_for_workspace_ref(ws)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn build_service_list_for_workspace_ref(
+        &self,
+        ws: &crate::workspace::Workspace,
+    ) -> Vec<ServiceListEntry> {
+        ws.services
+            .iter()
+            .map(|svc| ServiceListEntry {
+                workspace_id: ws.id.clone(),
+                id: svc.id,
+                label: svc.label.clone(),
+                url: svc.url.clone(),
+                source: svc.source.clone(),
+                liveness: ServiceLivenessWire::from(svc.liveness),
+            })
+            .collect()
     }
 }

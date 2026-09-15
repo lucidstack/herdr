@@ -20,6 +20,7 @@ mod ids;
 pub(crate) mod pane_graphics;
 mod popup;
 mod runtime;
+pub(crate) mod service_liveness;
 mod session;
 pub mod state;
 mod tab_bar_status;
@@ -123,6 +124,7 @@ pub struct App {
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) service_liveness_prober: service_liveness::ServiceLivenessProber,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
     pub(crate) pending_api_worktree_remove_paths: HashMap<std::path::PathBuf, u64>,
@@ -561,6 +563,8 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
         let client_shell_keybindings_profile = config.local_keybindings_profile_toml().ok();
+        let service_liveness_prober =
+            service_liveness::ServiceLivenessProber::new(event_tx.clone());
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
 
@@ -582,6 +586,7 @@ impl App {
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),
+            service_liveness_prober,
             pending_api_worktree_creates: HashMap::new(),
             pending_api_worktree_removes: HashMap::new(),
             pending_api_worktree_remove_paths: HashMap::new(),

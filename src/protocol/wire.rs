@@ -1023,6 +1023,33 @@ pub struct ClientShellTabStatusSegment {
     pub accent: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientShellServiceLiveness {
+    #[default]
+    Unknown,
+    Up,
+    Down,
+}
+
+impl From<crate::service::ServiceLiveness> for ClientShellServiceLiveness {
+    fn from(liveness: crate::service::ServiceLiveness) -> Self {
+        match liveness {
+            crate::service::ServiceLiveness::Unknown => ClientShellServiceLiveness::Unknown,
+            crate::service::ServiceLiveness::Up => ClientShellServiceLiveness::Up,
+            crate::service::ServiceLiveness::Down => ClientShellServiceLiveness::Down,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientShellService {
+    pub id: u64,
+    pub label: String,
+    pub url: String,
+    pub liveness: ClientShellServiceLiveness,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientShellWorkspace {
     pub workspace_id: String,
@@ -1038,8 +1065,9 @@ pub struct ClientShellWorkspace {
     pub focused: bool,
     #[serde(deserialize_with = "deserialize_client_shell_agent_status")]
     pub agent_status: crate::api::schema::AgentStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ClientShellService>,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientShellWorktree {
     pub key: String,
@@ -2718,6 +2746,7 @@ mod tests {
                 worktree: None,
                 focused: true,
                 agent_status: crate::api::schema::AgentStatus::Idle,
+                services: Vec::new(),
             }],
             tabs: vec![ClientShellTab {
                 tab_id: "w1:t1".into(),

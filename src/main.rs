@@ -50,6 +50,7 @@ mod render_prof;
 mod render_signal;
 mod selection;
 mod server;
+mod service;
 mod session;
 mod sound;
 mod terminal;

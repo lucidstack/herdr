@@ -13,6 +13,7 @@ use crate::layout::PaneId;
 use crate::layout::TileLayout;
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
+use crate::service::Service;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
@@ -199,6 +200,10 @@ pub struct Workspace {
     /// Public pane numbers within this workspace. Closed pane numbers are not reused.
     pub public_pane_numbers: HashMap<PaneId, usize>,
     pub(crate) next_public_pane_number: usize,
+    /// Long-running dev servers/ports registered for this workspace.
+    pub services: Vec<Service>,
+    /// Next monotonic service ID (never reused after removal).
+    pub next_service_id: u64,
     pub(crate) next_public_tab_number: usize,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
@@ -265,6 +270,8 @@ impl Workspace {
             public_pane_numbers,
             next_public_pane_number: 2,
             next_public_tab_number: 2,
+            services: Vec::new(),
+            next_service_id: 1,
             tabs: vec![tab],
             active_tab: 0,
             #[cfg(test)]
@@ -417,6 +424,8 @@ impl Workspace {
                 public_pane_numbers,
                 next_public_pane_number: 2,
                 next_public_tab_number: 2,
+                services: Vec::new(),
+                next_service_id: 1,
                 tabs: vec![tab],
                 active_tab: 0,
                 #[cfg(test)]
@@ -1206,6 +1215,8 @@ impl Workspace {
             public_pane_numbers,
             next_public_pane_number: 2,
             next_public_tab_number: 2,
+            services: Vec::new(),
+            next_service_id: 1,
             tabs: vec![tab],
             active_tab: 0,
             test_runtimes: HashMap::new(),

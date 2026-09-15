@@ -80,6 +80,8 @@ pub enum Subscription {
     },
     #[serde(rename = "pane.scroll_changed")]
     PaneScrollChanged { pane_id: String },
+    #[serde(rename = "services.changed")]
+    ServicesChanged {},
     #[serde(rename = "layout.updated")]
     LayoutUpdated {},
 }
@@ -218,6 +220,7 @@ pub enum EventKind {
     PaneAgentDetected,
     PaneAgentStatusChanged,
     LayoutUpdated,
+    ServicesChanged,
 }
 
 impl EventKind {
@@ -248,6 +251,7 @@ impl EventKind {
             EventKind::PaneExited => "pane.exited",
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+            EventKind::ServicesChanged => "services.changed",
             EventKind::LayoutUpdated => "layout.updated",
         }
     }
@@ -549,6 +553,10 @@ pub enum EventData {
         display_agent: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+    },
+    ServicesChanged {
+        workspace_id: String,
+        services: Vec<crate::api::schema::ServiceListEntry>,
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,

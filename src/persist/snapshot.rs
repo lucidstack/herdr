@@ -66,6 +66,8 @@ pub struct WorkspaceSnapshot {
     pub tabs: Vec<TabSnapshot>,
     #[serde(default)]
     pub active_tab: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<crate::api::schema::ServiceSnapshot>,
 }
 
 #[derive(Deserialize)]
@@ -164,6 +166,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             next_public_tab_number: 0,
             tabs: vec![tab],
             active_tab: 0,
+            services: Vec::new(),
         }
     }
 }
@@ -302,6 +305,16 @@ fn capture_workspace(
             .map(|tab| capture_tab(tab, terminals, terminal_runtimes))
             .collect(),
         active_tab: ws.active_tab,
+        services: ws
+            .services
+            .iter()
+            .map(|svc| crate::api::schema::ServiceSnapshot {
+                id: svc.id,
+                label: svc.label.clone(),
+                url: svc.url.clone(),
+                source: svc.source.clone(),
+            })
+            .collect(),
     }
 }
 

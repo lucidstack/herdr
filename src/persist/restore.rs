@@ -423,6 +423,19 @@ fn restore_workspace(
             public_pane_numbers,
             next_public_pane_number,
             next_public_tab_number,
+            services: snap
+                .services
+                .iter()
+                .map(|snap| {
+                    crate::service::Service::new(
+                        snap.id,
+                        snap.label.clone(),
+                        snap.url.clone(),
+                        snap.source.clone(),
+                    )
+                })
+                .collect(),
+            next_service_id: snap.services.iter().map(|s| s.id).max().unwrap_or(0) + 1,
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
             tabs,
             #[cfg(test)]

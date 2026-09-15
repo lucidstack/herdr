@@ -154,6 +154,10 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// Background service liveness probe completed.
+    ServiceLivenessProbed {
+        results: Vec<crate::app::service_liveness::ServiceLivenessProbeResult>,
+    },
     /// A configured tab bar status command finished.
     TabBarCommandFinished {
         generation: u64,

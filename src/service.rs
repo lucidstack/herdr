@@ -26,7 +26,12 @@ pub enum ServiceLiveness {
 
 impl Service {
     /// Creates a new service with liveness initialised to Unknown.
-    pub fn new(id: u64, label: impl Into<String>, url: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(
+        id: u64,
+        label: impl Into<String>,
+        url: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
         Self {
             id,
             label: label.into(),
@@ -58,7 +63,11 @@ impl Service {
 
             // Validate port is numeric and in valid range.
             if let Ok(_port) = port_part.parse::<u16>() {
-                let host = if host_part.is_empty() { "localhost" } else { host_part };
+                let host = if host_part.is_empty() {
+                    "localhost"
+                } else {
+                    host_part
+                };
                 return Some(Cow::Owned(format!("http://{}:{}", host, port_part)));
             }
             return None;
@@ -69,9 +78,16 @@ impl Service {
 }
 
 /// Removes a service by ID or label (one must be Some).
-pub fn remove_service_by_id_or_label(services: &mut Vec<Service>, id: Option<u64>, label: Option<&str>) -> Option<Service> {
+pub fn remove_service_by_id_or_label(
+    services: &mut Vec<Service>,
+    id: Option<u64>,
+    label: Option<&str>,
+) -> Option<Service> {
     match (id, label) {
-        (Some(id), _) => services.iter().position(|s| s.id == id).map(|pos| services.remove(pos)),
+        (Some(id), _) => services
+            .iter()
+            .position(|s| s.id == id)
+            .map(|pos| services.remove(pos)),
         (None, Some(label)) => services
             .iter()
             .position(|s| s.label == label)
@@ -99,20 +115,38 @@ mod tests {
 
     #[test]
     fn normalise_url_accepts_http_https() {
-        assert_eq!(Service::normalise_url("http://localhost:3000").as_deref(), Some("http://localhost:3000"));
-        assert_eq!(Service::normalise_url("https://api.example.com").as_deref(), Some("https://api.example.com"));
+        assert_eq!(
+            Service::normalise_url("http://localhost:3000").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(
+            Service::normalise_url("https://api.example.com").as_deref(),
+            Some("https://api.example.com")
+        );
     }
 
     #[test]
     fn normalise_url_accepts_host_port() {
-        assert_eq!(Service::normalise_url("localhost:3000").as_deref(), Some("http://localhost:3000"));
-        assert_eq!(Service::normalise_url("example.com:8080").as_deref(), Some("http://example.com:8080"));
+        assert_eq!(
+            Service::normalise_url("localhost:3000").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(
+            Service::normalise_url("example.com:8080").as_deref(),
+            Some("http://example.com:8080")
+        );
     }
 
     #[test]
     fn normalise_url_normalises_bare_port() {
-        assert_eq!(Service::normalise_url(":3000").as_deref(), Some("http://localhost:3000"));
-        assert_eq!(Service::normalise_url(":8000").as_deref(), Some("http://localhost:8000"));
+        assert_eq!(
+            Service::normalise_url(":3000").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(
+            Service::normalise_url(":8000").as_deref(),
+            Some("http://localhost:8000")
+        );
     }
 
     #[test]
@@ -147,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn find_service_by_label() {
+    fn test_find_service_by_label() {
         let services = vec![
             Service::new(1, "A", "http://a", "cli"),
             Service::new(2, "B", "http://b", "cli"),
