@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1065,7 +1065,9 @@ pub struct ClientShellWorkspace {
     pub focused: bool,
     #[serde(deserialize_with = "deserialize_client_shell_agent_status")]
     pub agent_status: crate::api::schema::AgentStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Registered services. Optional on the JSON endpoint so generation-1
+    /// snapshots without it still decode.
+    #[serde(default)]
     pub services: Vec<ClientShellService>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

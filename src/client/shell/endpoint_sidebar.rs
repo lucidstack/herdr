@@ -172,6 +172,7 @@ pub(super) fn render_collapsed(
                 workspace_id: workspace.workspace_id.clone(),
                 indented: false,
                 group_toggle: None,
+                services_toggle: None,
             });
             y = y.saturating_add(1);
         }
@@ -281,6 +282,11 @@ pub(super) fn render_expanded(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
+    let services_expanded = |endpoint_id: &ClientEndpointId, workspace: &ClientShellWorkspace| {
+        state
+            .expanded_services
+            .contains(&(endpoint_id.clone(), workspace.workspace_id.clone()))
+    };
     let row_heights = rows
         .iter()
         .map(|row| match row {
@@ -294,21 +300,23 @@ pub(super) fn render_expanded(
                     .as_deref()
                     .and_then(|snapshot| {
                         let workspace = snapshot.workspaces.get(entry.index)?;
-                        Some(
-                            super::sidebar::workspace_rows(
+                        let rows = super::sidebar::workspace_rows(
+                            workspace,
+                            super::sidebar::displayed_workspace_status(
+                                snapshot,
                                 workspace,
-                                super::sidebar::displayed_workspace_status(
-                                    snapshot,
-                                    workspace,
-                                    collapsed_groups,
-                                ),
-                                entry.indented,
-                                &config.spaces,
-                            )
-                            .len()
-                            .max(1)
-                            .min(u16::MAX as usize) as u16,
+                                collapsed_groups,
+                            ),
+                            entry.indented,
+                            &config.spaces,
                         )
+                        .len()
+                        .max(1)
+                        .min(u16::MAX as usize) as u16;
+                        Some(rows.saturating_add(super::sidebar::service_row_count(
+                            workspace,
+                            services_expanded(&endpoint.endpoint_id, workspace),
+                        )))
                     })
                     .unwrap_or(1)
             }
@@ -421,11 +429,16 @@ pub(super) fn render_expanded(
                     entry.indented,
                     &config.spaces,
                 );
-                let height = (tokens.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
+                let expanded = services_expanded(&endpoint.endpoint_id, workspace);
+                let workspace_height = tokens.len().max(1).min(u16::MAX as usize) as u16;
+                let height = workspace_height
+                    .saturating_add(super::sidebar::service_row_count(workspace, expanded))
+                    .min(body.height);
                 if y.saturating_add(height) > body.bottom() {
                     break;
                 }
-                let rect = Rect::new(body.x, y, content_width, height);
+                let block = Rect::new(body.x, y, content_width, height);
+                let rect = Rect::new(body.x, y, content_width, workspace_height.min(height));
                 let nested = Rect::new(
                     rect.x.saturating_add(2),
                     rect.y,
@@ -444,21 +457,16 @@ pub(super) fn render_expanded(
                     config.status_indicators,
                     entry,
                     tokens,
-                    endpoint_active,
-                    selected,
-                    false,
+                    super::sidebar::WorkspaceRowEmphasis {
+                        endpoint_active,
+                        selected,
+                        dragged: false,
+                        services_expanded: expanded,
+                    },
                     palette,
                 );
                 if selected && palette.selection_bg == ratatui::style::Color::Reset {
                     buffer.set_style(nested, Style::default().bg(palette.active_row_bg));
-                }
-                if endpoint.status != ClientEndpointStatus::Online {
-                    buffer.set_style(
-                        rect,
-                        Style::default()
-                            .fg(palette.overlay0)
-                            .add_modifier(Modifier::DIM),
-                    );
                 }
                 let group_toggle = super::sidebar::render_parent_group_toggle(
                     buffer,
@@ -468,12 +476,39 @@ pub(super) fn render_expanded(
                     collapsed_groups,
                     palette,
                 );
+                let services_toggle = super::sidebar::render_services_chip(
+                    buffer, rect, workspace, expanded, palette,
+                );
+                if expanded && height > workspace_height {
+                    super::sidebar::render_service_rows(
+                        buffer,
+                        Rect::new(
+                            nested.x,
+                            block.y.saturating_add(workspace_height),
+                            nested.width,
+                            height - workspace_height,
+                        ),
+                        workspace,
+                        entry,
+                        palette,
+                        &mut hits.services,
+                    );
+                }
+                if endpoint.status != ClientEndpointStatus::Online {
+                    buffer.set_style(
+                        block,
+                        Style::default()
+                            .fg(palette.overlay0)
+                            .add_modifier(Modifier::DIM),
+                    );
+                }
                 hits.workspaces.push(WorkspaceHit {
                     rect,
                     endpoint_id: endpoint.endpoint_id.clone(),
                     workspace_id: workspace.workspace_id.clone(),
                     indented: entry.indented,
                     group_toggle,
+                    services_toggle,
                 });
                 y = y
                     .saturating_add(height)

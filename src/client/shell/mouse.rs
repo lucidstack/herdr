@@ -2049,6 +2049,26 @@ impl ClientShellState {
                     self.persist_chrome_preferences(outcome);
                     return;
                 }
+                let services_toggle = self.hits.workspaces.iter().find_map(|hit| {
+                    let rect = hit.services_toggle.as_ref()?;
+                    super::contains(*rect, point)
+                        .then(|| (hit.endpoint_id.clone(), hit.workspace_id.clone()))
+                });
+                if let Some((endpoint_id, workspace_id)) = services_toggle {
+                    self.toggle_services_expanded(&endpoint_id, workspace_id);
+                    outcome.repaint = true;
+                    return;
+                }
+                let service_url = self
+                    .hits
+                    .services
+                    .iter()
+                    .find(|hit| super::contains(hit.rect, point))
+                    .map(|hit| hit.url.clone());
+                if let Some(url) = service_url {
+                    outcome.actions.push(ClientShellAction::OpenSafeWebUrl(url));
+                    return;
+                }
                 let workspace_press = self
                     .hits
                     .workspaces

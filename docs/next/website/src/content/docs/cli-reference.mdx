@@ -77,7 +77,7 @@ herdr --machine "Build machine" worktree create --cwd /srv/project --branch revi
 
 The selector must match an enabled saved profile ID or a unique, case-sensitive label, not an arbitrary SSH hostname. The saved remote session is used; combining `--machine` with `--session` or `--remote` is an error. Without the prefix, commands retain their existing local session/socket behavior.
 
-Supported commands are `workspace`, `worktree`, `tab`, `pane`, `notification`, `agent` (except `attach` and local `explain --file`), `api snapshot`, `status server`, and API-backed plugin commands (`link`, `unlink`, `enable`, `disable`, `list`, `action`, `log`, `pane`). Server commands support `stop`, `reload-config`, `agent-manifests`, and `reload-agent-manifests`. Local installation/configuration commands, plugin installation, session management, and interactive terminal attachment are not forwarded.
+Supported commands are `workspace`, `worktree`, `service`, `tab`, `pane`, `notification`, `agent` (except `attach` and local `explain --file`), `api snapshot`, `status server`, and API-backed plugin commands (`link`, `unlink`, `enable`, `disable`, `list`, `action`, `log`, `pane`). Server commands support `stop`, `reload-config`, `agent-manifests`, and `reload-agent-manifests`. Local installation/configuration commands, plugin installation, session management, and interactive terminal attachment are not forwarded.
 
 Requests and responses travel through the JSON API over non-interactive SSH; API payloads are not interpolated into the SSH shell command. No open TUI is required, and the bridge never installs, starts, or restarts a server. Update the local CLI and remote Herdr installation to support machine forwarding, and keep the running remote server's API protocol compatible. Authentication, unavailable machines, and incompatible versions fail without falling back to Local. Requests are not automatically retried after connection failure.
 
@@ -183,24 +183,22 @@ Worktrees are normal Herdr workspaces with Git checkout provenance. `worktree cr
 `workspace close` closes only Herdr state. Closing a primary workspace while linked-worktree workspaces are open requires `--group`; without it, the command leaves the group open and returns `workspace_group_close_required`. To delete the checkout, run `worktree remove`. It runs `git worktree remove`, never deletes the branch, and requires `--force` when Git refuses a dirty checkout.
 
 Git rejects repositories owned by another user by default. If you have independently verified the repository, pass `--trust-repository` to trust its resolved path for that command only. Herdr does not change your Git configuration.
+
 ## Services
 
 ```bash
-herdr service add <label> <url> [--workspace <id>] [--source <text>] [--json]
-herdr service list [--workspace <id>] [--json]
-herdr service remove (<id> | --label <label>) [--workspace <id>] [--json]
+herdr service add <label> <url> [--workspace <workspace_id>] [--source TEXT]
+herdr service list [--workspace <workspace_id>]
+herdr service remove (<service_id> | --label <label>) [--workspace <workspace_id>]
 ```
 
-Services register long-running development servers and listening ports with a workspace. Each service has a label, URL, and optional source attribution. Use `service add` to register a new service or update an existing one by label (upsert behaviour).
+Services are long-running development servers and listening ports registered against a workspace. The sidebar shows a `▸N` chip on a workspace that has services; click it to expand one row per service with a liveness dot, its label, and its URL, and click a row to open the URL in your browser.
 
-URL forms accepted: `http://…`, `https://…`, `host:port`, `:3000` (→ `http://localhost:3000`).
+`service add` is an upsert keyed by label: registering an existing label again updates its URL (and resets its liveness) and returns the same `service_id`. Agents should re-run it whenever they restart a server. Accepted URL forms are `http://…`, `https://…`, `host:port`, and `:port`, which becomes `http://localhost:port`. Anything without a resolvable host and port is rejected with `invalid_url`.
 
-When called from inside a Herdr pane, `service add` uses the calling pane's workspace by default. Pass `--workspace <id>` to override. Outside a pane, `--workspace <id>` is required.
+Inside a Herdr pane the workspace is taken from `HERDR_WORKSPACE_ID`, or from the calling pane via `HERDR_PANE_ID`, so agents can register a service without knowing any IDs. Pass `--workspace <workspace_id>` to target another workspace; outside a pane it is required. `--source TEXT` records who registered the service (default `cli`) and is returned by `service list`.
 
-The `--source` parameter is optional and records who registered the service (e.g. `"cli"`, `"plugin:example"`). It appears in the service list.
-
-Use `--json` with any command for deterministic automation in scripts.
-
+The server probes every registered service with a short TCP connect roughly every five seconds. `service list` reports `liveness` as `unknown`, `up`, or `down`. Services persist across server restarts and restore as `unknown` until the first probe completes.
 
 ## Tabs
 

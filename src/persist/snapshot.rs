@@ -68,6 +68,10 @@ pub struct WorkspaceSnapshot {
     pub active_tab: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<crate::api::schema::ServiceSnapshot>,
+    /// Persisted so service ids are not reused after a restart; older
+    /// snapshots fall back to `max(id) + 1` on restore.
+    #[serde(default)]
+    pub next_service_id: u64,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +171,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
             tabs: vec![tab],
             active_tab: 0,
             services: Vec::new(),
+            next_service_id: 0,
         }
     }
 }
@@ -315,6 +320,7 @@ fn capture_workspace(
                 source: svc.source.clone(),
             })
             .collect(),
+        next_service_id: ws.next_service_id,
     }
 }
 
@@ -692,6 +698,8 @@ mod tests {
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 0,
             }],
             active: Some(0),
@@ -1259,6 +1267,8 @@ mod tests {
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 0,
             }],
             active: Some(0),

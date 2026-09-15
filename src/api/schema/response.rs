@@ -84,6 +84,13 @@ pub enum ResponseResult {
         path: String,
         forced: bool,
     },
+    ServiceAdded {
+        service_id: u64,
+        workspace_id: String,
+    },
+    ServiceList {
+        services: Vec<super::ServiceListEntry>,
+    },
     TabInfo {
         tab: TabInfo,
     },

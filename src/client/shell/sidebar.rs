@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ClientShellServiceLiveness;
 use ratatui::{
     text::Line,
     widgets::{Paragraph, Widget},
@@ -91,6 +92,7 @@ pub(crate) fn render_collapsed_sidebar(
             workspace_id: workspace.workspace_id.clone(),
             indented: false,
             group_toggle: None,
+            services_toggle: None,
         });
     }
 
@@ -220,6 +222,11 @@ pub(crate) fn render_sidebar(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
+    let services_expanded = |workspace: &ClientShellWorkspace| {
+        state
+            .expanded_services
+            .contains(&(ClientEndpointId::Local, workspace.workspace_id.clone()))
+    };
     let row_heights = entries
         .iter()
         .map(|entry| {
@@ -227,7 +234,7 @@ pub(crate) fn render_sidebar(
                 .workspaces
                 .get(entry.index)
                 .map(|workspace| {
-                    workspace_rows(
+                    let rows = workspace_rows(
                         workspace,
                         displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
                         entry.indented,
@@ -235,7 +242,8 @@ pub(crate) fn render_sidebar(
                     )
                     .len()
                     .max(1)
-                    .min(u16::MAX as usize) as u16
+                    .min(u16::MAX as usize) as u16;
+                    rows.saturating_add(service_row_count(workspace, services_expanded(workspace)))
                 })
                 .unwrap_or(1)
         })
@@ -289,21 +297,26 @@ pub(crate) fn render_sidebar(
         };
         let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
         let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-        if y.saturating_add(row_height) > body.bottom() {
+        let expanded = services_expanded(workspace);
+        let workspace_height = rows.len().max(1).min(u16::MAX as usize) as u16;
+        let block_height = workspace_height
+            .saturating_add(service_row_count(workspace, expanded))
+            .min(body.height);
+        if y.saturating_add(block_height) > body.bottom() {
             break;
         }
-        let rect = Rect::new(body.x, y, content_width, row_height);
+        let block = Rect::new(body.x, y, content_width, block_height);
+        let rect = Rect::new(body.x, y, content_width, workspace_height.min(block_height));
         let selected = state.selected_workspace_id.is_some_and(|target| {
             target.matches(state.active_endpoint_id, &workspace.workspace_id)
         });
         let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
         if selected {
-            buffer.set_style(rect, Style::default().bg(palette.selection_bg));
+            buffer.set_style(block, Style::default().bg(palette.selection_bg));
         } else if dragged {
-            buffer.set_style(rect, Style::default().bg(palette.surface1));
+            buffer.set_style(block, Style::default().bg(palette.surface1));
         } else if workspace.focused {
-            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            buffer.set_style(block, Style::default().bg(palette.active_row_bg));
         }
         render_workspace_rows(
             buffer,
@@ -313,9 +326,12 @@ pub(crate) fn render_sidebar(
             config.status_indicators,
             entry,
             rows,
-            true,
-            selected,
-            dragged,
+            WorkspaceRowEmphasis {
+                endpoint_active: true,
+                selected,
+                dragged,
+                services_expanded: expanded,
+            },
             palette,
         );
         let group_toggle = render_parent_group_toggle(
@@ -326,17 +342,34 @@ pub(crate) fn render_sidebar(
             state.collapsed_groups,
             palette,
         );
+        let services_toggle = render_services_chip(buffer, rect, workspace, expanded, palette);
+        if expanded && block_height > workspace_height {
+            render_service_rows(
+                buffer,
+                Rect::new(
+                    block.x,
+                    block.y.saturating_add(workspace_height),
+                    block.width,
+                    block_height - workspace_height,
+                ),
+                workspace,
+                entry,
+                palette,
+                &mut hits.services,
+            );
+        }
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
             workspace_id: workspace.workspace_id.clone(),
             indented: entry.indented,
             group_toggle,
+            services_toggle,
         });
         let gap = entries
             .get(entry_position + 1)
             .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
-        y = y.saturating_add(row_height + gap);
+        y = y.saturating_add(block_height + gap);
     }
 
     if show_scrollbar {
@@ -636,6 +669,16 @@ pub(in crate::client::shell) fn workspace_rows(
     )
 }
 
+/// Per-row emphasis for [`render_workspace_rows`].
+#[derive(Clone, Copy, Default)]
+pub(in crate::client::shell) struct WorkspaceRowEmphasis {
+    pub(in crate::client::shell) endpoint_active: bool,
+    pub(in crate::client::shell) selected: bool,
+    pub(in crate::client::shell) dragged: bool,
+    /// Whether the services chip is shown (and expanded) on the first row.
+    pub(in crate::client::shell) services_expanded: bool,
+}
+
 pub(in crate::client::shell) fn render_workspace_rows(
     buffer: &mut Buffer,
     area: Rect,
@@ -644,11 +687,16 @@ pub(in crate::client::shell) fn render_workspace_rows(
     indicators: crate::config::StatusIndicatorStyle,
     entry: &WorkspaceEntry,
     rows: Vec<Vec<crate::ui::ResolvedToken>>,
-    endpoint_active: bool,
-    selected: bool,
-    dragged: bool,
+    emphasis: WorkspaceRowEmphasis,
     palette: &Palette,
 ) {
+    let WorkspaceRowEmphasis {
+        endpoint_active,
+        selected,
+        dragged,
+        services_expanded,
+    } = emphasis;
+    let trailing_reserved = services_chip_width(workspace, services_expanded);
     for (row_index, row) in rows.iter().enumerate() {
         let y = area.y + row_index as u16;
         if y >= area.bottom() {
@@ -697,6 +745,12 @@ pub(in crate::client::shell) fn render_workspace_rows(
         } else {
             palette.overlay0
         });
+        let reserved = if row_index == 0 { trailing_reserved } else { 0 };
+        let width = area
+            .right()
+            .saturating_sub(2)
+            .saturating_sub(reserved)
+            .saturating_sub(x);
         let spans = crate::ui::resolved_token_spans(
             row,
             (
@@ -708,12 +762,9 @@ pub(in crate::client::shell) fn render_workspace_rows(
             secondary_style,
             Style::default().fg(palette.overlay1),
             palette,
-            area.right().saturating_sub(2).saturating_sub(x) as usize,
+            width as usize,
         );
-        Paragraph::new(Line::from(spans)).render(
-            Rect::new(x, y, area.right().saturating_sub(2).saturating_sub(x), 1),
-            buffer,
-        );
+        Paragraph::new(Line::from(spans)).render(Rect::new(x, y, width, 1), buffer);
     }
 
     let background = if selected {
@@ -732,4 +783,134 @@ pub(in crate::client::shell) fn render_workspace_rows(
             }
         }
     }
+}
+
+/// Number of extra rows a workspace block needs for its services: one per
+/// service when the workspace is expanded, otherwise none.
+pub(in crate::client::shell) fn service_row_count(
+    workspace: &ClientShellWorkspace,
+    expanded: bool,
+) -> u16 {
+    if expanded {
+        workspace.services.len().min(u16::MAX as usize) as u16
+    } else {
+        0
+    }
+}
+
+fn services_chip(workspace: &ClientShellWorkspace, expanded: bool) -> Option<String> {
+    if workspace.services.is_empty() {
+        return None;
+    }
+    let caret = if expanded { "▾" } else { "▸" };
+    Some(format!("{caret}{}", workspace.services.len()))
+}
+
+/// Width the services chip reserves at the right of the first workspace row,
+/// including the separating space.
+pub(in crate::client::shell) fn services_chip_width(
+    workspace: &ClientShellWorkspace,
+    expanded: bool,
+) -> u16 {
+    services_chip(workspace, expanded).map_or(0, |chip| display_width(&chip).saturating_add(1))
+}
+
+/// Draws the services chip on the first row of `workspace_rect`, right-aligned
+/// before the group-toggle column, and returns its hit rect.
+pub(in crate::client::shell) fn render_services_chip(
+    buffer: &mut Buffer,
+    workspace_rect: Rect,
+    workspace: &ClientShellWorkspace,
+    expanded: bool,
+    palette: &Palette,
+) -> Option<Rect> {
+    let chip = services_chip(workspace, expanded)?;
+    let width = display_width(&chip);
+    let right = workspace_rect.right().saturating_sub(2);
+    if right <= workspace_rect.x || width == 0 {
+        return None;
+    }
+    let x = right.saturating_sub(width).max(workspace_rect.x);
+    let rect = Rect::new(x, workspace_rect.y, right.saturating_sub(x), 1);
+    put_text(
+        buffer,
+        rect.x,
+        rect.y,
+        rect.width,
+        &chip,
+        Style::default().fg(palette.accent),
+    );
+    Some(rect)
+}
+
+/// Renders one row per service beneath a workspace and records a hit per row.
+pub(in crate::client::shell) fn render_service_rows(
+    buffer: &mut Buffer,
+    area: Rect,
+    workspace: &ClientShellWorkspace,
+    entry: &WorkspaceEntry,
+    palette: &Palette,
+    hits: &mut Vec<ServiceHit>,
+) {
+    let prefix = if entry.indented {
+        if entry.last_child {
+            "        "
+        } else {
+            "   │    "
+        }
+    } else {
+        "   "
+    };
+    for (row_index, service) in workspace.services.iter().enumerate() {
+        let y = area.y.saturating_add(row_index as u16);
+        if y >= area.bottom() {
+            break;
+        }
+        let right = area.right().saturating_sub(2);
+        let mut x = put_segment(
+            buffer,
+            area.x,
+            y,
+            right,
+            prefix,
+            Style::default().fg(palette.overlay0),
+        );
+        let (glyph, colour) = match service.liveness {
+            ClientShellServiceLiveness::Up => ("●", palette.green),
+            ClientShellServiceLiveness::Down => ("●", palette.red),
+            ClientShellServiceLiveness::Unknown => ("○", palette.overlay0),
+        };
+        x = put_segment(buffer, x, y, right, glyph, Style::default().fg(colour));
+        x = put_segment(
+            buffer,
+            x,
+            y,
+            right,
+            &format!(" {}", service.label),
+            Style::default().fg(palette.subtext0),
+        );
+        put_segment(
+            buffer,
+            x,
+            y,
+            right,
+            &format!("  {}", display_service_url(&service.url)),
+            Style::default().fg(palette.overlay0),
+        );
+        hits.push(ServiceHit {
+            rect: Rect::new(area.x, y, area.width, 1),
+            url: service.url.clone(),
+        });
+    }
+}
+
+/// Shortens a service URL for the sidebar: drops the `http://` scheme and a
+/// bare `localhost` host so `http://localhost:3000` reads as `:3000`.
+pub(in crate::client::shell) fn display_service_url(url: &str) -> &str {
+    let stripped = url.strip_prefix("http://").unwrap_or(url);
+    let stripped = stripped.strip_suffix('/').unwrap_or(stripped);
+    stripped
+        .strip_prefix("localhost")
+        .filter(|rest| rest.starts_with(':') || rest.is_empty())
+        .unwrap_or(stripped)
 }

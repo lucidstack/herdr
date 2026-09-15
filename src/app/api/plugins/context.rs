@@ -128,6 +128,13 @@ impl App {
                     context.tab_id = Some(tab_id.clone());
                     context
                 }),
+            EventData::ServicesChanged { workspace_id, .. } => self
+                .plugin_context_for_workspace_id(workspace_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.workspace_id = Some(workspace_id.clone());
+                    context
+                }),
             EventData::LayoutUpdated { layout } => self
                 .plugin_context_for_tab_id(&layout.tab_id, correlation_id)
                 .or_else(|| {

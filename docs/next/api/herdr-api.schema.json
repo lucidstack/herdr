@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 22,
+  "protocol": 23,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -710,6 +710,29 @@
             },
             {
               "properties": {
+                "services": {
+                  "items": {
+                    "$ref": "#/schemas/event/$defs/ServiceListEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "services_changed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_id",
+                "services"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/event/$defs/PaneLayoutSnapshot"
                 },
@@ -753,7 +776,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "services_changed"
           ],
           "type": "string"
         },
@@ -1021,6 +1045,47 @@
             "viewport_rows"
           ],
           "type": "object"
+        },
+        "ServiceListEntry": {
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "label": {
+              "type": "string"
+            },
+            "liveness": {
+              "$ref": "#/schemas/event/$defs/ServiceLivenessWire"
+            },
+            "source": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "id",
+            "label",
+            "url",
+            "source",
+            "liveness"
+          ],
+          "type": "object"
+        },
+        "ServiceLivenessWire": {
+          "enum": [
+            "unknown",
+            "up",
+            "down"
+          ],
+          "type": "string"
         },
         "SplitDirection": {
           "enum": [
@@ -3959,6 +4024,83 @@
           },
           "type": "object"
         },
+        "ServiceAddParams": {
+          "description": "Registers or updates a service. `workspace_id` wins over `pane_id`; when\nonly `pane_id` is given the pane's workspace owns the service.",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "label",
+            "url"
+          ],
+          "type": "object"
+        },
+        "ServiceListParams": {
+          "properties": {
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ServiceRemoveParams": {
+          "description": "Removes a service by `id` or `label` (one is required) from the workspace\nresolved like [`ServiceAddParams`].",
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "SplitDirection": {
           "enum": [
             "right",
@@ -4319,6 +4461,18 @@
               "required": [
                 "type",
                 "pane_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "services.changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
               ],
               "type": "object"
             },
@@ -4963,6 +5117,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ServiceAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ServiceListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "service.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/ServiceRemoveParams"
             }
           },
           "required": [
@@ -7496,6 +7698,29 @@
             },
             {
               "properties": {
+                "services": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ServiceListEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "services_changed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "workspace_id",
+                "services"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
                 },
@@ -7554,7 +7779,8 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "services_changed"
           ],
           "type": "string"
         },
@@ -9451,6 +9677,47 @@
             },
             {
               "properties": {
+                "service_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "service_added",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "service_id",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "services": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/ServiceListEntry"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "service_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "services"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "tab": {
                   "$ref": "#/schemas/success_response/$defs/TabInfo"
                 },
@@ -10620,6 +10887,47 @@
             "live_handoff"
           ],
           "type": "object"
+        },
+        "ServiceListEntry": {
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "label": {
+              "type": "string"
+            },
+            "liveness": {
+              "$ref": "#/schemas/success_response/$defs/ServiceLivenessWire"
+            },
+            "source": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "id",
+            "label",
+            "url",
+            "source",
+            "liveness"
+          ],
+          "type": "object"
+        },
+        "ServiceLivenessWire": {
+          "enum": [
+            "unknown",
+            "up",
+            "down"
+          ],
+          "type": "string"
         },
         "SessionSnapshot": {
           "properties": {

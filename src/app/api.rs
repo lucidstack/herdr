@@ -9,6 +9,7 @@ mod pane_graphics;
 mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
+mod services;
 mod session;
 mod tabs;
 mod workspaces;
@@ -39,6 +40,9 @@ impl App {
                 segment_index,
                 result,
             } => self.handle_tab_bar_command_finished(generation, segment_index, result),
+            AppEvent::ServiceLivenessProbed { results } => {
+                self.handle_service_liveness_probed(results)
+            }
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -68,6 +72,20 @@ impl App {
         let changed = self
             .state
             .apply_workspace_git_statuses(&self.terminal_runtimes, results);
+        if changed {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changed
+    }
+
+    fn handle_service_liveness_probed(
+        &mut self,
+        results: Vec<crate::app::service_liveness::ServiceLivenessProbeResult>,
+    ) -> bool {
+        self.service_liveness_prober
+            .mark_probe_completed(Instant::now());
+        let changed = self.state.apply_service_liveness(results);
         if changed {
             self.render_dirty.request_generic();
             self.render_notify.notify_one();
@@ -113,6 +131,11 @@ impl App {
         } = ev
         {
             self.handle_git_status_refreshed(results, cache_updates);
+            return Vec::new();
+        }
+
+        if let AppEvent::ServiceLivenessProbed { results } = ev {
+            self.handle_service_liveness_probed(results);
             return Vec::new();
         }
 
@@ -1027,6 +1050,11 @@ impl App {
             }
             Method::WorkspaceClose(target) => {
                 return self.handle_workspace_close(request.id, target);
+            }
+            Method::ServiceAdd(params) => return self.handle_service_add(request.id, params),
+            Method::ServiceList(params) => return self.handle_service_list(request.id, params),
+            Method::ServiceRemove(params) => {
+                return self.handle_service_remove(request.id, params);
             }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {

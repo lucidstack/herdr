@@ -39,6 +39,7 @@ pub(super) fn command() -> Command {
         .subcommand(api_command())
         .subcommand(workspace_command())
         .subcommand(worktree_command())
+        .subcommand(service_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -264,6 +265,36 @@ fn worktree_command() -> Command {
                 .arg(option("workspace", "ID"))
                 .arg(flag("force"))
                 .arg(flag("trust-repository")),
+        )
+}
+
+fn service_command() -> Command {
+    Command::new("service")
+        .about("Register dev servers and ports shown under a workspace")
+        .subcommand(
+            Command::new("add")
+                .about("Register or update a service by label")
+                .arg(required("label", "LABEL"))
+                .arg(required("url", "URL"))
+                .arg(option("workspace", "WORKSPACE_ID"))
+                .arg(option("source", "TEXT")),
+        )
+        .subcommand(
+            Command::new("list")
+                .about("List registered services")
+                .arg(option("workspace", "WORKSPACE_ID")),
+        )
+        .subcommand(
+            Command::new("remove")
+                .about("Remove a service by id or label")
+                .arg(Arg::new("service_id").value_name("SERVICE_ID"))
+                .arg(option("label", "LABEL"))
+                .arg(option("workspace", "WORKSPACE_ID"))
+                .group(
+                    ArgGroup::new("selector")
+                        .args(["service_id", "label"])
+                        .required(true),
+                ),
         )
 }
 

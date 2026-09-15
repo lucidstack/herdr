@@ -435,7 +435,13 @@ fn restore_workspace(
                     )
                 })
                 .collect(),
-            next_service_id: snap.services.iter().map(|s| s.id).max().unwrap_or(0) + 1,
+            next_service_id: snap.next_service_id.max(
+                snap.services
+                    .iter()
+                    .map(|service| service.id)
+                    .max()
+                    .map_or(1, |max| max.saturating_add(1)),
+            ),
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
             tabs,
             #[cfg(test)]
@@ -1217,6 +1223,8 @@ mod tests {
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 0,
             }],
             active: Some(0),
@@ -1258,6 +1266,94 @@ mod tests {
         assert_eq!(session.source, "herdr:opencode");
         assert_eq!(session.agent, "opencode");
         assert_eq!(session.session_ref.value, "opencode-session");
+    }
+
+    #[tokio::test]
+    async fn restore_rehydrates_services_with_unknown_liveness_and_id_counter() {
+        let cwd = std::env::current_dir().unwrap();
+        // A pre-services snapshot: no `services` or `next_service_id` keys.
+        let legacy = serde_json::json!({
+            "version": super::super::snapshot::SNAPSHOT_VERSION,
+            "workspaces": [{
+                "id": "w1",
+                "identity_cwd": cwd,
+                "tabs": [{
+                    "layout": {"Pane": 0},
+                    "panes": {"0": {"cwd": cwd}},
+                    "zoomed": false,
+                    "focused": 0,
+                    "root_pane": 0
+                }]
+            }],
+            "active": 0,
+            "selected": 0
+        });
+        let mut snapshot: SessionSnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(snapshot.workspaces[0].services.is_empty());
+        assert_eq!(snapshot.workspaces[0].next_service_id, 0);
+
+        snapshot.workspaces[0].services = vec![
+            crate::api::schema::ServiceSnapshot {
+                id: 2,
+                label: "Rails".into(),
+                url: "http://localhost:3000".into(),
+                source: "cli".into(),
+            },
+            crate::api::schema::ServiceSnapshot {
+                id: 5,
+                label: "Vite".into(),
+                url: "http://localhost:5173".into(),
+                source: "agent".into(),
+            },
+        ];
+        snapshot.workspaces[0].next_service_id = 9;
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let services = &workspaces[0].services;
+        assert_eq!(
+            services
+                .iter()
+                .map(|service| (service.id, service.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(2, "Rails"), (5, "Vite")]
+        );
+        assert!(services
+            .iter()
+            .all(|service| service.liveness == crate::service::ServiceLiveness::Unknown));
+        assert_eq!(workspaces[0].next_service_id, 9);
+
+        snapshot.workspaces[0].next_service_id = 0;
+        let (events, _event_rx) = mpsc::channel(4);
+        let (workspaces, _terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        assert_eq!(
+            workspaces[0].next_service_id, 6,
+            "without a persisted counter the next id follows the highest restored id"
+        );
     }
 
     #[tokio::test]
@@ -1310,6 +1406,8 @@ mod tests {
                     focused: Some(10),
                     root_pane: Some(10),
                 }],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 0,
             }],
             active: Some(0),
@@ -1417,6 +1515,8 @@ mod tests {
                         root_pane: Some(13),
                     },
                 ],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 3,
             }],
             active: Some(0),
@@ -1479,6 +1579,8 @@ mod tests {
                 focused: Some(10),
                 root_pane: Some(10),
             }],
+            services: Vec::new(),
+            next_service_id: 0,
             active_tab: 0,
         };
         let mut next_public_pane_number = 1;
@@ -1528,6 +1630,8 @@ mod tests {
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 0,
             }],
             active: Some(0),
@@ -1722,6 +1826,8 @@ mod tests {
                     focused: Some(0),
                     root_pane: Some(0),
                 }],
+                services: Vec::new(),
+                next_service_id: 0,
                 active_tab: 0,
             }],
             active: Some(0),

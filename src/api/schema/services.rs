@@ -1,20 +1,18 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Registers or updates a service. `workspace_id` wins over `pane_id`; when
+/// only `pane_id` is given the pane's workspace owns the service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceAddParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     pub label: String,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ServiceAddResult {
-    pub service_id: u64,
-    pub workspace_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -33,11 +31,8 @@ pub struct ServiceListEntry {
     pub liveness: ServiceLivenessWire,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ServiceListResult {
-    pub services: Vec<ServiceListEntry>,
-}
-
+/// Removes a service by `id` or `label` (one is required) from the workspace
+/// resolved like [`ServiceAddParams`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceRemoveParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,9 +44,6 @@ pub struct ServiceRemoveParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ServiceRemoveResult {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +64,7 @@ impl From<crate::service::ServiceLiveness> for ServiceLivenessWire {
     }
 }
 
+/// Persisted form of a service; liveness is never persisted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceSnapshot {
     pub id: u64,

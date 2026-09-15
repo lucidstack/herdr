@@ -142,6 +142,7 @@ pub(super) enum ClientMobileTarget {
 pub(super) struct ShellHitMap {
     pub(super) machines: Vec<MachineHit>,
     pub(super) workspaces: Vec<WorkspaceHit>,
+    pub(super) services: Vec<ServiceHit>,
     pub(super) workspace_body: Rect,
     pub(super) workspace_scrollbar: Rect,
     pub(super) workspace_scroll_metrics: Option<crate::pane::ScrollMetrics>,
@@ -289,6 +290,14 @@ pub(super) struct WorkspaceHit {
     pub(super) workspace_id: String,
     pub(super) indented: bool,
     pub(super) group_toggle: Option<(Rect, String)>,
+    /// Chip that expands or collapses the workspace's registered services.
+    pub(super) services_toggle: Option<Rect>,
+}
+
+/// One rendered service row; clicking it opens the service URL.
+pub(super) struct ServiceHit {
+    pub(super) rect: Rect,
+    pub(super) url: String,
 }
 
 #[derive(Debug)]
@@ -915,6 +924,9 @@ pub(crate) struct ClientShellState {
     pub(super) tab_press: Option<ClientTabPress>,
     pub(super) collapsed_groups: HashSet<String>,
     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+    /// Workspaces whose registered services are shown beneath their row.
+    /// Presentation-only state; services default to collapsed.
+    pub(super) expanded_services: HashSet<(ClientEndpointId, String)>,
     pub(super) workspace_scroll: usize,
     pub(super) agent_scroll: usize,
     pub(super) tab_scroll: usize,
@@ -1077,6 +1089,7 @@ impl ClientShellState {
             tab_press: None,
             collapsed_groups: preferences.collapsed_groups.into_iter().collect(),
             remote_collapsed_groups,
+            expanded_services: HashSet::new(),
             workspace_scroll: 0,
             agent_scroll: 0,
             tab_scroll: 0,
@@ -1196,6 +1209,17 @@ impl ClientShellState {
         };
         if !groups.remove(&key) {
             groups.insert(key);
+        }
+    }
+
+    pub(super) fn toggle_services_expanded(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        workspace_id: String,
+    ) {
+        let key = (endpoint_id.clone(), workspace_id);
+        if !self.expanded_services.remove(&key) {
+            self.expanded_services.insert(key);
         }
     }
 

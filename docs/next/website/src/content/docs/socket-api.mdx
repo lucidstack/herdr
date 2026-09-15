@@ -415,38 +415,34 @@ Use at most one of `workspace_id` or `cwd` for `worktree.list`, `worktree.create
 Worktree commands also emit lifecycle events. `worktree.create` emits `workspace.created`, `tab.created`, `pane.created`, and `worktree.created`. `worktree.open` emits `worktree.opened`, and it also emits workspace/tab/pane creation events when it opens a new Herdr workspace. `worktree.remove` emits `worktree.removed`; if the linked workspace is still open, it also emits `workspace.closed`.
 
 `workspace.close` rejects closing a primary workspace while linked-worktree workspaces are open unless its params include `"close_group": true`, returning `workspace_group_close_required` when explicit group intent is missing. An explicit group close emits one `workspace.closed` event for each workspace it closes.
-## Services
 
-Service methods register long-running development servers and listening ports with a workspace. Each service has a label, URL, optional source attribution, and a liveness status determined by periodic TCP connect probes.
+### Services
 
-`service.add` registers a new service or updates an existing one by label (upsert behaviour). Accepted URL forms: `http://…`, `https://…`, `host:port`, `localhost:3000`, `:3000` (→ `http://localhost:3000`).
+Service methods register long-running development servers and listening ports against a workspace. Each service has a workspace-scoped numeric `id`, a `label`, a normalised `url`, a free-text `source`, and a server-computed `liveness` of `unknown`, `up`, or `down`.
 
-Attribution happens automatically from the calling context: when invoked from a CLI pane via `herdr service add` inside Herdr, it resolves the workspace from the injected `HERDR_WORKSPACE_ID` environment variable (or falls back to `HERDR_PANE_ID` → the pane's workspace). Outside a pane, `workspace_id` is required.
+`service.add` and `service.remove` resolve their workspace the same way: an explicit `workspace_id` wins, otherwise `pane_id` selects the workspace that owns that pane, otherwise the request fails with `attribution_required`. Processes inside a Herdr pane can pass the injected `HERDR_WORKSPACE_ID` or `HERDR_PANE_ID` values directly.
 
-Register a service:
+`service.add` is an upsert keyed by `label`: an existing label keeps its `id`, takes the new `url` and `source`, and resets its liveness to `unknown` when the URL changed. `url` accepts `http://…`, `https://…`, `host:port`, and `:port` (normalised to `http://localhost:port`); anything without a resolvable host and port fails with `invalid_url`. `source` defaults to `cli`.
 
 ```json
-{"id":"req_1","method":"service.add","params":{"workspace_id":"w1","label":"Rails server","url":":3000","source":"cli"}}
+{"id":"req_1","method":"service.add","params":{"pane_id":"w1:p1","label":"Rails server","url":":3000","source":"agent"}}
+{"id":"req_1","result":{"type":"service_added","service_id":1,"workspace_id":"w1"}}
 ```
 
-List services for a workspace:
+`service.list` takes an optional `workspace_id`; omit it to list every workspace's services.
 
 ```json
 {"id":"req_2","method":"service.list","params":{"workspace_id":"w1"}}
+{"id":"req_2","result":{"type":"service_list","services":[{"workspace_id":"w1","id":1,"label":"Rails server","url":"http://localhost:3000","source":"agent","liveness":"up"}]}}
 ```
 
-Remove a service by ID or label:
+`service.remove` takes exactly one of `id` or `label` plus the attribution fields above, and returns `ok`. It fails with `service_selector_required` when both are missing and `service_not_found` when nothing matches.
 
 ```json
-{"id":"req_3","method":"service.remove","params":{"workspace_id":"w1","id":1}}
+{"id":"req_3","method":"service.remove","params":{"workspace_id":"w1","label":"Rails server"}}
 ```
 
-Service responses include the service ID, label, URL, source, and liveness status (one of `unknown`, `up`, `down`). Liveness is unknown until the first probe succeeds or fails; it is not persisted across server restarts. Services persist in the session snapshot.
-
-`service.add` errors with `attribution_required` when workspace cannot be resolved, `workspace_not_found` when the specified workspace does not exist, `pane_not_found` when the caller references an unknown pane, or `invalid_url` when the URL is malformed.
-
-`service.remove` errors with `service_not_found` when neither the ID nor label matches an existing service.
-
+Liveness comes from a server-side probe that runs roughly every five seconds while at least one service exists, attempting a short TCP connect to each service's host and port; the probe never runs while a previous one is still in flight. Services persist in the session snapshot; liveness does not, so restored services report `unknown` until the first probe completes.
 
 ## Agent view queries
 
@@ -871,8 +867,8 @@ updated `PaneLayoutSnapshot` for one tab. Clients that bootstrap with
 `workspace_id` and `tab_id`.
 
 Worktree event subscriptions include `worktree.created`, `worktree.opened`, and `worktree.removed`. Worktree events describe Git checkout lifecycle. `worktree.created` includes the opened `workspace` and created `worktree`. `worktree.opened` includes the target `workspace`, opened `worktree`, and `already_open`. `worktree.removed` includes the `workspace_id`, removed `worktree`, and `forced`.
-Service event subscriptions include `services_changed`, which is emitted when the service list for a workspace changes (service added, updated, or removed). `services_changed` includes the `workspace_id` of the affected workspace.
 
+The `services.changed` subscription delivers `services_changed` whenever a workspace's service list changes through `service.add` or `service.remove`. Each event includes the affected `workspace_id` and the full updated `services` list in the same shape as `service.list`. Liveness probe results do not emit events; poll `service.list` or read the shell snapshot for liveness.
 
 Use `events.subscribe` for lifecycle events. Dedicated wait helpers are documented separately when a one-shot wait is supported.
 

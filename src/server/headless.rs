@@ -3378,7 +3378,7 @@ impl HeadlessServer {
         }
         self.app
             .service_liveness_prober
-            .maybe_probe(&self.app.state.workspaces);
+            .start_if_due(now, &self.app.state.workspaces);
 
         if self
             .app

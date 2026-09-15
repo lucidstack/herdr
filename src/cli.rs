@@ -34,6 +34,7 @@ mod protocol_guard;
 mod runtime;
 mod server;
 mod server_not_running;
+mod service;
 mod spec;
 mod status;
 mod tab;
@@ -122,6 +123,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "machine" => machine::run_machine_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
+        "service" => service::run_service_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,

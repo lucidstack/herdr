@@ -1308,6 +1308,29 @@ impl Workspace {
             self.active_tab,
             self.tabs.len()
         );
+        let mut service_ids = std::collections::HashSet::new();
+        let mut service_labels = std::collections::HashSet::new();
+        for service in &self.services {
+            assert!(
+                service.id < self.next_service_id,
+                "workspace {} service id {} is not below next_service_id {}",
+                self.id,
+                service.id,
+                self.next_service_id
+            );
+            assert!(
+                service_ids.insert(service.id),
+                "workspace {} has duplicate service id {}",
+                self.id,
+                service.id
+            );
+            assert!(
+                service_labels.insert(service.label.as_str()),
+                "workspace {} has duplicate service label {:?}",
+                self.id,
+                service.label
+            );
+        }
 
         let mut tab_numbers = std::collections::HashSet::new();
         let mut max_tab_number = 0usize;

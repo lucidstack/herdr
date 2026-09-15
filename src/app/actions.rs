@@ -1390,6 +1390,35 @@ fn is_trailing_token_wrapper(ch: char) -> bool {
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// Applies background liveness probe results. Results for workspaces or
+    /// services that no longer exist are ignored. Returns whether any
+    /// liveness value changed.
+    pub fn apply_service_liveness(
+        &mut self,
+        results: Vec<crate::app::service_liveness::ServiceLivenessProbeResult>,
+    ) -> bool {
+        let mut changed = false;
+        for result in results {
+            let Some(service) = self
+                .workspaces
+                .iter_mut()
+                .find(|ws| ws.id == result.workspace_id)
+                .and_then(|ws| {
+                    ws.services
+                        .iter_mut()
+                        .find(|service| service.id == result.service_id)
+                })
+            else {
+                continue;
+            };
+            if service.liveness != result.liveness {
+                service.liveness = result.liveness;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub fn apply_workspace_git_statuses(
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -1675,6 +1704,7 @@ impl AppState {
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::ServiceLivenessProbed { .. } => Vec::new(),
         }
     }
 

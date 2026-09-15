@@ -1,17 +1,16 @@
-//! Long-running dev server/listening port registry.
+//! Long-running dev servers and listening ports registered against a workspace.
 
-use std::borrow::Cow;
-
-/// A user-registered long-running dev server/listening endpoint owned by a workspace.
+/// A registered long-running dev server or listening endpoint owned by a workspace.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Service {
-    /// Workspace-scoped monotonic ID; never reused after removal.
+    /// Workspace-scoped monotonic id; never reused after removal.
     pub id: u64,
     pub label: String,
+    /// Normalised `http://` or `https://` URL; see [`normalise_url`].
     pub url: String,
-    /// Free-text attribution of the registering source (e.g. "cli", "plugin:<id>").
+    /// Free-text attribution of the registering source (for example `cli` or `plugin:<id>`).
     pub source: String,
-    /// Server-computed; never trusted across a restart. Not serialized.
+    /// Server-computed by the liveness probe; never trusted across a restart.
     #[serde(skip)]
     pub liveness: ServiceLiveness,
 }
@@ -25,7 +24,6 @@ pub enum ServiceLiveness {
 }
 
 impl Service {
-    /// Creates a new service with liveness initialised to Unknown.
     pub fn new(
         id: u64,
         label: impl Into<String>,
@@ -41,64 +39,74 @@ impl Service {
         }
     }
 
-    /// Normalises a URL to http/https URL or resolvable host:port form.
-    /// Accepts: "http://...", "https://...", "host:port", "localhost:3000", ":3000" (→ http://localhost:3000).
-    /// Returns None for invalid URLs (missing host or non-numeric port).
-    pub fn normalise_url(input: &str) -> Option<Cow<'static, str>> {
-        let trimmed = input.trim();
-
-        // Already a valid http/https URL.
-        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            // Basic validation: must have some content after protocol.
-            if trimmed.len() > 8 && !trimmed.ends_with("://") {
-                return Some(Cow::Owned(trimmed.to_string()));
-            }
-            return None;
-        }
-
-        // Bare host:port or :port format.
-        if let Some(colon_idx) = trimmed.rfind(':') {
-            let host_part = &trimmed[..colon_idx];
-            let port_part = &trimmed[colon_idx + 1..];
-
-            // Validate port is numeric and in valid range.
-            if let Ok(_port) = port_part.parse::<u16>() {
-                let host = if host_part.is_empty() {
-                    "localhost"
-                } else {
-                    host_part
-                };
-                return Some(Cow::Owned(format!("http://{}:{}", host, port_part)));
-            }
-            return None;
-        }
-
-        None
+    /// The `(host, port)` the liveness probe connects to, derived from the
+    /// normalised URL. Missing ports default from the scheme.
+    pub fn probe_target(&self) -> Option<(String, u16)> {
+        probe_target(&self.url)
     }
 }
 
-/// Removes a service by ID or label (one must be Some).
-pub fn remove_service_by_id_or_label(
-    services: &mut Vec<Service>,
-    id: Option<u64>,
-    label: Option<&str>,
-) -> Option<Service> {
-    match (id, label) {
-        (Some(id), _) => services
-            .iter()
-            .position(|s| s.id == id)
-            .map(|pos| services.remove(pos)),
-        (None, Some(label)) => services
-            .iter()
-            .position(|s| s.label == label)
-            .map(|pos| services.remove(pos)),
-        _ => None,
+/// Normalises user input into an `http://` or `https://` URL with a resolvable host.
+///
+/// Accepted forms: `http://host[:port][/path]`, `https://host[:port][/path]`,
+/// `host:port`, and `:port` (which becomes `http://localhost:port`). Anything
+/// without a host, or with a non-numeric port, is rejected.
+pub fn normalise_url(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return probe_target(trimmed).map(|_| trimmed.to_string());
+    }
+    if trimmed.contains("://") || trimmed.contains('/') {
+        return None;
+    }
+    let (host, port) = trimmed.rsplit_once(':')?;
+    port.parse::<u16>().ok()?;
+    let host = if host.is_empty() { "localhost" } else { host };
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        return None;
+    }
+    Some(format!("http://{host}:{port}"))
 }
 
-/// Finds a service by label; useful for UPSERT logic.
-pub fn find_service_by_label(services: &[Service], label: &str) -> Option<usize> {
-    services.iter().position(|s| s.label == label)
+fn probe_target(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, tail) = bracketed.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = match tail.strip_prefix(':') {
+            Some(port) => port.parse::<u16>().ok()?,
+            None if tail.is_empty() => default_port,
+            None => return None,
+        };
+        return Some((host.to_string(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => {
+            if host.is_empty() {
+                return None;
+            }
+            Some((host.to_string(), port.parse::<u16>().ok()?))
+        }
+        Some(_) => None,
+        None => Some((authority.to_string(), default_port)),
+    }
 }
 
 #[cfg(test)]
@@ -106,87 +114,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_new_initialises_liveness_to_unknown() {
-        let svc = Service::new(1, "Rails", "http://localhost:3000", "cli");
-        assert_eq!(svc.id, 1);
-        assert_eq!(svc.label, "Rails");
-        assert_eq!(svc.liveness, ServiceLiveness::Unknown);
-    }
-
-    #[test]
-    fn normalise_url_accepts_http_https() {
+    fn normalise_url_keeps_full_urls() {
         assert_eq!(
-            Service::normalise_url("http://localhost:3000").as_deref(),
-            Some("http://localhost:3000")
+            normalise_url(" http://localhost:3000/admin ").as_deref(),
+            Some("http://localhost:3000/admin")
         );
         assert_eq!(
-            Service::normalise_url("https://api.example.com").as_deref(),
+            normalise_url("https://api.example.com").as_deref(),
             Some("https://api.example.com")
         );
     }
 
     #[test]
-    fn normalise_url_accepts_host_port() {
+    fn normalise_url_expands_host_port_and_bare_port() {
         assert_eq!(
-            Service::normalise_url("localhost:3000").as_deref(),
-            Some("http://localhost:3000")
-        );
-        assert_eq!(
-            Service::normalise_url("example.com:8080").as_deref(),
+            normalise_url("example.com:8080").as_deref(),
             Some("http://example.com:8080")
         );
-    }
-
-    #[test]
-    fn normalise_url_normalises_bare_port() {
         assert_eq!(
-            Service::normalise_url(":3000").as_deref(),
+            normalise_url(":3000").as_deref(),
             Some("http://localhost:3000")
         );
+    }
+
+    #[test]
+    fn normalise_url_rejects_unresolvable_input() {
+        for input in [
+            "",
+            "localhost",
+            "localhost:abc",
+            ":99999",
+            "http://",
+            "http://:3000",
+            "ftp://host:21",
+            "rails server",
+        ] {
+            assert_eq!(normalise_url(input), None, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn probe_target_defaults_port_from_scheme() {
         assert_eq!(
-            Service::normalise_url(":8000").as_deref(),
-            Some("http://localhost:8000")
+            probe_target("http://localhost"),
+            Some(("localhost".into(), 80))
+        );
+        assert_eq!(
+            probe_target("https://example.com/path?x=1"),
+            Some(("example.com".into(), 443))
+        );
+        assert_eq!(
+            probe_target("https://user@example.com:8443"),
+            Some(("example.com".into(), 8443))
         );
     }
 
     #[test]
-    fn normalise_url_rejects_invalid_port() {
-        assert_eq!(Service::normalise_url("localhost:abc"), None);
-        assert_eq!(Service::normalise_url(":99999"), None);
-        assert_eq!(Service::normalise_url(""), None);
-    }
-
-    #[test]
-    fn remove_service_by_id() {
-        let mut services = vec![
-            Service::new(1, "A", "http://a", "cli"),
-            Service::new(2, "B", "http://b", "cli"),
-        ];
-        let removed = remove_service_by_id_or_label(&mut services, Some(1), None);
-        assert_eq!(removed.map(|s| s.label), Some("A".into()));
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].label, "B");
-    }
-
-    #[test]
-    fn remove_service_by_label() {
-        let mut services = vec![
-            Service::new(1, "Rails", "http://a", "cli"),
-            Service::new(2, "Webpack", "http://b", "cli"),
-        ];
-        let removed = remove_service_by_id_or_label(&mut services, None, Some("Rails"));
-        assert_eq!(removed.map(|s| s.id), Some(1));
-        assert_eq!(services.len(), 1);
-        assert_eq!(services[0].label, "Webpack");
-    }
-
-    #[test]
-    fn test_find_service_by_label() {
-        let services = vec![
-            Service::new(1, "A", "http://a", "cli"),
-            Service::new(2, "B", "http://b", "cli"),
-        ];
-        assert_eq!(find_service_by_label(&services, "B"), Some(1));
-        assert_eq!(find_service_by_label(&services, "C"), None);
+    fn probe_target_handles_ipv6_literals() {
+        assert_eq!(
+            probe_target("http://[::1]:3000"),
+            Some(("::1".into(), 3000))
+        );
+        assert_eq!(probe_target("http://[::1]"), Some(("::1".into(), 80)));
+        assert_eq!(probe_target("http://::1:3000"), None);
     }
 }

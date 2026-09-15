@@ -613,6 +613,7 @@ fn main() -> io::Result<()> {
         println!("       herdr channel <subcommand> ...");
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
+        println!("       herdr service <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
         println!("       herdr notification <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
@@ -661,6 +662,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr worktree <subcommand>",
                 "Git worktree helpers over the socket API",
+            ),
+            (
+                "herdr service <subcommand>",
+                "Register dev servers and ports shown under a workspace",
             ),
             ("herdr tab <subcommand>", "Tab helpers over the socket API"),
             (
