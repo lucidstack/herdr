@@ -8,6 +8,7 @@ mod sound;
 mod tab_bar;
 mod theme;
 mod window_title;
+mod work_items;
 mod write;
 
 pub use self::{
@@ -36,6 +37,7 @@ pub use self::{
     tab_bar::TabBarRightEntryConfig,
     theme::{parse_color, CustomThemeColors, ModeThemeColors, ThemeConfig, THEME_NAMES},
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
+    work_items::{GithubRepoConfig, GithubWorkItemsConfig, WorkItemsConfig},
 };
 
 pub(crate) use self::keybinds::parse_key_combo;

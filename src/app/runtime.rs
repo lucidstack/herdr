@@ -160,6 +160,7 @@ impl App {
             self.pending_agent_resume_deadline,
             self.session_save_deadline,
             self.next_tab_bar_status_deadline(),
+            self.work_items.next_deadline(),
             render_deadline,
         ]
         .into_iter()

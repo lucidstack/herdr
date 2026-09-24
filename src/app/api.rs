@@ -11,6 +11,7 @@ pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
 mod tabs;
+mod work_items;
 mod workspaces;
 mod worktrees;
 
@@ -39,6 +40,7 @@ impl App {
                 segment_index,
                 result,
             } => self.handle_tab_bar_command_finished(generation, segment_index, result),
+            AppEvent::WorkItems(event) => self.handle_work_items_event(*event).0,
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -159,6 +161,10 @@ impl App {
 
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_api_worktree_add_finished(*result);
+            return Vec::new();
+        }
+        if let AppEvent::WorkItems(event) = ev {
+            let _ = self.handle_work_items_event(*event);
             return Vec::new();
         }
 
@@ -746,6 +752,9 @@ impl App {
     }
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
+        if let crate::api::schema::EventData::WorkspaceClosed { workspace_id, .. } = &event.data {
+            self.work_items_workspace_closed(workspace_id);
+        }
         self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);
     }
@@ -1045,6 +1054,13 @@ impl App {
                     "invalid_request",
                     "worktree.remove is handled asynchronously by the app runtime",
                 );
+            }
+            Method::WorkItemList(_) => return self.handle_work_item_list(request.id),
+            Method::WorkItemMarkSeen(params) => {
+                return self.handle_work_item_mark_seen(request.id, params)
+            }
+            Method::WorkItemChoose(params) => {
+                return self.handle_work_item_choose(request.id, params)
             }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),

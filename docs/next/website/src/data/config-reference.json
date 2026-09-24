@@ -1439,6 +1439,72 @@
       ]
     },
     {
+      "id": "work_items",
+      "title": "Work items",
+      "keys": [
+        {
+          "key": "work_items.github.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Poll GitHub for pull requests that request your review; setting the [work_items.github] table enables the source. Map local clones with [[work_items.github.repos]] entries (name, path, remote, install_command, server_command, server_port, frontend_patterns) to offer reviewing locally in a Git worktree."
+        },
+        {
+          "key": "work_items.github.gh_path",
+          "type": "string",
+          "default": "\"gh\"",
+          "description": "GitHub CLI used for API calls and authentication."
+        },
+        {
+          "key": "work_items.github.query",
+          "type": "string",
+          "default": "\"is:pr is:open review-requested:@me archived:false\"",
+          "description": "GitHub search query."
+        },
+        {
+          "key": "work_items.github.poll_interval_seconds",
+          "type": "integer",
+          "default": "60",
+          "description": "Seconds between polls, clamped to 30–3600."
+        },
+        {
+          "key": "work_items.github.small_diff_lines",
+          "type": "integer",
+          "default": "20",
+          "description": "Pull requests with at most this many changed lines default to reviewing on GitHub."
+        },
+        {
+          "key": "work_items.github.docs_patterns",
+          "type": "list of strings",
+          "default": "[\"\\\\.(md|mdx|markdown|rst|txt|adoc)$\", \"^docs/\"]",
+          "description": "Regexes matched against changed paths; documentation-only pull requests default to reviewing on GitHub."
+        },
+        {
+          "key": "work_items.github.frontend_patterns",
+          "type": "list of strings",
+          "default": "[\"\\\\.(tsx|jsx|vue|svelte|css|scss|sass|less|html)$\"]",
+          "description": "Regexes matched against changed paths that mark a pull request as touching front-end code."
+        },
+        {
+          "key": "work_items.workspace.agent",
+          "type": "string",
+          "default": "\"claude\"",
+          "description": "Agent started and briefed in the first tab of a local review workspace. Empty disables it."
+        },
+        {
+          "key": "work_items.workspace.editor_command",
+          "type": "string",
+          "default": "\"nvim .\"",
+          "description": "Command run in the editor tab. Empty disables the tab."
+        },
+        {
+          "key": "work_items.workspace.lazygit_command",
+          "type": "string",
+          "default": "\"lazygit\"",
+          "description": "Command run in the Git tab. Empty disables the tab."
+        }
+      ]
+    },
+    {
       "id": "remote",
       "title": "Remote",
       "keys": [

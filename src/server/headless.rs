@@ -3410,6 +3410,7 @@ impl HeadlessServer {
             changed = true;
         }
 
+        changed |= self.app.run_work_items_tasks(now);
         changed |= self.app.handle_tab_bar_status_tasks(now);
 
         if geometry_dirty {
