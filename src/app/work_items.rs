@@ -15,7 +15,9 @@ use crate::api::schema::{
     WorkspaceInfo, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 use crate::events::AppEvent;
-use crate::work_items::provision::{self, AgentAttempt, PendingResponse, SourceReady};
+use crate::work_items::provision::{
+    self, AgentAttempt, BriefConfirmation, PendingResponse, SourceReady,
+};
 use crate::work_items::source::WorkspaceSource;
 use crate::work_items::{
     OwnedWorktree, PendingRemoval, StorePolicy, WorkItemNotice, WorkItemsEvent,
@@ -25,6 +27,8 @@ use crate::work_items::{
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 const AGENT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BRIEF_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long a briefed agent may stay idle before the brief counts as not submitted.
+const BRIEF_START_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often a deferred worktree request is checked for its response.
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_AGENT_NAME_SUFFIX: usize = 9;
@@ -645,6 +649,8 @@ impl App {
             }
         } else if job.brief.is_some() {
             self.advance_work_item_brief(job_id, now);
+        } else if job.brief_confirmation.is_some() {
+            self.confirm_work_item_brief(job_id, now);
         }
         self.work_items.finish_job_if_done(job_id);
     }
@@ -713,6 +719,7 @@ impl App {
         if let Some(job) = self.work_items.job_mut(job_id) {
             job.agent_start = None;
             job.brief = None;
+            job.brief_confirmation = None;
         }
         self.set_work_item_agent_step(job_id, WorkItemStepStatus::Failed, Some(message));
     }
@@ -795,8 +802,16 @@ impl App {
             Next::Done => {
                 if let Some(job) = self.work_items.job_mut(job_id) {
                     job.brief = None;
+                    job.brief_confirmation = Some(BriefConfirmation {
+                        sent: now,
+                        next_check: now + BRIEF_POLL_INTERVAL,
+                    });
                 }
-                self.set_work_item_agent_step(job_id, WorkItemStepStatus::Done, None);
+                self.set_work_item_agent_step(
+                    job_id,
+                    WorkItemStepStatus::Running,
+                    Some("waiting for the agent to start".into()),
+                );
             }
             Next::Fail(message) => self.fail_work_item_agent(job_id, message),
             Next::Send { agent_name, text } => {
@@ -820,6 +835,64 @@ impl App {
                     },
                     tx,
                 );
+            }
+        }
+    }
+
+    /// A submitted prompt is only proof the text reached the pane. The step completes when the
+    /// agent is seen working (or asking for permission); an agent still idle after
+    /// `BRIEF_START_TIMEOUT` most likely has the brief sitting unsent in its input.
+    fn confirm_work_item_brief(&mut self, job_id: u64, now: Instant) {
+        let Some(job) = self.work_items.job(job_id) else {
+            return;
+        };
+        let Some(confirmation) = job.brief_confirmation else {
+            return;
+        };
+        if confirmation.next_check > now {
+            return;
+        }
+        let started = job.agent_name.as_deref().is_some_and(|name| {
+            self.resolve_agent_target(name)
+                .ok()
+                .and_then(|target| {
+                    let workspace = self.state.workspaces.get(target.ws_idx)?;
+                    self.state
+                        .terminals
+                        .get(workspace.terminal_id(target.pane_id)?)
+                })
+                .is_some_and(|terminal| {
+                    matches!(
+                        terminal.state,
+                        crate::detect::AgentState::Working | crate::detect::AgentState::Blocked
+                    )
+                })
+        });
+        let outcome = if started {
+            Some((WorkItemStepStatus::Done, None))
+        } else if now.saturating_duration_since(confirmation.sent) >= BRIEF_START_TIMEOUT {
+            Some((
+                WorkItemStepStatus::Failed,
+                Some(format!(
+                    "agent still idle {} s after the brief; check its input",
+                    BRIEF_START_TIMEOUT.as_secs()
+                )),
+            ))
+        } else {
+            None
+        };
+        let Some(job) = self.work_items.job_mut(job_id) else {
+            return;
+        };
+        match outcome {
+            Some((status, detail)) => {
+                job.brief_confirmation = None;
+                self.set_work_item_agent_step(job_id, status, detail);
+            }
+            None => {
+                if let Some(confirmation) = job.brief_confirmation.as_mut() {
+                    confirmation.next_check = now + BRIEF_POLL_INTERVAL;
+                }
             }
         }
     }
@@ -1206,10 +1279,17 @@ mod tests {
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }
 
-    #[tokio::test]
-    async fn brief_waits_until_the_agent_enables_bracketed_paste() {
+    struct Briefing {
+        app: App,
+        job_id: u64,
+        pane_id: crate::layout::PaneId,
+        terminal_id: crate::terminal::TerminalId,
+        pty_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    }
+
+    /// An item whose provisioning is at the brief step, with an idle Claude named `review-1`.
+    fn briefing() -> Briefing {
         use crate::detect::{Agent, AgentState};
-        use crate::work_items::provision::AgentAttempt;
         use crate::work_items::source::{
             ProvisionPlan, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
         };
@@ -1224,7 +1304,7 @@ mod tests {
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_agent_name("review-1".into());
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        let (runtime, mut pty_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        let (runtime, pty_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
         app.state.insert_test_runtime(pane_id, runtime);
 
         let source = FakeSource::with_items(vec![source_item("1")]);
@@ -1250,10 +1330,44 @@ mod tests {
             delete_branch: true,
         };
         let job_id = app.work_items.start_job("fake:1", plan).unwrap();
+        app.work_items.job_mut(job_id).unwrap().agent_name = Some("review-1".into());
+        Briefing {
+            app,
+            job_id,
+            pane_id,
+            terminal_id,
+            pty_rx,
+        }
+    }
+
+    use crate::api::schema::WorkItemStepStatus;
+
+    fn brief_step(app: &mut App) -> (WorkItemStepStatus, Option<String>) {
+        let step = list(app)[0]
+            .provisioning
+            .as_ref()
+            .expect("provisioning")
+            .steps
+            .iter()
+            .find(|step| step.step == crate::api::schema::WorkItemStep::AgentBrief)
+            .cloned()
+            .expect("brief step");
+        (step.status, step.detail)
+    }
+
+    #[tokio::test]
+    async fn brief_waits_until_the_agent_enables_bracketed_paste() {
+        use crate::work_items::provision::AgentAttempt;
+
+        let Briefing {
+            mut app,
+            job_id,
+            pane_id,
+            mut pty_rx,
+            ..
+        } = briefing();
         let started = Instant::now();
-        let job = app.work_items.job_mut(job_id).unwrap();
-        job.agent_name = Some("review-1".into());
-        job.brief = Some(AgentAttempt {
+        app.work_items.job_mut(job_id).unwrap().brief = Some(AgentAttempt {
             started,
             next_attempt: started,
             pending: None,
@@ -1278,5 +1392,54 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert_eq!(&sent[..], b"\x1b[200~line one\nline two\x1b[201~");
+    }
+
+    fn await_confirmation(app: &mut App, job_id: u64, sent: Instant) {
+        app.work_items.job_mut(job_id).unwrap().brief_confirmation =
+            Some(super::BriefConfirmation {
+                sent,
+                next_check: sent,
+            });
+        app.set_work_item_agent_step(job_id, WorkItemStepStatus::Running, None);
+    }
+
+    #[tokio::test]
+    async fn brief_counts_as_delivered_once_the_agent_starts_working() {
+        let Briefing {
+            mut app,
+            job_id,
+            terminal_id,
+            ..
+        } = briefing();
+        let sent = Instant::now();
+        await_confirmation(&mut app, job_id, sent);
+
+        app.confirm_work_item_brief(job_id, sent + Duration::from_secs(1));
+        assert_eq!(brief_step(&mut app).0, WorkItemStepStatus::Running);
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
+        app.confirm_work_item_brief(job_id, sent + Duration::from_secs(2));
+        assert_eq!(brief_step(&mut app), (WorkItemStepStatus::Done, None));
+    }
+
+    #[tokio::test]
+    async fn brief_fails_when_the_agent_stays_idle() {
+        let Briefing {
+            mut app, job_id, ..
+        } = briefing();
+        let sent = Instant::now();
+        await_confirmation(&mut app, job_id, sent);
+
+        app.confirm_work_item_brief(job_id, sent + super::BRIEF_START_TIMEOUT);
+        let (status, detail) = brief_step(&mut app);
+        assert_eq!(status, WorkItemStepStatus::Failed);
+        assert!(detail.is_some_and(|detail| detail.contains("still idle")));
     }
 }

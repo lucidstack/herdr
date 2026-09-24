@@ -36,6 +36,13 @@ pub(crate) struct PendingResponse {
     pub response: std::sync::mpsc::Receiver<String>,
 }
 
+/// A delivered brief waiting for the agent to show that it started working.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BriefConfirmation {
+    pub sent: Instant,
+    pub next_check: Instant,
+}
+
 #[derive(Debug)]
 pub(crate) struct ProvisionJob {
     pub job_id: u64,
@@ -52,6 +59,8 @@ pub(crate) struct ProvisionJob {
     pub agent_start: Option<AgentAttempt>,
     /// Waiting for the agent to accept its brief.
     pub brief: Option<AgentAttempt>,
+    /// Waiting for the agent to start working on its brief.
+    pub brief_confirmation: Option<BriefConfirmation>,
 }
 
 impl ProvisionJob {
@@ -62,6 +71,9 @@ impl ProvisionJob {
                 .as_ref()
                 .map(|attempt| attempt.next_attempt),
             self.brief.as_ref().map(|attempt| attempt.next_attempt),
+            self.brief_confirmation
+                .as_ref()
+                .map(|confirmation| confirmation.next_check),
         ]
         .into_iter()
         .flatten()

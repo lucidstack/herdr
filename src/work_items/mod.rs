@@ -375,6 +375,7 @@ impl WorkItems {
                 worktree: None,
                 agent_start: None,
                 brief: None,
+                brief_confirmation: None,
             },
         );
         self.changed();
