@@ -4,6 +4,7 @@
 //! The runtime holder here is source-agnostic; sources implement
 //! [`source::WorkItemSource`]. Nothing runs unless a source is configured.
 
+pub(crate) mod changes;
 pub(crate) mod github;
 pub(crate) mod process;
 pub(crate) mod provision;
@@ -23,6 +24,7 @@ use crate::api::schema::{
 };
 use crate::config::WorkItemsConfig;
 
+pub(crate) use changes::{ItemChange, ItemChanges};
 use provision::ProvisionJob;
 pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
 use state::{NotFound, WorkItem, WorkItemsState};

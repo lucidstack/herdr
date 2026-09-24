@@ -1063,14 +1063,24 @@ impl App {
             }
             Method::WorkItemList(_) => return self.handle_work_item_list(request.id),
             Method::WorkItemMarkSeen(params) => {
-                return self.handle_work_item_mark_seen(request.id, params)
+                let response = self.handle_work_item_mark_seen(request.id, params);
+                self.sync_work_item_events();
+                return response;
             }
             Method::WorkItemChoose(params) => {
-                return self.handle_work_item_choose(request.id, params)
+                let response = self.handle_work_item_choose(request.id, params);
+                self.sync_work_item_events();
+                return response;
             }
-            Method::WorkItemHide(params) => return self.handle_work_item_hide(request.id, params),
+            Method::WorkItemHide(params) => {
+                let response = self.handle_work_item_hide(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
             Method::WorkItemUnhide(params) => {
-                return self.handle_work_item_unhide(request.id, params)
+                let response = self.handle_work_item_unhide(request.id, params);
+                self.sync_work_item_events();
+                return response;
             }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),

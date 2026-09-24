@@ -66,12 +66,53 @@ impl App {
             .iter()
             .map(|ws| ws.id.as_str())
             .collect();
+        let revision = self.work_items.revision();
         self.work_items
             .apply_config(config, store_policy(self.policy), &existing, Instant::now());
+        if self.work_items.revision() != revision {
+            // Items loaded or dropped by the new configuration are not events.
+            self.work_item_changes.reset();
+        }
+    }
+
+    /// Emits `work_item.created|updated|resolved` for changes since the last call.
+    pub(crate) fn sync_work_item_events(&mut self) {
+        use crate::api::schema::{EventData, EventEnvelope, EventKind};
+        use crate::work_items::ItemChange;
+
+        let revision = self.work_items.revision();
+        if !self.work_items.is_enabled() || !self.work_item_changes.is_behind(revision) {
+            return;
+        }
+        let items = self.work_items.projection_items();
+        for change in self.work_item_changes.diff(revision, items) {
+            let (event, data) = match change {
+                ItemChange::Created(item) => (
+                    EventKind::WorkItemCreated,
+                    EventData::WorkItemCreated {
+                        item: Box::new(item),
+                    },
+                ),
+                ItemChange::Updated(item) => (
+                    EventKind::WorkItemUpdated,
+                    EventData::WorkItemUpdated {
+                        item: Box::new(item),
+                    },
+                ),
+                ItemChange::Resolved(item) => (
+                    EventKind::WorkItemResolved,
+                    EventData::WorkItemResolved {
+                        item: Box::new(item),
+                    },
+                ),
+            };
+            self.emit_event(EventEnvelope { event, data });
+        }
     }
 
     pub(super) fn work_items_workspace_closed(&mut self, workspace_id: &str) {
         self.work_items.workspace_closed(workspace_id);
+        self.sync_work_item_events();
     }
 
     /// Deletes the review branch of a removed worktree when its workflow asks for it.
@@ -125,6 +166,7 @@ impl App {
         }
         self.advance_work_item_removals(now);
         self.work_items.expire_snoozes();
+        self.sync_work_item_events();
         let changed = self.work_items.revision() != revision;
         if changed {
             self.request_work_items_render();
@@ -159,6 +201,7 @@ impl App {
             }
         }
         notices.extend(self.work_items.take_notices());
+        self.sync_work_item_events();
         let changed = self.work_items.revision() != revision;
         if changed {
             self.request_work_items_render();
@@ -1058,6 +1101,58 @@ mod tests {
         source.set_items(Vec::new());
         app.work_items.schedule_all_for_test(Instant::now());
         run_until(&mut app, |app| list(app).is_empty());
+    }
+
+    #[test]
+    fn item_lifecycle_is_published_as_work_item_events() {
+        use crate::api::schema::{EventData, EventKind};
+
+        let hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            AppPolicy::TEST,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            hub.clone(),
+        );
+        let source = FakeSource::with_items(vec![source_item("a")]);
+        app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
+            item_id: "fake:a".into(),
+            choice_id: "web".into(),
+        })));
+        source.set_items(Vec::new());
+        app.work_items.schedule_all_for_test(Instant::now());
+        run_until(&mut app, |app| list(app).is_empty());
+
+        let events: Vec<(EventKind, WorkItemPhase)> = hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                EventData::WorkItemCreated { item }
+                | EventData::WorkItemUpdated { item }
+                | EventData::WorkItemResolved { item } => Some((event.event, item.phase)),
+                _ => None,
+            })
+            .collect();
+        // Background preparation adds updates at a timing-dependent point.
+        assert_eq!(
+            events.first(),
+            Some(&(EventKind::WorkItemCreated, WorkItemPhase::Pending))
+        );
+        assert!(events.contains(&(EventKind::WorkItemUpdated, WorkItemPhase::AwaitingExternal)));
+        assert_eq!(
+            events.last(),
+            Some(&(EventKind::WorkItemResolved, WorkItemPhase::AwaitingExternal))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(kind, _)| *kind != EventKind::WorkItemUpdated)
+                .count(),
+            2
+        );
     }
 
     fn git(cwd: &std::path::Path, args: &[&str]) -> String {

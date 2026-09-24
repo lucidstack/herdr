@@ -160,6 +160,8 @@ pub struct App {
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
     pub(crate) work_items: crate::work_items::WorkItems,
+    /// Last state reported through `work_item.*` events.
+    work_item_changes: crate::work_items::ItemChanges,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -633,6 +635,7 @@ impl App {
             client_shell_keybindings_profile,
             endpoint_commands,
             work_items,
+            work_item_changes: crate::work_items::ItemChanges::default(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);

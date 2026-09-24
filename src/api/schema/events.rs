@@ -38,6 +38,12 @@ pub enum Subscription {
     WorktreeOpened {},
     #[serde(rename = "worktree.removed")]
     WorktreeRemoved {},
+    #[serde(rename = "work_item.created")]
+    WorkItemCreated {},
+    #[serde(rename = "work_item.updated")]
+    WorkItemUpdated {},
+    #[serde(rename = "work_item.resolved")]
+    WorkItemResolved {},
     #[serde(rename = "tab.created")]
     TabCreated {},
     #[serde(rename = "tab.closed")]
@@ -203,6 +209,9 @@ pub enum EventKind {
     WorktreeCreated,
     WorktreeOpened,
     WorktreeRemoved,
+    WorkItemCreated,
+    WorkItemUpdated,
+    WorkItemResolved,
     TabCreated,
     TabClosed,
     TabRenamed,
@@ -234,6 +243,9 @@ impl EventKind {
             EventKind::WorktreeCreated => "worktree.created",
             EventKind::WorktreeOpened => "worktree.opened",
             EventKind::WorktreeRemoved => "worktree.removed",
+            EventKind::WorkItemCreated => "work_item.created",
+            EventKind::WorkItemUpdated => "work_item.updated",
+            EventKind::WorkItemResolved => "work_item.resolved",
             EventKind::TabCreated => "tab.created",
             EventKind::TabClosed => "tab.closed",
             EventKind::TabRenamed => "tab.renamed",
@@ -266,6 +278,9 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
     EventKind::WorktreeRemoved,
+    EventKind::WorkItemCreated,
+    EventKind::WorkItemUpdated,
+    EventKind::WorkItemResolved,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
@@ -294,6 +309,9 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorktreeCreated,
     EventKind::WorktreeOpened,
     EventKind::WorktreeRemoved,
+    EventKind::WorkItemCreated,
+    EventKind::WorkItemUpdated,
+    EventKind::WorkItemResolved,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
@@ -467,6 +485,18 @@ pub enum EventData {
         workspace: Option<WorkspaceInfo>,
         worktree: WorktreeInfo,
         forced: bool,
+    },
+    /// A source reported a new item, or requested a resolved one again.
+    WorkItemCreated {
+        item: Box<super::work_items::WorkItemInfo>,
+    },
+    WorkItemUpdated {
+        item: Box<super::work_items::WorkItemInfo>,
+    },
+    /// The source no longer reports the item. `item` is its last state; it stays listed
+    /// while a workspace hangs off it.
+    WorkItemResolved {
+        item: Box<super::work_items::WorkItemInfo>,
     },
     TabCreated {
         tab: TabInfo,
