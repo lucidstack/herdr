@@ -1501,6 +1501,12 @@
           "type": "string",
           "default": "\"lazygit\"",
           "description": "Command run in the Git tab. Empty disables the tab."
+        },
+        {
+          "key": "work_items.workspace.diff_command",
+          "type": "string",
+          "default": "\"nvim -R {file}\"",
+          "description": "Command run in the editor tab of an agent review without checkout; {file} is replaced by the downloaded diff. Empty disables the tab."
         }
       ]
     },

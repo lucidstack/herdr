@@ -87,6 +87,8 @@ pub struct WorkItemWorkspaceConfig {
     pub editor_command: String,
     /// Command run in the Git tab. Empty disables the tab. Default: "lazygit".
     pub lazygit_command: String,
+    /// Command run in the editor tab of an agent review without checkout; {file} is the downloaded diff. Empty disables the tab. Default: "nvim -R {file}".
+    pub diff_command: String,
 }
 
 impl Default for WorkItemWorkspaceConfig {
@@ -95,6 +97,7 @@ impl Default for WorkItemWorkspaceConfig {
             agent: "claude".into(),
             editor_command: "nvim .".into(),
             lazygit_command: "lazygit".into(),
+            diff_command: "nvim -R {file}".into(),
         }
     }
 }

@@ -79,7 +79,7 @@ impl App {
                 }
             }
             WorkItemChoiceAction::ProvisionWorkspace => {
-                match self.start_work_item_provisioning(&params.item_id) {
+                match self.start_work_item_provisioning(&params.item_id, &params.choice_id) {
                     Ok(()) => encode_success(id, ResponseResult::Ok {}),
                     Err((code, message)) => encode_error(id, code, message),
                 }

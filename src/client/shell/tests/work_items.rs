@@ -24,12 +24,14 @@ fn item(id: &str) -> WorkItemInfo {
             WorkItemChoiceInfo {
                 choice_id: "local".into(),
                 label: "Review locally".into(),
+                description: None,
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: None,
             },
             WorkItemChoiceInfo {
                 choice_id: "github".into(),
                 label: "Review on GitHub".into(),
+                description: None,
                 action: WorkItemChoiceAction::OpenUrl {
                     url: format!("https://github.com/o/r/pull/{id}"),
                 },
@@ -69,6 +71,7 @@ fn two_workspace_snapshot() -> ClientShellSnapshot {
 fn shell_with(items: Vec<WorkItemInfo>) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(two_workspace_snapshot()));
+    state.set_pane_surface(surface());
     state.set_endpoint_work_items(&ClientEndpointId::Local, projection(1, items));
     state
 }
@@ -165,6 +168,38 @@ fn clicking_unseen_item_marks_it_seen_and_opens_dialog_on_default_choice() {
     ));
     let Some(ClientShellOverlay::WorkItem(overlay)) = state.overlay.as_ref() else {
         panic!("work item dialog should open");
+    };
+    assert_eq!(
+        overlay.item.choices[overlay.highlighted].choice_id,
+        "github"
+    );
+}
+
+#[test]
+fn dialog_lists_choices_and_arrow_keys_skip_disabled_ones() {
+    let mut blocked = item("7");
+    blocked.seen = true;
+    blocked.choices.insert(
+        1,
+        WorkItemChoiceInfo {
+            choice_id: "agent_post".into(),
+            label: "Agent review, post on GitHub".into(),
+            description: None,
+            action: WorkItemChoiceAction::ProvisionWorkspace,
+            disabled_reason: Some("No agent configured".into()),
+        },
+    );
+    blocked.default_choice_id = Some("local".into());
+    let mut state = shell_with(vec![blocked]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
+    let text = screen_text(&mut state);
+    assert!(text.contains("Review locally"), "{text}");
+    assert!(text.contains("Agent review, post on GitHub"), "{text}");
+    assert!(text.contains("Review on GitHub"), "{text}");
+    state.handle_input_bytes(b"\x1b[B");
+    let Some(ClientShellOverlay::WorkItem(overlay)) = state.overlay.as_ref() else {
+        panic!("dialog stays open");
     };
     assert_eq!(
         overlay.item.choices[overlay.highlighted].choice_id,

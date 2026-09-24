@@ -39,6 +39,9 @@ pub enum WorkItemChoiceAction {
 pub struct WorkItemChoiceInfo {
     pub choice_id: String,
     pub label: String,
+    /// One line explaining what the choice does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub action: WorkItemChoiceAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,

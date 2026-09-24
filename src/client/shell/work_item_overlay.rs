@@ -18,9 +18,11 @@ pub(super) fn render_work_item_overlay(
 }
 
 fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Option<OverlayRender> {
-    let q = popup(b.area, WIDTH, 8)?;
-    let i = panel(b, q, p.accent, p.panel_bg)?;
     let item = &o.item;
+    let choice_count = item.choices.len() as u16;
+    // Heading (3 rows), gap, one row per choice, gap, detail, hint, plus borders.
+    let q = popup(b.area, WIDTH, choice_count + 9)?;
+    let i = panel(b, q, p.accent, p.panel_bg)?;
     put_text(
         b,
         i.x,
@@ -59,62 +61,70 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
             Style::default().fg(p.subtext0).bg(p.panel_bg),
         );
     }
-    let widths: Vec<u16> = item
-        .choices
-        .iter()
-        .map(|choice| display_width(&choice.label).saturating_add(4))
-        .collect();
-    let rects = row(i, &widths, 2, 3);
-    let mut menu_rows = Vec::with_capacity(rects.len());
-    for (index, (choice, rect)) in item.choices.iter().zip(&rects).enumerate() {
+    let mut menu_rows = Vec::with_capacity(item.choices.len());
+    for (index, choice) in item.choices.iter().enumerate() {
+        let y = i.y + 4 + index as u16;
+        if y >= i.bottom().saturating_sub(3) {
+            break;
+        }
+        let rect = Rect::new(i.x + 1, y, i.width.saturating_sub(2), 1);
         let highlighted = index == o.highlighted;
-        let (text, style) = if choice.disabled_reason.is_some() {
-            (
-                format!(" {} ", choice.label),
-                Style::default().fg(p.overlay0).bg(p.surface0),
-            )
+        let style = if highlighted && choice.disabled_reason.is_none() {
+            Style::default()
+                .fg(contrast(p))
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD)
         } else if highlighted {
-            (
-                format!(" ↵ {} ", choice.label),
-                Style::default()
-                    .fg(contrast(p))
-                    .bg(p.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
+            Style::default().fg(p.overlay0).bg(p.surface0)
+        } else if choice.disabled_reason.is_some() {
+            Style::default().fg(p.overlay0).bg(p.panel_bg)
         } else {
-            (
-                format!(" {} ", choice.label),
-                Style::default().fg(p.text).bg(p.surface0),
-            )
+            Style::default().fg(p.text).bg(p.panel_bg)
         };
-        button(b, *rect, &text, style);
-        menu_rows.push((*rect, index));
-    }
-    if let Some(reason) = item
-        .choices
-        .get(o.highlighted)
-        .and_then(|choice| choice.disabled_reason.as_deref())
-    {
+        b.set_style(rect, style);
+        let marker = if highlighted { "↵" } else { " " };
         put_text(
             b,
-            i.x,
-            i.y + 4,
-            i.width,
-            &format!(" {reason}"),
-            Style::default().fg(p.overlay0).bg(p.panel_bg),
+            rect.x,
+            rect.y,
+            rect.width,
+            &format!(" {marker} {}", choice.label),
+            style,
         );
+        menu_rows.push((rect, index));
+    }
+    if let Some(choice) = item.choices.get(o.highlighted) {
+        let (detail, color) = match (&choice.disabled_reason, &choice.description) {
+            (Some(reason), _) => (Some(reason), p.peach),
+            (None, Some(description)) => (Some(description), p.subtext0),
+            (None, None) => (None, p.subtext0),
+        };
+        if let Some(detail) = detail {
+            put_text(
+                b,
+                i.x,
+                i.bottom().saturating_sub(2),
+                i.width,
+                &format!(" {detail}"),
+                Style::default().fg(color).bg(p.panel_bg),
+            );
+        }
     }
     put_text(
         b,
         i.x,
         i.bottom().saturating_sub(1),
         i.width,
-        " ←/→ choose · ↵ confirm · esc cancel",
+        " ↑/↓ choose · ↵ confirm · esc cancel",
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     Some(OverlayRender {
         area: q,
-        primary: rects.get(o.highlighted).copied().unwrap_or_default(),
+        primary: menu_rows
+            .iter()
+            .find(|(_, index)| *index == o.highlighted)
+            .map(|(rect, _)| *rect)
+            .unwrap_or_default(),
         cancel: Rect::default(),
         menu_rows,
         ..OverlayRender::default()

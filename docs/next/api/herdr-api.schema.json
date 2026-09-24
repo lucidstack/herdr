@@ -10889,6 +10889,13 @@
             "choice_id": {
               "type": "string"
             },
+            "description": {
+              "description": "One line explaining what the choice does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "disabled_reason": {
               "type": [
                 "string",

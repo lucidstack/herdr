@@ -96,7 +96,10 @@ pub(crate) struct StorePolicy {
 fn build_sources(config: &WorkItemsConfig) -> Vec<Arc<dyn WorkItemSource>> {
     let mut sources: Vec<Arc<dyn WorkItemSource>> = Vec::new();
     if let Some(github) = config.github.as_ref().filter(|github| github.enabled) {
-        sources.push(Arc::new(github::GithubSource::new(github.clone())));
+        sources.push(Arc::new(github::GithubSource::new(
+            github.clone(),
+            !config.workspace.agent.is_empty(),
+        )));
     }
     sources
 }

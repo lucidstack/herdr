@@ -14,7 +14,8 @@ use crate::config::{GithubRepoConfig, GithubWorkItemsConfig};
 
 use super::process::{failure_detail, run_with_timeout};
 use super::source::{
-    CheckoutSpec, ItemChoices, PreparedItem, ProvisionPlan, ServerPlan, SourceItem, WorkItemSource,
+    CheckoutSpec, DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, ServerPlan, SourceItem,
+    WorkItemSource, WorkspaceSource,
 };
 use super::state::WorkItem;
 
@@ -24,13 +25,14 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const MIN_POLL_SECONDS: u64 = 30;
 const MAX_POLL_SECONDS: u64 = 3600;
 const GITHUB_CHOICE_ID: &str = "github";
-const LOCAL_CHOICE_ID: &str = "local";
 const MAX_WORKSPACE_LABEL_CHARS: usize = 40;
 const MAX_BRIEF_BODY_CHARS: usize = 4000;
 const MAX_BRIEF_FILES: usize = 100;
 
 pub(crate) struct GithubSource {
     config: GithubWorkItemsConfig,
+    /// Whether `work_items.workspace.agent` names an agent; agent-led choices need one.
+    agent_configured: bool,
     docs: Vec<Regex>,
     frontend: Vec<Regex>,
     repo_frontend: HashMap<String, Vec<Regex>>,
@@ -109,7 +111,7 @@ fn compile_patterns(patterns: &[String], key: &str) -> Result<Vec<Regex>, String
 }
 
 impl GithubSource {
-    pub(crate) fn new(config: GithubWorkItemsConfig) -> Self {
+    pub(crate) fn new(config: GithubWorkItemsConfig, agent_configured: bool) -> Self {
         let mut build_error = None;
         let mut compile = |patterns: &[String], key: &str| {
             compile_patterns(patterns, key).unwrap_or_else(|err| {
@@ -130,6 +132,7 @@ impl GithubSource {
         }
         Self {
             config,
+            agent_configured,
             docs,
             frontend,
             repo_frontend,
@@ -161,11 +164,19 @@ impl GithubSource {
 
     fn gh(&self) -> std::process::Command {
         let mut command = crate::noninteractive_process::command(&self.config.gh_path);
+        command.envs(gh_env());
         command
-            .env("GH_PROMPT_DISABLED", "1")
-            .env("GH_NO_UPDATE_NOTIFIER", "1")
-            .env("NO_COLOR", "1");
-        command
+    }
+
+    /// Why `mode` cannot be offered for `repo`, if it cannot.
+    fn mode_unavailable(&self, mode: ReviewMode, repo: &str, mapped: bool) -> Option<String> {
+        if mode.checks_out() && !mapped {
+            return Some(format!("No local checkout configured for {repo}"));
+        }
+        if mode.needs_agent() && !self.agent_configured {
+            return Some("No agent configured in work_items.workspace.agent".into());
+        }
+        None
     }
 
     fn run_gh(&self, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -199,6 +210,17 @@ impl GithubSource {
     }
 }
 
+fn gh_env() -> Vec<(String, String)> {
+    [
+        ("GH_PROMPT_DISABLED", "1"),
+        ("GH_NO_UPDATE_NOTIFIER", "1"),
+        ("NO_COLOR", "1"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect()
+}
+
 fn item_detail(item: &WorkItem) -> Option<GithubDetail> {
     item.detail
         .clone()
@@ -216,7 +238,7 @@ fn default_choice(
         return GITHUB_CHOICE_ID;
     }
     let Some(detail) = detail else {
-        return LOCAL_CHOICE_ID;
+        return ReviewMode::Local.choice_id();
     };
     let docs_only = !detail.files.is_empty()
         && detail
@@ -226,7 +248,7 @@ fn default_choice(
     if docs_only || detail.additions + detail.deletions <= small_diff_lines {
         GITHUB_CHOICE_ID
     } else {
-        LOCAL_CHOICE_ID
+        ReviewMode::Local.choice_id()
     }
 }
 
@@ -239,7 +261,74 @@ fn truncate_chars(text: &str, max: usize) -> String {
     truncated
 }
 
-fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail) -> String {
+/// How a pull request is reviewed once the user picks a provisioning choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewMode {
+    /// Worktree checkout; the agent is briefed and waits.
+    Local,
+    /// Worktree checkout; the agent reviews straight away and reports back.
+    LocalAgentReview,
+    /// No checkout; the agent reviews through gh and reports back.
+    AgentReport,
+    /// No checkout; the agent reviews through gh and posts a review comment.
+    AgentPost,
+}
+
+impl ReviewMode {
+    const ALL: [Self; 4] = [
+        Self::Local,
+        Self::LocalAgentReview,
+        Self::AgentReport,
+        Self::AgentPost,
+    ];
+
+    fn choice_id(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::LocalAgentReview => "local_agent",
+            Self::AgentReport => "agent_report",
+            Self::AgentPost => "agent_post",
+        }
+    }
+
+    fn from_choice_id(choice_id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.choice_id() == choice_id)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Review locally",
+            Self::LocalAgentReview => "Review locally, agent reviews first",
+            Self::AgentReport => "Agent review, report back to me",
+            Self::AgentPost => "Agent review, post on GitHub",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Local => "Worktree and tools; the agent gets the context and waits",
+            Self::LocalAgentReview => "Worktree and tools; the agent starts reviewing",
+            Self::AgentReport => "No checkout; the agent reviews with gh and reports here",
+            Self::AgentPost => "No checkout; the agent reviews and comments on the PR",
+        }
+    }
+
+    fn checks_out(self) -> bool {
+        matches!(self, Self::Local | Self::LocalAgentReview)
+    }
+
+    fn needs_agent(self) -> bool {
+        self != Self::Local
+    }
+}
+
+fn diff_file_name(number: u64) -> String {
+    format!("pr-{number}.diff")
+}
+
+fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
     let author = item.author.as_deref().unwrap_or("unknown");
     let head: String = detail.head_ref_oid.chars().take(8).collect();
     let body = if detail.body.trim().is_empty() {
@@ -259,11 +348,44 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail) -> String {
             detail.files.len() - MAX_BRIEF_FILES
         ));
     }
+    let number = detail.number;
+    let base = &detail.base_ref_name;
+    let gh_context = format!(
+        "There is no checkout of the repository. The full diff is in ./{file}; use \
+         `gh pr view {number} --repo {repo} --comments`, `gh pr diff {number} --repo {repo}` and \
+         `gh api repos/{repo}/contents/<path>?ref={head_ref}` for more context.",
+        file = diff_file_name(number),
+        head_ref = detail.head_ref_name,
+    );
+    let review = "Review the change for correctness, security, missing tests and design problems. \
+                  Order your findings by severity and cite file:line for each.";
+    let instructions = match mode {
+        ReviewMode::Local => format!(
+            "This directory is a detached checkout of the pull request head.\n\
+             Inspect the change with git (for example `git diff origin/{base}...HEAD`), summarise it and wait for my instructions before changing anything."
+        ),
+        ReviewMode::LocalAgentReview => format!(
+            "This directory is a detached checkout of the pull request head.\n\
+             Start reviewing now: read the diff (`git diff origin/{base}...HEAD`) and the surrounding code. {review}\n\
+             Report the findings to me here. Do not modify files, commit, or post anything to GitHub."
+        ),
+        ReviewMode::AgentReport => format!(
+            "{gh_context}\n\
+             Start reviewing now. {review}\n\
+             Report the findings to me here. Do not post anything to GitHub."
+        ),
+        ReviewMode::AgentPost => format!(
+            "{gh_context}\n\
+             Start reviewing now. {review}\n\
+             When you are done, show me the findings and post them as one review comment with \
+             `gh pr review {number} --repo {repo} --comment --body-file <file>`. \
+             Only comment: never approve or request changes."
+        ),
+    };
     format!(
         "You are reviewing GitHub pull request {repo}#{number}: {title}\n\
          Author: @{author} · {url}\n\
          Base {base} ← head {head_ref} ({head})\n\
-         This directory is a detached checkout of the pull request head.\n\
          \n\
          Description:\n\
          {body}\n\
@@ -271,11 +393,9 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail) -> String {
          Changed files ({changed}, +{additions} −{deletions}):\n\
          {files}\n\
          \n\
-         Inspect the change with git (for example `git diff origin/{base}...HEAD`), summarise it and wait for my instructions before changing anything.",
-        number = detail.number,
+         {instructions}",
         title = item.title,
         url = item.url,
-        base = detail.base_ref_name,
         head_ref = detail.head_ref_name,
         changed = detail.changed_files,
         additions = detail.additions,
@@ -424,27 +544,31 @@ impl WorkItemSource for GithubSource {
         let repo = parse_external_id(&item.external_id).map(|(repo, _)| repo);
         let mapped = repo.and_then(|repo| self.repo(repo)).is_some();
         let detail = item_detail(item);
-        let local = WorkItemChoiceInfo {
-            choice_id: LOCAL_CHOICE_ID.into(),
-            label: "Review locally".into(),
-            action: WorkItemChoiceAction::ProvisionWorkspace,
-            disabled_reason: (!mapped).then(|| {
-                format!(
-                    "No local checkout configured for {}",
-                    repo.unwrap_or(&item.external_id)
-                )
-            }),
-        };
-        let github = WorkItemChoiceInfo {
+        let mut choices: Vec<WorkItemChoiceInfo> = ReviewMode::ALL
+            .into_iter()
+            .map(|mode| WorkItemChoiceInfo {
+                choice_id: mode.choice_id().into(),
+                label: mode.label().into(),
+                description: Some(mode.description().into()),
+                action: WorkItemChoiceAction::ProvisionWorkspace,
+                disabled_reason: self.mode_unavailable(
+                    mode,
+                    repo.unwrap_or(&item.external_id),
+                    mapped,
+                ),
+            })
+            .collect();
+        choices.push(WorkItemChoiceInfo {
             choice_id: GITHUB_CHOICE_ID.into(),
             label: "Review on GitHub".into(),
+            description: Some("Open the pull request in the browser".into()),
             action: WorkItemChoiceAction::OpenUrl {
                 url: item.url.clone(),
             },
             disabled_reason: None,
-        };
+        });
         ItemChoices {
-            choices: vec![local, github],
+            choices,
             default_choice_id: Some(
                 default_choice(
                     detail.as_ref(),
@@ -460,17 +584,56 @@ impl WorkItemSource for GithubSource {
     fn provision_plan(
         &self,
         item: &WorkItem,
+        choice_id: &str,
         worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String> {
+        let mode = ReviewMode::from_choice_id(choice_id)
+            .ok_or_else(|| format!("choice {choice_id} does not provision a workspace"))?;
         let (repo_name, number) = parse_external_id(&item.external_id)
             .ok_or_else(|| format!("unrecognised pull request id {}", item.external_id))?;
-        let repo = self
-            .repo(repo_name)
-            .ok_or_else(|| format!("No local checkout configured for {repo_name}"))?;
+        let mapped = self.repo(repo_name);
+        if let Some(reason) = self.mode_unavailable(mode, repo_name, mapped.is_some()) {
+            return Err(reason);
+        }
         let detail = item_detail(item).ok_or_else(|| {
             "pull request details are not available yet; try again shortly".to_string()
         })?;
         let short_name = repo_name.rsplit('/').next().unwrap_or(repo_name);
+        let workspace_label = truncate_chars(
+            &format!("#{number} {}", item.title),
+            MAX_WORKSPACE_LABEL_CHARS,
+        );
+        let agent_name_hint = format!("review-{number}");
+        let brief = brief(repo_name, item, &detail, mode);
+        let Some(repo) = mapped.filter(|_| mode.checks_out()) else {
+            return Ok(ProvisionPlan {
+                source: WorkspaceSource::Download(DownloadSpec {
+                    directory: crate::worktree::default_checkout_path(
+                        worktree_directory,
+                        short_name,
+                        &format!("pr-{number}-agent"),
+                    ),
+                    program: self.config.gh_path.clone(),
+                    args: vec![
+                        "pr".into(),
+                        "diff".into(),
+                        number.to_string(),
+                        "--repo".into(),
+                        repo_name.into(),
+                        "--color".into(),
+                        "never".into(),
+                    ],
+                    env: gh_env(),
+                    file_name: diff_file_name(number),
+                }),
+                workspace_label,
+                agent_name_hint,
+                brief,
+                install_command: None,
+                server: None,
+                server_skip_reason: "no checkout".into(),
+            });
+        };
         let checkout_path = crate::worktree::default_checkout_path(
             worktree_directory,
             short_name,
@@ -492,19 +655,16 @@ impl WorkItemSource for GithubSource {
             "no front-end changes".into()
         };
         Ok(ProvisionPlan {
-            checkout: CheckoutSpec {
+            source: WorkspaceSource::Worktree(CheckoutSpec {
                 repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
                 remote: repo.remote.clone(),
                 fetch_refspec: format!("+refs/pull/{number}/head:refs/herdr/pull/{number}"),
                 checkout_ref: format!("refs/herdr/pull/{number}"),
                 checkout_path,
-            },
-            workspace_label: truncate_chars(
-                &format!("#{number} {}", item.title),
-                MAX_WORKSPACE_LABEL_CHARS,
-            ),
-            agent_name_hint: format!("review-{number}"),
-            brief: brief(repo_name, item, &detail),
+            }),
+            workspace_label,
+            agent_name_hint,
+            brief,
             install_command: repo.install_command.clone(),
             server,
             server_skip_reason,
@@ -637,10 +797,13 @@ mod tests {
     }
 
     fn mapped_source(repo: GithubRepoConfig) -> GithubSource {
-        GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![repo],
-            ..GithubWorkItemsConfig::default()
-        })
+        GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo],
+                ..GithubWorkItemsConfig::default()
+            },
+            true,
+        )
     }
 
     fn repo_config() -> GithubRepoConfig {
@@ -663,7 +826,7 @@ mod tests {
 
     #[test]
     fn unmapped_repository_defaults_to_github_and_disables_local_review() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), true);
         let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
         assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
         let local = &choices.choices[0];
@@ -714,10 +877,17 @@ mod tests {
         let source = mapped_source(repo_config());
         let change = detail(&[("src/a.rs", 40, 2), ("src/b.rs", 1, 1)]);
         let plan = source
-            .provision_plan(&work_item("o/r", Some(&change)), Path::new("/worktrees"))
+            .provision_plan(
+                &work_item("o/r", Some(&change)),
+                "local",
+                Path::new("/worktrees"),
+            )
             .expect("plan");
-        assert_eq!(plan.checkout.checkout_path, Path::new("/worktrees/r/pr-5"));
-        assert_eq!(plan.checkout.checkout_ref, "refs/herdr/pull/5");
+        let WorkspaceSource::Worktree(checkout) = &plan.source else {
+            panic!("local review checks out a worktree");
+        };
+        assert_eq!(checkout.checkout_path, Path::new("/worktrees/r/pr-5"));
+        assert_eq!(checkout.checkout_ref, "refs/herdr/pull/5");
         assert_eq!(plan.server, None);
         assert_eq!(plan.server_skip_reason, "no front-end changes");
         assert!(plan.brief.contains("Add the thing"));
@@ -730,7 +900,11 @@ mod tests {
         let source = mapped_source(repo_config());
         let change = detail(&[("web/app.tsx", 40, 2)]);
         let plan = source
-            .provision_plan(&work_item("o/r", Some(&change)), Path::new("/worktrees"))
+            .provision_plan(
+                &work_item("o/r", Some(&change)),
+                "local",
+                Path::new("/worktrees"),
+            )
             .expect("plan");
         assert_eq!(
             plan.server,
@@ -742,12 +916,89 @@ mod tests {
     }
 
     #[test]
+    fn agent_review_needs_no_checkout_and_downloads_the_diff_with_gh() {
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), true);
+        let change = detail(&[("src/a.rs", 40, 2)]);
+        let item = work_item("o/r", Some(&change));
+        let choices = source.choices(&item);
+        let report = choices
+            .choices
+            .iter()
+            .find(|choice| choice.choice_id == "agent_report")
+            .expect("agent review offered");
+        assert_eq!(report.disabled_reason, None);
+        let plan = source
+            .provision_plan(&item, "agent_report", Path::new("/worktrees"))
+            .expect("plan");
+        let WorkspaceSource::Download(download) = &plan.source else {
+            panic!("agent review downloads the diff");
+        };
+        assert_eq!(download.directory, Path::new("/worktrees/r/pr-5-agent"));
+        assert_eq!(download.program, "gh");
+        assert_eq!(download.args[..5], ["pr", "diff", "5", "--repo", "o/r"]);
+        assert_eq!(download.file_name, "pr-5.diff");
+        assert!(plan.brief.contains("./pr-5.diff"));
+        assert!(plan.brief.contains("Do not post anything to GitHub"));
+    }
+
+    #[test]
+    fn posting_agent_review_asks_for_a_comment_only_review() {
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), true);
+        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
+        let plan = source
+            .provision_plan(&item, "agent_post", Path::new("/worktrees"))
+            .expect("plan");
+        assert!(plan
+            .brief
+            .contains("gh pr review 5 --repo o/r --comment --body-file"));
+        assert!(plan.brief.contains("never approve or request changes"));
+    }
+
+    #[test]
+    fn local_agent_review_briefs_the_agent_to_start_reviewing() {
+        let source = mapped_source(repo_config());
+        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
+        let plan = source
+            .provision_plan(&item, "local_agent", Path::new("/worktrees"))
+            .expect("plan");
+        assert!(matches!(plan.source, WorkspaceSource::Worktree(_)));
+        assert!(plan.brief.contains("Start reviewing now"));
+        assert!(!plan.brief.contains("wait for my instructions"));
+    }
+
+    #[test]
+    fn agent_led_choices_are_disabled_without_an_agent() {
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo_config()],
+                ..GithubWorkItemsConfig::default()
+            },
+            false,
+        );
+        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
+        let choices = source.choices(&item);
+        let disabled: Vec<&str> = choices
+            .choices
+            .iter()
+            .filter(|choice| choice.disabled_reason.is_some())
+            .map(|choice| choice.choice_id.as_str())
+            .collect();
+        assert_eq!(disabled, vec!["local_agent", "agent_report", "agent_post"]);
+        assert!(source
+            .provision_plan(&item, "agent_report", Path::new("/worktrees"))
+            .is_err());
+    }
+
+    #[test]
     fn invalid_pattern_is_surfaced_by_poll() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            docs_patterns: vec!["(".into()],
-            gh_path: "/nonexistent/gh".into(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                docs_patterns: vec!["(".into()],
+                gh_path: "/nonexistent/gh".into(),
+                ..GithubWorkItemsConfig::default()
+            },
+            true,
+        );
         let error = source.poll().expect_err("poll fails");
         assert!(
             error.starts_with("invalid docs_patterns pattern"),

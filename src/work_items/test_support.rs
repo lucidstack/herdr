@@ -79,12 +79,14 @@ impl WorkItemSource for FakeSource {
                 WorkItemChoiceInfo {
                     choice_id: "local".into(),
                     label: "Local".into(),
+                    description: None,
                     action: WorkItemChoiceAction::ProvisionWorkspace,
                     disabled_reason: None,
                 },
                 WorkItemChoiceInfo {
                     choice_id: "web".into(),
                     label: "Open".into(),
+                    description: None,
                     action: WorkItemChoiceAction::OpenUrl {
                         url: item.url.clone(),
                     },
@@ -98,6 +100,7 @@ impl WorkItemSource for FakeSource {
     fn provision_plan(
         &self,
         _item: &WorkItem,
+        _choice_id: &str,
         _worktree_directory: &std::path::Path,
     ) -> Result<ProvisionPlan, String> {
         self.plan

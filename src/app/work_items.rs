@@ -15,6 +15,7 @@ use crate::api::schema::{
 };
 use crate::events::AppEvent;
 use crate::work_items::provision::{self, AgentAttempt};
+use crate::work_items::source::WorkspaceSource;
 use crate::work_items::{StorePolicy, WorkItemNotice, WorkItemsEvent};
 
 /// How long the agent may take to accept `agent.start` and then its brief.
@@ -173,6 +174,7 @@ impl App {
     pub(super) fn start_work_item_provisioning(
         &mut self,
         key: &str,
+        choice_id: &str,
     ) -> Result<(), (&'static str, String)> {
         if self.work_items.has_job(key) {
             return Err(("work_item_busy", format!("{key} is already being prepared")));
@@ -194,9 +196,9 @@ impl App {
             return Err(("work_item_not_found", format!("unknown work item {key}")));
         };
         let plan = source
-            .provision_plan(&item, &self.state.worktree_directory)
+            .provision_plan(&item, choice_id, &self.state.worktree_directory)
             .map_err(|message| ("work_item_unavailable", message))?;
-        let spec = plan.checkout.clone();
+        let workspace_source = plan.source.clone();
         let agent = self.work_items.config().workspace.agent.clone();
         let job_id = self
             .work_items
@@ -204,7 +206,7 @@ impl App {
             .map_err(|_| ("work_item_not_found", format!("unknown work item {key}")))?;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result = provision::checkout(&spec);
+            let result = provision::prepare_source(&workspace_source);
             send_event(
                 &event_tx,
                 WorkItemsEvent::CheckoutFinished { job_id, result },
@@ -272,7 +274,7 @@ impl App {
         let plan = job.plan.clone();
         let layout: crate::config::WorkItemWorkspaceConfig =
             self.work_items.config().workspace.clone();
-        let cwd = plan.checkout.checkout_path.display().to_string();
+        let cwd = plan.source.directory().display().to_string();
         let ResponseResult::WorkspaceCreated {
             workspace,
             tab,
@@ -301,17 +303,24 @@ impl App {
         if let Some(job) = self.work_items.job_mut(job_id) {
             job.agent_pane_id = Some(root_pane.pane_id);
         }
-        for (label, command) in [
-            ("editor", layout.editor_command.as_str()),
-            ("lazygit", layout.lazygit_command.as_str()),
-        ] {
+        let tools: Vec<(&str, String)> = match &plan.source {
+            WorkspaceSource::Worktree(_) => vec![
+                ("editor", layout.editor_command.clone()),
+                ("lazygit", layout.lazygit_command.clone()),
+            ],
+            WorkspaceSource::Download(download) => vec![(
+                "diff",
+                layout.diff_command.replace("{file}", &download.file_name),
+            )],
+        };
+        for (label, command) in tools {
             if command.is_empty() {
                 continue;
             }
             let pane_id = self.create_work_item_tab(&workspace.workspace_id, &cwd, label)?;
             self.work_items_api(Method::PaneSendInput(PaneSendInputParams {
                 pane_id,
-                text: command.to_string(),
+                text: command,
                 keys: vec!["enter".into()],
             }))?;
         }
@@ -349,7 +358,7 @@ impl App {
         let Some(command) = job.plan.install_command.clone() else {
             return;
         };
-        let cwd = job.plan.checkout.checkout_path.clone();
+        let cwd = job.plan.source.directory().to_path_buf();
         self.work_items.update_progress(job_id, |progress| {
             provision::set_step(
                 progress,
@@ -793,7 +802,7 @@ mod tests {
     #[tokio::test]
     async fn local_choice_provisions_a_worktree_workspace_owned_by_the_item() {
         use crate::api::schema::{TabListParams, WorkItemStepStatus, WorkspaceCloseParams};
-        use crate::work_items::source::{CheckoutSpec, ProvisionPlan};
+        use crate::work_items::source::{CheckoutSpec, ProvisionPlan, WorkspaceSource};
 
         let root = std::env::temp_dir().join(format!(
             "herdr-work-items-provision-{}-{}",
@@ -820,13 +829,13 @@ mod tests {
         app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
         let source = FakeSource::with_items(vec![source_item("1")]);
         *source.plan.lock().unwrap() = Some(ProvisionPlan {
-            checkout: CheckoutSpec {
+            source: WorkspaceSource::Worktree(CheckoutSpec {
                 repo_path: repo.clone(),
                 remote: repo.display().to_string(),
                 fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
                 checkout_ref: "refs/herdr/pull/1".into(),
                 checkout_path: checkout_path.clone(),
-            },
+            }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
@@ -840,6 +849,7 @@ mod tests {
                 agent: String::new(),
                 editor_command: "true".into(),
                 lazygit_command: "true".into(),
+                diff_command: String::new(),
             });
         run_until(&mut app, |app| !list(app).is_empty());
 

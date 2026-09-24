@@ -12,9 +12,10 @@ use crate::api::schema::{
 };
 
 use super::process::{failure_detail, run_with_timeout};
-use super::source::{CheckoutSpec, ProvisionPlan};
+use super::source::{CheckoutSpec, DownloadSpec, ProvisionPlan, WorkspaceSource};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const WORKTREE_TIMEOUT: Duration = Duration::from_secs(60);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -72,6 +73,10 @@ fn step(
 /// Progress right after the user chose to review locally.
 pub(crate) fn initial_progress(plan: &ProvisionPlan, agent: &str) -> WorkItemProvisioningInfo {
     use WorkItemStepStatus::{Pending, Running, Skipped};
+    let (first_label, no_install) = match &plan.source {
+        WorkspaceSource::Worktree(_) => ("Branch checked out", "no install_command configured"),
+        WorkspaceSource::Download(_) => ("Diff downloaded", "no checkout"),
+    };
     let dependencies = if plan.install_command.is_some() {
         step(
             WorkItemStep::Dependencies,
@@ -84,7 +89,7 @@ pub(crate) fn initial_progress(plan: &ProvisionPlan, agent: &str) -> WorkItemPro
             WorkItemStep::Dependencies,
             "Dependencies installed",
             Skipped,
-            Some("no install_command configured"),
+            Some(no_install),
         )
     };
     let server = if plan.server.is_some() {
@@ -109,7 +114,7 @@ pub(crate) fn initial_progress(plan: &ProvisionPlan, agent: &str) -> WorkItemPro
     };
     let mut progress = WorkItemProvisioningInfo {
         steps: vec![
-            step(WorkItemStep::Checkout, "Branch checked out", Running, None),
+            step(WorkItemStep::Checkout, first_label, Running, None),
             dependencies,
             server,
             agent_brief,
@@ -222,7 +227,7 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
 }
 
 /// Fetches the change and checks it out detached in its own worktree.
-pub(crate) fn checkout(spec: &CheckoutSpec) -> Result<(), String> {
+fn checkout(spec: &CheckoutSpec) -> Result<(), String> {
     git(
         &spec.repo_path,
         &[
@@ -260,6 +265,32 @@ pub(crate) fn checkout(spec: &CheckoutSpec) -> Result<(), String> {
         WORKTREE_TIMEOUT,
     )
     .map_err(|err| format!("worktree add: {err}"))
+}
+
+/// Prepares the workspace directory: a worktree checkout or a downloaded file.
+pub(crate) fn prepare_source(source: &WorkspaceSource) -> Result<(), String> {
+    match source {
+        WorkspaceSource::Worktree(spec) => checkout(spec),
+        WorkspaceSource::Download(spec) => download(spec),
+    }
+}
+
+/// Runs the download command and stores its output in the scratch directory.
+fn download(spec: &DownloadSpec) -> Result<(), String> {
+    std::fs::create_dir_all(&spec.directory)
+        .map_err(|err| format!("{}: {err}", spec.directory.display()))?;
+    let mut command = crate::noninteractive_process::command(&spec.program);
+    command.args(&spec.args).current_dir(&spec.directory);
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    let output = match run_with_timeout(command, DOWNLOAD_TIMEOUT) {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => return Err(format!("download: {}", failure_detail(&output))),
+        Err(err) => return Err(format!("download: {err}")),
+    };
+    let path = spec.directory.join(&spec.file_name);
+    std::fs::write(&path, &output.stdout).map_err(|err| format!("{}: {err}", path.display()))
 }
 
 /// Runs the dependency install command in `cwd` through the user's shell.
@@ -302,13 +333,13 @@ mod tests {
 
     fn plan(install: bool, server: bool) -> ProvisionPlan {
         ProvisionPlan {
-            checkout: CheckoutSpec {
+            source: WorkspaceSource::Worktree(CheckoutSpec {
                 repo_path: PathBuf::from("/repo"),
                 remote: "origin".into(),
                 fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
                 checkout_ref: "refs/herdr/pull/1".into(),
                 checkout_path: PathBuf::from("/worktrees/repo/pr-1"),
-            },
+            }),
             workspace_label: "#1 Title".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
@@ -381,5 +412,38 @@ mod tests {
             None,
         );
         assert!(progress.finished);
+    }
+
+    #[test]
+    fn download_source_labels_the_first_step_and_skips_install_without_checkout() {
+        let mut download = plan(false, false);
+        download.source = WorkspaceSource::Download(DownloadSpec {
+            directory: PathBuf::from("/worktrees/repo/pr-1-agent"),
+            program: "gh".into(),
+            args: Vec::new(),
+            env: Vec::new(),
+            file_name: "pr-1.diff".into(),
+        });
+        let progress = initial_progress(&download, "claude");
+        assert_eq!(progress.steps[0].label, "Diff downloaded");
+        assert_eq!(progress.steps[1].detail.as_deref(), Some("no checkout"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_writes_command_output_into_the_scratch_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("herdr-work-items-download-{}", std::process::id()));
+        let spec = DownloadSpec {
+            directory: directory.join("pr-1-agent"),
+            program: "printf".into(),
+            args: vec!["diff --git a/x b/x\\n".into()],
+            env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+            file_name: "pr-1.diff".into(),
+        };
+        prepare_source(&WorkspaceSource::Download(spec.clone())).expect("download");
+        let written = std::fs::read_to_string(spec.directory.join("pr-1.diff")).expect("file");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(written, "diff --git a/x b/x\n");
     }
 }
