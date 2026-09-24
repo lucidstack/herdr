@@ -16,6 +16,8 @@ pub(crate) struct FakeSource {
     pub prepare_calls: AtomicUsize,
     /// Plan returned for the "local" choice; `None` makes it unavailable.
     pub plan: Mutex<Option<ProvisionPlan>>,
+    /// Whether resolved items have their workspace removed.
+    pub remove_on_resolved: std::sync::atomic::AtomicBool,
 }
 
 impl FakeSource {
@@ -24,6 +26,7 @@ impl FakeSource {
             items: Mutex::new(items),
             prepare_calls: AtomicUsize::new(0),
             plan: Mutex::new(None),
+            remove_on_resolved: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -108,6 +111,10 @@ impl WorkItemSource for FakeSource {
             .expect("fake source lock")
             .clone()
             .ok_or_else(|| "no plan scripted".to_string())
+    }
+
+    fn remove_on_resolved(&self, _item: &WorkItem) -> bool {
+        self.remove_on_resolved.load(Ordering::SeqCst)
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {

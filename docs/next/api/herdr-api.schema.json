@@ -11064,14 +11064,20 @@
           "type": "object"
         },
         "WorkItemStep": {
-          "enum": [
-            "checkout",
-            "dependencies",
-            "server",
-            "agent_brief",
-            "unknown"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "agent_brief",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "checkout",
+              "description": "The worktree or scratch directory is ready.",
+              "type": "string"
+            }
+          ]
         },
         "WorkItemStepInfo": {
           "properties": {

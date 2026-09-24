@@ -1,10 +1,10 @@
 //! Local provisioning of a work item: progress model and background workers.
 //!
 //! Progress transitions are pure; the workers block and must only run on
-//! background threads.
+//! background threads. Worktrees themselves are created by the app through
+//! Herdr's `worktree.create`, so worktree plugin hooks run for them.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
@@ -12,15 +12,13 @@ use crate::api::schema::{
 };
 
 use super::process::{failure_detail, run_with_timeout};
-use super::source::{CheckoutSpec, DownloadSpec, ProvisionPlan, WorkspaceSource};
+use super::source::{DownloadSpec, ProvisionPlan, WorkspaceSource, WorktreeSpec};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
-const WORKTREE_TIMEOUT: Duration = Duration::from_secs(60);
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(900);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
-const PROBE_INTERVAL: Duration = Duration::from_secs(1);
-const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Review branches `<branch>-2` … `<branch>-N` are tried when `<branch>` is kept.
+const MAX_BRANCH_SUFFIX: u32 = 9;
 
 /// Retry state for starting the agent or delivering its brief.
 #[derive(Debug)]
@@ -31,6 +29,13 @@ pub(crate) struct AgentAttempt {
     pub pending: Option<std::sync::mpsc::Receiver<String>>,
 }
 
+/// An in-flight deferred API request (e.g. `worktree.create`).
+#[derive(Debug)]
+pub(crate) struct PendingResponse {
+    pub next_check: Instant,
+    pub response: std::sync::mpsc::Receiver<String>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ProvisionJob {
     pub job_id: u64,
@@ -39,7 +44,10 @@ pub(crate) struct ProvisionJob {
     pub workspace_id: Option<String>,
     pub agent_pane_id: Option<String>,
     pub agent_name: Option<String>,
-    pub server_pane_id: Option<String>,
+    /// Branch the worktree was created on, once known.
+    pub branch: Option<String>,
+    /// Waiting for Herdr to create the worktree.
+    pub worktree: Option<PendingResponse>,
     /// Waiting for the shell in the agent pane to accept `agent.start`.
     pub agent_start: Option<AgentAttempt>,
     /// Waiting for the agent to accept its brief.
@@ -48,12 +56,28 @@ pub(crate) struct ProvisionJob {
 
 impl ProvisionJob {
     pub(crate) fn next_attempt(&self) -> Option<Instant> {
-        [self.agent_start.as_ref(), self.brief.as_ref()]
-            .into_iter()
-            .flatten()
-            .map(|attempt| attempt.next_attempt)
-            .min()
+        [
+            self.worktree.as_ref().map(|pending| pending.next_check),
+            self.agent_start
+                .as_ref()
+                .map(|attempt| attempt.next_attempt),
+            self.brief.as_ref().map(|attempt| attempt.next_attempt),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
+}
+
+/// Outcome of preparing the workspace source on a background thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceReady {
+    /// Create a worktree on a new `branch` starting at `base`.
+    NewBranch { branch: String, base: String },
+    /// The review branch is already checked out here; reopen it.
+    ExistingWorktree(PathBuf),
+    /// The download workspace's file is in place.
+    Downloaded,
 }
 
 fn step(
@@ -70,39 +94,14 @@ fn step(
     }
 }
 
-/// Progress right after the user chose to review locally.
-pub(crate) fn initial_progress(plan: &ProvisionPlan, agent: &str) -> WorkItemProvisioningInfo {
+/// Progress right after the user chose a provisioning choice.
+pub(crate) fn initial_progress(plan: &ProvisionPlan) -> WorkItemProvisioningInfo {
     use WorkItemStepStatus::{Pending, Running, Skipped};
-    let (first_label, no_install) = match &plan.source {
-        WorkspaceSource::Worktree(_) => ("Branch checked out", "no install_command configured"),
-        WorkspaceSource::Download(_) => ("Diff downloaded", "no checkout"),
+    let first_label = match &plan.source {
+        WorkspaceSource::Worktree(_) => "Worktree created",
+        WorkspaceSource::Download(_) => "Diff downloaded",
     };
-    let dependencies = if plan.install_command.is_some() {
-        step(
-            WorkItemStep::Dependencies,
-            "Dependencies installed",
-            Pending,
-            None,
-        )
-    } else {
-        step(
-            WorkItemStep::Dependencies,
-            "Dependencies installed",
-            Skipped,
-            Some(no_install),
-        )
-    };
-    let server = if plan.server.is_some() {
-        step(WorkItemStep::Server, "Server running", Pending, None)
-    } else {
-        step(
-            WorkItemStep::Server,
-            "Server running",
-            Skipped,
-            Some(&plan.server_skip_reason),
-        )
-    };
-    let agent_brief = if agent.is_empty() {
+    let agent_brief = if plan.layout.agent.is_empty() {
         step(
             WorkItemStep::AgentBrief,
             "Agent briefed",
@@ -115,8 +114,6 @@ pub(crate) fn initial_progress(plan: &ProvisionPlan, agent: &str) -> WorkItemPro
     let mut progress = WorkItemProvisioningInfo {
         steps: vec![
             step(WorkItemStep::Checkout, first_label, Running, None),
-            dependencies,
-            server,
             agent_brief,
         ],
         finished: false,
@@ -165,7 +162,7 @@ pub(crate) fn end_unfinished(
     refresh_finished(progress);
 }
 
-/// Checkout failed: record it and skip everything that depends on it.
+/// The workspace could not be prepared: record it and skip everything that depends on it.
 pub(crate) fn fail_checkout(progress: &mut WorkItemProvisioningInfo, detail: String) {
     set_step(
         progress,
@@ -173,25 +170,7 @@ pub(crate) fn fail_checkout(progress: &mut WorkItemProvisioningInfo, detail: Str
         WorkItemStepStatus::Failed,
         Some(detail),
     );
-    end_unfinished(progress, WorkItemStepStatus::Skipped, "checkout failed");
-}
-
-/// Dependencies failed: record it and skip a server that would need them.
-pub(crate) fn fail_dependencies(progress: &mut WorkItemProvisioningInfo, detail: String) {
-    set_step(
-        progress,
-        WorkItemStep::Dependencies,
-        WorkItemStepStatus::Failed,
-        Some(detail),
-    );
-    if status(progress, WorkItemStep::Server) == Some(WorkItemStepStatus::Pending) {
-        set_step(
-            progress,
-            WorkItemStep::Server,
-            WorkItemStepStatus::Skipped,
-            Some("dependencies failed".into()),
-        );
-    }
+    end_unfinished(progress, WorkItemStepStatus::Skipped, "no workspace");
 }
 
 pub(crate) fn has_failure(progress: &WorkItemProvisioningInfo) -> bool {
@@ -212,22 +191,64 @@ fn refresh_finished(progress: &mut WorkItemProvisioningInfo) {
     progress.finished = progress.steps.iter().all(|info| is_terminal(info.status));
 }
 
-fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
+fn git_output(
+    cwd: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     let mut command = crate::noninteractive_process::command("git");
     command
         .arg("-C")
         .arg(cwd)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0");
-    match run_with_timeout(command, timeout) {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(failure_detail(&output)),
-        Err(err) => Err(err.to_string()),
+    run_with_timeout(command, timeout).map_err(|err| err.to_string())
+}
+
+fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
+    let output = git_output(cwd, args, timeout)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(failure_detail(&output))
     }
 }
 
-/// Fetches the change and checks it out detached in its own worktree.
-fn checkout(spec: &CheckoutSpec) -> Result<(), String> {
+fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
+    let output = git_output(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        GIT_TIMEOUT,
+    )?;
+    Ok(output.status.success())
+}
+
+/// Path of the worktree that has `branch` checked out, if any.
+fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+    let output = git_output(repo, &["worktree", "list", "--porcelain"], GIT_TIMEOUT)?;
+    if !output.status.success() {
+        return Err(failure_detail(&output));
+    }
+    let wanted = format!("branch refs/heads/{branch}");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let mut path = None;
+    for line in listing.lines() {
+        if let Some(worktree) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(worktree));
+        } else if line == wanted {
+            return Ok(path);
+        }
+    }
+    Ok(None)
+}
+
+/// Fetches the change and decides how Herdr should create or reopen its worktree.
+fn prepare_worktree(spec: &WorktreeSpec) -> Result<SourceReady, String> {
     git(
         &spec.repo_path,
         &[
@@ -240,38 +261,37 @@ fn checkout(spec: &CheckoutSpec) -> Result<(), String> {
         FETCH_TIMEOUT,
     )
     .map_err(|err| format!("fetch: {err}"))?;
-    if spec.checkout_path.join(".git").exists() {
-        return git(
-            &spec.checkout_path,
-            &["checkout", "--detach", "--quiet", &spec.checkout_ref],
-            WORKTREE_TIMEOUT,
-        )
-        .map_err(|err| format!("checkout: {err}"));
+    if !branch_exists(&spec.repo_path, &spec.branch)? {
+        return Ok(SourceReady::NewBranch {
+            branch: spec.branch.clone(),
+            base: spec.base_ref.clone(),
+        });
     }
-    if let Some(parent) = spec.checkout_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("worktree add: {}: {err}", parent.display()))?;
+    if let Some(path) = worktree_for_branch(&spec.repo_path, &spec.branch)? {
+        return Ok(SourceReady::ExistingWorktree(path));
     }
-    let checkout_path = spec.checkout_path.to_string_lossy();
-    git(
-        &spec.repo_path,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            &checkout_path,
-            &spec.checkout_ref,
-        ],
-        WORKTREE_TIMEOUT,
-    )
-    .map_err(|err| format!("worktree add: {err}"))
+    // A kept review branch without a worktree: continue from it on a fresh branch so
+    // Herdr creates the worktree (and its hooks run) without discarding the kept work.
+    for suffix in 2..=MAX_BRANCH_SUFFIX {
+        let branch = format!("{}-{suffix}", spec.branch);
+        if !branch_exists(&spec.repo_path, &branch)? {
+            return Ok(SourceReady::NewBranch {
+                branch,
+                base: spec.branch.clone(),
+            });
+        }
+    }
+    Err(format!(
+        "branches {0} to {0}-{MAX_BRANCH_SUFFIX} already exist",
+        spec.branch
+    ))
 }
 
-/// Prepares the workspace directory: a worktree checkout or a downloaded file.
-pub(crate) fn prepare_source(source: &WorkspaceSource) -> Result<(), String> {
+/// Prepares the workspace source: fetches for a worktree, or downloads the file.
+pub(crate) fn prepare_source(source: &WorkspaceSource) -> Result<SourceReady, String> {
     match source {
-        WorkspaceSource::Worktree(spec) => checkout(spec),
-        WorkspaceSource::Download(spec) => download(spec),
+        WorkspaceSource::Worktree(spec) => prepare_worktree(spec),
+        WorkspaceSource::Download(spec) => download(spec).map(|()| SourceReady::Downloaded),
     }
 }
 
@@ -293,62 +313,35 @@ fn download(spec: &DownloadSpec) -> Result<(), String> {
     std::fs::write(&path, &output.stdout).map_err(|err| format!("{}: {err}", path.display()))
 }
 
-/// Runs the dependency install command in `cwd` through the user's shell.
-pub(crate) fn install(command: &str, cwd: &Path) -> Result<(), String> {
-    let mut process = crate::platform::detached_custom_command_process(command);
-    process.current_dir(cwd);
-    match run_with_timeout(process, INSTALL_TIMEOUT) {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(match output.status.code() {
-            Some(code) => format!("exit {code}: {}", failure_detail(&output)),
-            None => failure_detail(&output),
-        }),
-        Err(err) => Err(err.to_string()),
-    }
-}
-
-/// Waits until something accepts connections on the local `port`.
-pub(crate) fn probe(port: u16) -> Result<(), String> {
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let started = Instant::now();
-    loop {
-        if TcpStream::connect_timeout(&address, PROBE_CONNECT_TIMEOUT).is_ok() {
-            return Ok(());
-        }
-        if started.elapsed() >= PROBE_TIMEOUT {
-            return Err(format!(
-                "nothing listening on port {port} after {} s",
-                PROBE_TIMEOUT.as_secs()
-            ));
-        }
-        std::thread::sleep(PROBE_INTERVAL);
-    }
+/// Deletes a local review branch after its worktree was removed.
+pub(crate) fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
+    git(repo, &["branch", "-D", "--quiet", branch], GIT_TIMEOUT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_items::source::ServerPlan;
-    use std::path::PathBuf;
+    use crate::work_items::source::WorkspaceLayout;
 
-    fn plan(install: bool, server: bool) -> ProvisionPlan {
+    fn plan(agent: &str) -> ProvisionPlan {
         ProvisionPlan {
-            source: WorkspaceSource::Worktree(CheckoutSpec {
+            source: WorkspaceSource::Worktree(WorktreeSpec {
                 repo_path: PathBuf::from("/repo"),
                 remote: "origin".into(),
                 fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
-                checkout_ref: "refs/herdr/pull/1".into(),
-                checkout_path: PathBuf::from("/worktrees/repo/pr-1"),
+                base_ref: "refs/herdr/pull/1".into(),
+                branch: "review/pr-1".into(),
             }),
             workspace_label: "#1 Title".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
-            install_command: install.then(|| "npm ci".into()),
-            server: server.then(|| ServerPlan {
-                command: "npm run dev".into(),
-                port: Some(3000),
-            }),
-            server_skip_reason: "no front-end changes".into(),
+            layout: WorkspaceLayout {
+                agent: agent.into(),
+                editor_command: String::new(),
+                lazygit_command: String::new(),
+                diff_command: String::new(),
+            },
+            delete_branch: true,
         }
     }
 
@@ -357,47 +350,26 @@ mod tests {
     }
 
     #[test]
-    fn initial_progress_skips_unconfigured_steps_with_reasons() {
-        let progress = initial_progress(&plan(false, false), "");
+    fn initial_progress_skips_the_agent_without_one() {
+        let progress = initial_progress(&plan(""));
         use WorkItemStepStatus::{Running, Skipped};
-        assert_eq!(
-            statuses(&progress),
-            vec![Running, Skipped, Skipped, Skipped]
-        );
-        assert_eq!(
-            progress.steps[2].detail.as_deref(),
-            Some("no front-end changes")
-        );
+        assert_eq!(statuses(&progress), vec![Running, Skipped]);
+        assert_eq!(progress.steps[0].label, "Worktree created");
         assert!(!progress.finished);
     }
 
     #[test]
     fn checkout_failure_skips_the_rest_and_finishes() {
-        let mut progress = initial_progress(&plan(true, true), "claude");
+        let mut progress = initial_progress(&plan("claude"));
         fail_checkout(&mut progress, "fetch: denied".into());
         use WorkItemStepStatus::{Failed, Skipped};
-        assert_eq!(statuses(&progress), vec![Failed, Skipped, Skipped, Skipped]);
-        assert_eq!(progress.steps[3].detail.as_deref(), Some("checkout failed"));
+        assert_eq!(statuses(&progress), vec![Failed, Skipped]);
         assert!(progress.finished);
     }
 
     #[test]
-    fn dependency_failure_skips_a_pending_server() {
-        let mut progress = initial_progress(&plan(true, true), "claude");
-        fail_dependencies(&mut progress, "exit 1".into());
-        assert_eq!(
-            status(&progress, WorkItemStep::Server),
-            Some(WorkItemStepStatus::Skipped)
-        );
-        assert_eq!(
-            progress.steps[2].detail.as_deref(),
-            Some("dependencies failed")
-        );
-    }
-
-    #[test]
     fn finished_only_once_every_step_is_terminal() {
-        let mut progress = initial_progress(&plan(false, false), "claude");
+        let mut progress = initial_progress(&plan("claude"));
         set_step(
             &mut progress,
             WorkItemStep::Checkout,
@@ -415,8 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn download_source_labels_the_first_step_and_skips_install_without_checkout() {
-        let mut download = plan(false, false);
+    fn download_source_labels_the_first_step() {
+        let mut download = plan("claude");
         download.source = WorkspaceSource::Download(DownloadSpec {
             directory: PathBuf::from("/worktrees/repo/pr-1-agent"),
             program: "gh".into(),
@@ -424,9 +396,10 @@ mod tests {
             env: Vec::new(),
             file_name: "pr-1.diff".into(),
         });
-        let progress = initial_progress(&download, "claude");
-        assert_eq!(progress.steps[0].label, "Diff downloaded");
-        assert_eq!(progress.steps[1].detail.as_deref(), Some("no checkout"));
+        assert_eq!(
+            initial_progress(&download).steps[0].label,
+            "Diff downloaded"
+        );
     }
 
     #[cfg(unix)]
@@ -441,9 +414,118 @@ mod tests {
             env: vec![("GH_PROMPT_DISABLED".into(), "1".into())],
             file_name: "pr-1.diff".into(),
         };
-        prepare_source(&WorkspaceSource::Download(spec.clone())).expect("download");
+        let ready = prepare_source(&WorkspaceSource::Download(spec.clone())).expect("download");
         let written = std::fs::read_to_string(spec.directory.join("pr-1.diff")).expect("file");
         let _ = std::fs::remove_dir_all(&directory);
+        assert_eq!(ready, SourceReady::Downloaded);
         assert_eq!(written, "diff --git a/x b/x\n");
+    }
+
+    #[cfg(unix)]
+    fn test_repo(name: &str) -> PathBuf {
+        let repo = std::env::temp_dir().join(format!(
+            "herdr-work-items-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "-c",
+                "user.name=h",
+                "-c",
+                "user.email=h@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+            vec!["update-ref", "refs/pull/1/head", "HEAD"],
+        ] {
+            git(&repo, &args, GIT_TIMEOUT).expect("git setup");
+        }
+        repo
+    }
+
+    #[cfg(unix)]
+    fn spec(repo: &Path) -> WorktreeSpec {
+        WorktreeSpec {
+            repo_path: repo.to_path_buf(),
+            remote: repo.display().to_string(),
+            fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
+            base_ref: "refs/herdr/pull/1".into(),
+            branch: "review/pr-1".into(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_review_creates_the_branch_from_the_fetched_ref() {
+        let repo = test_repo("fresh");
+        let ready = prepare_worktree(&spec(&repo));
+        let _ = std::fs::remove_dir_all(&repo);
+        assert_eq!(
+            ready,
+            Ok(SourceReady::NewBranch {
+                branch: "review/pr-1".into(),
+                base: "refs/herdr/pull/1".into(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kept_branch_without_worktree_continues_on_a_suffixed_branch() {
+        let repo = test_repo("kept");
+        git(&repo, &["branch", "review/pr-1", "HEAD"], GIT_TIMEOUT).unwrap();
+        let ready = prepare_worktree(&spec(&repo));
+        let _ = std::fs::remove_dir_all(&repo);
+        assert_eq!(
+            ready,
+            Ok(SourceReady::NewBranch {
+                branch: "review/pr-1-2".into(),
+                base: "review/pr-1".into(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_out_branch_reopens_its_worktree() {
+        let repo = test_repo("reopen");
+        let checkout = repo.with_extension("checkout");
+        let checkout_arg = checkout.display().to_string();
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "review/pr-1",
+                &checkout_arg,
+                "HEAD",
+            ],
+            GIT_TIMEOUT,
+        )
+        .unwrap();
+        let ready = prepare_worktree(&spec(&repo));
+        let expected = crate::worktree::canonical_or_original(&checkout);
+        let found = match &ready {
+            Ok(SourceReady::ExistingWorktree(path)) => {
+                Some(crate::worktree::canonical_or_original(path))
+            }
+            _ => None,
+        };
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&checkout);
+        assert_eq!(found, Some(expected), "{ready:?}");
     }
 }

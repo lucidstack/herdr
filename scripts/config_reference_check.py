@@ -30,7 +30,11 @@ ROOT_STRUCT = "Config"
 
 # Dotted key prefixes that are open-ended (user-defined tables/arrays) and
 # therefore not enumerable in a flat reference table.
-SKIPPED_SUBTREES = ("keys.command", "work_items.github.repos")
+SKIPPED_SUBTREES = (
+    "keys.command",
+    "work_items.github.repos",
+    "work_items.github.review_requested",
+)
 
 FIELD_RE = re.compile(r"^\s*pub ([a-z_][a-z0-9_]*):\s*(.+?),?\s*$")
 STRUCT_RE = re.compile(r"^\s*pub(?:\(crate\))? struct ([A-Za-z0-9_]+)\s*\{\s*$")

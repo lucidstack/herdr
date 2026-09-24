@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::state::WorkItem;
+use super::OwnedWorktree;
 
 const STORE_VERSION: u32 = 1;
 
@@ -14,36 +15,50 @@ const STORE_VERSION: u32 = 1;
 struct StoreFile {
     version: u32,
     items: Vec<WorkItem>,
+    /// Review worktrees created for items, kept so their branches can be cleaned up.
+    #[serde(default)]
+    worktrees: Vec<OwnedWorktree>,
 }
 
 #[derive(Serialize)]
 struct StoreFileRef<'a> {
     version: u32,
     items: &'a [WorkItem],
+    worktrees: &'a [OwnedWorktree],
 }
 
-pub(crate) fn load(path: &Path) -> Vec<WorkItem> {
+/// Persisted work-item state.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Stored {
+    pub items: Vec<WorkItem>,
+    pub worktrees: Vec<OwnedWorktree>,
+}
+
+pub(crate) fn load(path: &Path) -> Stored {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Stored::default(),
         Err(err) => {
             warn!(path = %path.display(), err = %err, "failed to read work items; starting empty");
-            return Vec::new();
+            return Stored::default();
         }
     };
     match serde_json::from_str::<StoreFile>(&contents) {
-        Ok(file) if file.version == STORE_VERSION => file.items,
+        Ok(file) if file.version == STORE_VERSION => Stored {
+            items: file.items,
+            worktrees: file.worktrees,
+        },
         Ok(file) => {
             warn!(
                 path = %path.display(),
                 version = file.version,
                 "unsupported work items version; starting empty"
             );
-            Vec::new()
+            Stored::default()
         }
         Err(err) => {
             warn!(path = %path.display(), err = %err, "invalid work items file; starting empty");
-            Vec::new()
+            Stored::default()
         }
     }
 }
@@ -78,10 +93,11 @@ impl StoreWriter {
         }
     }
 
-    pub(crate) fn save(&self, items: &[WorkItem]) {
+    pub(crate) fn save(&self, items: &[WorkItem], worktrees: &[OwnedWorktree]) {
         match serde_json::to_string(&StoreFileRef {
             version: STORE_VERSION,
             items,
+            worktrees,
         }) {
             Ok(json) => {
                 let _ = self.tx.send(json);
@@ -137,6 +153,16 @@ mod tests {
                 steps: Vec::new(),
                 finished: false,
             }),
+            resolve_error: Some("dirty".into()),
+        }
+    }
+
+    fn worktree() -> OwnedWorktree {
+        OwnedWorktree {
+            checkout_path: "/worktrees/r/review-pr-1".into(),
+            repo_path: "/src/r".into(),
+            branch: "review/pr-1".into(),
+            delete_branch: true,
         }
     }
 
@@ -149,6 +175,7 @@ mod tests {
             &serde_json::to_string(&StoreFileRef {
                 version: STORE_VERSION,
                 items: std::slice::from_ref(&original),
+                worktrees: &[worktree()],
             })
             .expect("serialises"),
         )
@@ -159,9 +186,16 @@ mod tests {
             prepared_for: None,
             prepare_in_flight: false,
             provisioning: None,
+            resolve_error: None,
             ..original
         };
-        assert_eq!(loaded, vec![expected]);
+        assert_eq!(
+            loaded,
+            Stored {
+                items: vec![expected],
+                worktrees: vec![worktree()],
+            }
+        );
     }
 
     #[test]
@@ -172,12 +206,13 @@ mod tests {
             &serde_json::to_string(&StoreFileRef {
                 version: STORE_VERSION + 1,
                 items: &[item()],
+                worktrees: &[],
             })
             .expect("serialises"),
         )
         .expect("writes");
         let loaded = load(&path);
         let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
-        assert!(loaded.is_empty());
+        assert_eq!(loaded, Stored::default());
     }
 }

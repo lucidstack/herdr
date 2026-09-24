@@ -14,7 +14,7 @@ pub(crate) mod store;
 pub(crate) mod test_support;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,16 +41,25 @@ pub(crate) enum WorkItemsEvent {
     },
     CheckoutFinished {
         job_id: u64,
-        result: Result<(), String>,
+        result: Result<provision::SourceReady, String>,
     },
-    DependenciesFinished {
-        job_id: u64,
-        result: Result<(), String>,
-    },
-    ServerProbeFinished {
-        job_id: u64,
-        result: Result<(), String>,
-    },
+}
+
+/// A review worktree created for an item, remembered so its branch can be cleaned up
+/// when Herdr removes the worktree.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OwnedWorktree {
+    pub checkout_path: String,
+    pub repo_path: PathBuf,
+    pub branch: String,
+    pub delete_branch: bool,
+}
+
+/// A workspace being removed because its item resolved.
+#[derive(Debug)]
+pub(crate) struct PendingRemoval {
+    pub key: String,
+    pub pending: provision::PendingResponse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +82,10 @@ pub(crate) struct WorkItems {
     next_job_id: u64,
     /// Provisioning notices waiting for delivery to client shells.
     notices: Vec<WorkItemNotice>,
+    owned_worktrees: Vec<OwnedWorktree>,
+    /// Resolved items whose workspace should be removed, waiting for the app.
+    pending_resolutions: Vec<String>,
+    removals: Vec<PendingRemoval>,
 }
 
 impl std::fmt::Debug for WorkItems {
@@ -96,10 +109,7 @@ pub(crate) struct StorePolicy {
 fn build_sources(config: &WorkItemsConfig) -> Vec<Arc<dyn WorkItemSource>> {
     let mut sources: Vec<Arc<dyn WorkItemSource>> = Vec::new();
     if let Some(github) = config.github.as_ref().filter(|github| github.enabled) {
-        sources.push(Arc::new(github::GithubSource::new(
-            github.clone(),
-            !config.workspace.agent.is_empty(),
-        )));
+        sources.push(Arc::new(github::GithubSource::new(github.clone())));
     }
     sources
 }
@@ -118,6 +128,9 @@ impl WorkItems {
             jobs: HashMap::new(),
             next_job_id: 1,
             notices: Vec::new(),
+            owned_worktrees: Vec::new(),
+            pending_resolutions: Vec::new(),
+            removals: Vec::new(),
         }
     }
 
@@ -146,7 +159,9 @@ impl WorkItems {
         if !self.loaded {
             self.loaded = true;
             if store.load {
-                self.state = WorkItemsState::from_items(store::load(&store.path));
+                let stored = store::load(&store.path);
+                self.state = WorkItemsState::from_items(stored.items);
+                self.owned_worktrees = stored.worktrees;
             }
             if store.persist {
                 self.store = StoreWriter::spawn(store.path.clone());
@@ -206,16 +221,17 @@ impl WorkItems {
         self.revision
     }
 
-    pub(crate) fn config(&self) -> &WorkItemsConfig {
-        &self.config
-    }
-
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.next_poll
             .iter()
             .filter(|(id, _)| !self.polls_in_flight.contains(*id))
             .map(|(_, deadline)| *deadline)
             .chain(self.jobs.values().filter_map(ProvisionJob::next_attempt))
+            .chain(
+                self.removals
+                    .iter()
+                    .map(|removal| removal.pending.next_check),
+            )
             .min()
     }
 
@@ -277,6 +293,15 @@ impl WorkItems {
                     })
                     .into_iter()
                     .collect();
+                for key in self.state.take_newly_resolved() {
+                    if self
+                        .state
+                        .get(&key)
+                        .is_some_and(|item| source.remove_on_resolved(item))
+                    {
+                        self.pending_resolutions.push(key);
+                    }
+                }
                 if changed {
                     self.changed();
                 }
@@ -294,9 +319,7 @@ impl WorkItems {
                 (changed, Vec::new())
             }
             // Provisioning results need the app and are handled by its driver.
-            WorkItemsEvent::CheckoutFinished { .. }
-            | WorkItemsEvent::DependenciesFinished { .. }
-            | WorkItemsEvent::ServerProbeFinished { .. } => (false, Vec::new()),
+            WorkItemsEvent::CheckoutFinished { .. } => (false, Vec::new()),
         }
     }
 
@@ -332,16 +355,11 @@ impl WorkItems {
     }
 
     /// Starts provisioning `key`; returns the new job id.
-    pub(crate) fn start_job(
-        &mut self,
-        key: &str,
-        plan: ProvisionPlan,
-        agent: &str,
-    ) -> Result<u64, NotFound> {
+    pub(crate) fn start_job(&mut self, key: &str, plan: ProvisionPlan) -> Result<u64, NotFound> {
         let item = self.state.get_mut(key).ok_or(NotFound)?;
         item.phase = WorkItemPhase::Local;
         item.seen = true;
-        item.provisioning = Some(provision::initial_progress(&plan, agent));
+        item.provisioning = Some(provision::initial_progress(&plan));
         let job_id = self.next_job_id;
         self.next_job_id += 1;
         self.jobs.insert(
@@ -353,13 +371,57 @@ impl WorkItems {
                 workspace_id: None,
                 agent_pane_id: None,
                 agent_name: None,
-                server_pane_id: None,
+                branch: None,
+                worktree: None,
                 agent_start: None,
                 brief: None,
             },
         );
         self.changed();
         Ok(job_id)
+    }
+
+    /// Resolved items whose workspace the app should now remove.
+    pub(crate) fn take_pending_resolutions(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_resolutions)
+    }
+
+    pub(crate) fn start_removal(&mut self, removal: PendingRemoval) {
+        self.removals.push(removal);
+    }
+
+    pub(crate) fn removals_mut(&mut self) -> &mut Vec<PendingRemoval> {
+        &mut self.removals
+    }
+
+    /// Records why an item's workspace could not be removed on resolution.
+    pub(crate) fn set_resolve_error(&mut self, key: &str, error: Option<String>) {
+        if let Some(item) = self.state.get_mut(key) {
+            if item.resolve_error != error {
+                item.resolve_error = error;
+                self.changed();
+            }
+        }
+    }
+
+    pub(crate) fn record_owned_worktree(&mut self, worktree: OwnedWorktree) {
+        self.owned_worktrees
+            .retain(|owned| owned.checkout_path != worktree.checkout_path);
+        self.owned_worktrees.push(worktree);
+        self.changed();
+    }
+
+    /// Forgets and returns the review worktree at `checkout_path`, if one was created here.
+    pub(crate) fn take_owned_worktree(&mut self, checkout_path: &str) -> Option<OwnedWorktree> {
+        let canonical = |path: &str| crate::worktree::canonical_or_original(Path::new(path));
+        let wanted = canonical(checkout_path);
+        let index = self
+            .owned_worktrees
+            .iter()
+            .position(|owned| canonical(&owned.checkout_path) == wanted)?;
+        let owned = self.owned_worktrees.remove(index);
+        self.changed();
+        Some(owned)
     }
 
     pub(crate) fn job(&self, job_id: u64) -> Option<&ProvisionJob> {
@@ -482,7 +544,7 @@ impl WorkItems {
     fn changed(&mut self) {
         self.revision += 1;
         if let Some(store) = &self.store {
-            store.save(self.state.items());
+            store.save(self.state.items(), &self.owned_worktrees);
         }
     }
 
@@ -494,14 +556,6 @@ impl WorkItems {
         items.schedule_all(now);
         items.revision = 1;
         items
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_workspace_layout_for_test(
-        &mut self,
-        layout: crate::config::WorkItemWorkspaceConfig,
-    ) {
-        self.config.workspace = layout;
     }
 
     #[cfg(test)]

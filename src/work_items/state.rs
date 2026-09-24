@@ -37,6 +37,9 @@ pub(crate) struct WorkItem {
     pub prepare_in_flight: bool,
     #[serde(skip)]
     pub provisioning: Option<WorkItemProvisioningInfo>,
+    /// Why removing the workspace on resolution failed.
+    #[serde(skip)]
+    pub resolve_error: Option<String>,
 }
 
 pub(crate) fn item_key(source_id: &str, external_id: &str) -> String {
@@ -64,6 +67,7 @@ impl WorkItem {
             prepared_for: None,
             prepare_in_flight: false,
             provisioning: None,
+            resolve_error: None,
         }
     }
 
@@ -87,7 +91,10 @@ impl WorkItem {
             author: self.author.clone(),
             url: self.url.clone(),
             summary: self.summary.clone(),
-            notice: self.prepare_error.clone(),
+            notice: self
+                .resolve_error
+                .clone()
+                .or_else(|| self.prepare_error.clone()),
             phase: self.phase,
             seen: self.seen,
             resolved: self.resolved,
@@ -112,6 +119,8 @@ pub(crate) struct NotFound;
 pub(crate) struct WorkItemsState {
     items: Vec<WorkItem>,
     source_errors: HashMap<String, String>,
+    /// Keys that became resolved since the last `take_newly_resolved`.
+    newly_resolved: Vec<String>,
 }
 
 impl WorkItemsState {
@@ -119,6 +128,7 @@ impl WorkItemsState {
         Self {
             items,
             source_errors: HashMap::new(),
+            newly_resolved: Vec::new(),
         }
     }
 
@@ -183,6 +193,7 @@ impl WorkItemsState {
             changed |= *item != before;
         }
 
+        let newly_resolved = &mut self.newly_resolved;
         self.items.retain_mut(|item| {
             if item.source_id != source_id || present.contains(&item.key) {
                 return true;
@@ -190,6 +201,7 @@ impl WorkItemsState {
             if item.workspace_id.is_some() {
                 if !item.resolved {
                     item.resolved = true;
+                    newly_resolved.push(item.key.clone());
                     changed = true;
                 }
                 true
@@ -200,6 +212,11 @@ impl WorkItemsState {
         });
 
         (changed, arrivals)
+    }
+
+    /// Items that became resolved while a workspace hangs off them.
+    pub(crate) fn take_newly_resolved(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.newly_resolved)
     }
 
     /// Items of a source whose preparation is missing or stale; marks them in flight.
@@ -376,6 +393,16 @@ mod tests {
         state.get_mut("gh:a").expect("item").workspace_id = Some("w1".into());
         state.apply_poll("gh", Ok(Vec::new()));
         assert!(state.get("gh:a").expect("item kept").resolved);
+    }
+
+    #[test]
+    fn resolution_of_an_item_with_workspace_is_reported_once() {
+        let mut state = state_with("gh", &["a"]);
+        state.get_mut("gh:a").expect("item").workspace_id = Some("w1".into());
+        state.apply_poll("gh", Ok(Vec::new()));
+        state.apply_poll("gh", Ok(Vec::new()));
+        assert_eq!(state.take_newly_resolved(), vec!["gh:a".to_string()]);
+        assert!(state.take_newly_resolved().is_empty());
     }
 
     #[test]

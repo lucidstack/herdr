@@ -31,17 +31,18 @@ pub(crate) struct ItemChoices {
     pub default_choice_id: Option<String>,
 }
 
-/// How to obtain a local checkout of an item.
+/// A worktree created through Herdr's worktree support on a local review branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CheckoutSpec {
+pub(crate) struct WorktreeSpec {
     /// Existing clone the worktree is added to.
     pub repo_path: PathBuf,
     /// Remote name or URL that serves `fetch_refspec`.
     pub remote: String,
     pub fetch_refspec: String,
-    /// Local ref checked out detached.
-    pub checkout_ref: String,
-    pub checkout_path: PathBuf,
+    /// Fetched ref the review branch starts from.
+    pub base_ref: String,
+    /// Local branch created for the review.
+    pub branch: String,
 }
 
 /// A scratch directory holding one file produced by a command, e.g. a diff.
@@ -58,26 +59,21 @@ pub(crate) struct DownloadSpec {
 /// What the provisioned workspace is rooted in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkspaceSource {
-    /// A detached Git worktree of the change.
-    Worktree(CheckoutSpec),
+    /// A Herdr-managed Git worktree of the change.
+    Worktree(WorktreeSpec),
     /// No checkout: only a downloaded file for reading.
     Download(DownloadSpec),
 }
 
-impl WorkspaceSource {
-    /// Directory the workspace's panes start in.
-    pub(crate) fn directory(&self) -> &Path {
-        match self {
-            Self::Worktree(spec) => &spec.checkout_path,
-            Self::Download(spec) => &spec.directory,
-        }
-    }
-}
-
+/// Tabs and agent of a provisioned workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ServerPlan {
-    pub command: String,
-    pub port: Option<u16>,
+pub(crate) struct WorkspaceLayout {
+    /// Agent kind started in the first tab; empty starts none.
+    pub agent: String,
+    pub editor_command: String,
+    pub lazygit_command: String,
+    /// Diff viewer for download workspaces; `{file}` is the downloaded file.
+    pub diff_command: String,
 }
 
 /// Everything needed to provision a local workspace for an item.
@@ -88,10 +84,9 @@ pub(crate) struct ProvisionPlan {
     pub agent_name_hint: String,
     /// Prompt delivered to the agent once it is ready.
     pub brief: String,
-    pub install_command: Option<String>,
-    pub server: Option<ServerPlan>,
-    /// Shown on the server step when `server` is `None`.
-    pub server_skip_reason: String,
+    pub layout: WorkspaceLayout,
+    /// Delete the review branch when its worktree is removed.
+    pub delete_branch: bool,
 }
 
 /// An external system that produces work items.
@@ -114,6 +109,8 @@ pub(crate) trait WorkItemSource: Send + Sync {
         choice_id: &str,
         worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String>;
+    /// Pure: whether the item's workspace is removed once the source stops reporting it.
+    fn remove_on_resolved(&self, item: &WorkItem) -> bool;
     /// Pure: notification text when an item arrives or is requested again.
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>);
 }

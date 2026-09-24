@@ -1,6 +1,5 @@
 //! GitHub pull request review requests, read through the GitHub CLI.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
@@ -10,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
-use crate::config::{GithubRepoConfig, GithubWorkItemsConfig};
+use crate::config::{
+    GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig, ReviewRequestedConfig,
+};
 
 use super::process::{failure_detail, run_with_timeout};
 use super::source::{
-    CheckoutSpec, DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, ServerPlan, SourceItem,
-    WorkItemSource, WorkspaceSource,
+    DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, WorkItemSource,
+    WorkspaceLayout, WorkspaceSource, WorktreeSpec,
 };
 use super::state::WorkItem;
 
@@ -31,12 +32,17 @@ const MAX_BRIEF_FILES: usize = 100;
 
 pub(crate) struct GithubSource {
     config: GithubWorkItemsConfig,
-    /// Whether `work_items.workspace.agent` names an agent; agent-led choices need one.
-    agent_configured: bool,
-    docs: Vec<Regex>,
-    frontend: Vec<Regex>,
-    repo_frontend: HashMap<String, Vec<Regex>>,
+    /// Review-request blocks with compiled patterns, in configuration order.
+    review_requested: Vec<Workflow>,
+    /// Defaults used when no block matches a repository.
+    fallback: Workflow,
     build_error: Option<String>,
+}
+
+/// One `[[work_items.github.review_requested]]` block, ready for matching.
+struct Workflow {
+    config: ReviewRequestedConfig,
+    docs: Vec<Regex>,
 }
 
 #[derive(Deserialize)]
@@ -111,33 +117,31 @@ fn compile_patterns(patterns: &[String], key: &str) -> Result<Vec<Regex>, String
 }
 
 impl GithubSource {
-    pub(crate) fn new(config: GithubWorkItemsConfig, agent_configured: bool) -> Self {
+    pub(crate) fn new(config: GithubWorkItemsConfig) -> Self {
         let mut build_error = None;
-        let mut compile = |patterns: &[String], key: &str| {
-            compile_patterns(patterns, key).unwrap_or_else(|err| {
+        let mut compile = |block: &ReviewRequestedConfig| Workflow {
+            config: block.clone(),
+            docs: compile_patterns(&block.docs_patterns, "docs_patterns").unwrap_or_else(|err| {
                 build_error.get_or_insert(err);
                 Vec::new()
-            })
+            }),
         };
-        let docs = compile(&config.docs_patterns, "docs_patterns");
-        let frontend = compile(&config.frontend_patterns, "frontend_patterns");
-        let mut repo_frontend = HashMap::new();
-        for repo in &config.repos {
-            if let Some(patterns) = &repo.frontend_patterns {
-                repo_frontend.insert(
-                    repo.name.to_ascii_lowercase(),
-                    compile(patterns, "frontend_patterns"),
-                );
-            }
-        }
+        let review_requested = config.review_requested.iter().map(&mut compile).collect();
+        let fallback = compile(&ReviewRequestedConfig::default());
         Self {
             config,
-            agent_configured,
-            docs,
-            frontend,
-            repo_frontend,
+            review_requested,
+            fallback,
             build_error,
         }
+    }
+
+    /// The review-request workflow for `repo`: the first matching block, else the defaults.
+    fn workflow(&self, repo: &str) -> &Workflow {
+        self.review_requested
+            .iter()
+            .find(|workflow| workflow.config.applies_to(repo))
+            .unwrap_or(&self.fallback)
     }
 
     fn repo(&self, name: &str) -> Option<&GithubRepoConfig> {
@@ -145,21 +149,6 @@ impl GithubSource {
             .repos
             .iter()
             .find(|repo| repo.name.eq_ignore_ascii_case(name))
-    }
-
-    fn frontend_patterns(&self, repo: &str) -> &[Regex] {
-        self.repo_frontend
-            .get(&repo.to_ascii_lowercase())
-            .map(Vec::as_slice)
-            .unwrap_or(&self.frontend)
-    }
-
-    pub(crate) fn touches_frontend(&self, repo: &str, detail: &GithubDetail) -> bool {
-        let patterns = self.frontend_patterns(repo);
-        detail
-            .files
-            .iter()
-            .any(|file| patterns.iter().any(|pattern| pattern.is_match(&file.path)))
     }
 
     fn gh(&self) -> std::process::Command {
@@ -173,8 +162,8 @@ impl GithubSource {
         if mode.checks_out() && !mapped {
             return Some(format!("No local checkout configured for {repo}"));
         }
-        if mode.needs_agent() && !self.agent_configured {
-            return Some("No agent configured in work_items.workspace.agent".into());
+        if mode.needs_agent() && self.workflow(repo).config.agent.is_empty() {
+            return Some(format!("No agent configured for {repo} review requests"));
         }
         None
     }
@@ -466,7 +455,7 @@ impl WorkItemSource for GithubSource {
         if let Some(error) = &self.build_error {
             return Err(error.clone());
         }
-        let query = format!("q={}", self.config.query);
+        let query = format!("q={}", self.config.queries.review_requested);
         let stdout = self.run_gh(&[
             "api",
             "--method",
@@ -515,7 +504,7 @@ impl WorkItemSource for GithubSource {
                 }
             }
         };
-        let mut summary = format!(
+        let summary = format!(
             "+{} −{} across {} {}",
             detail.additions,
             detail.deletions,
@@ -526,9 +515,6 @@ impl WorkItemSource for GithubSource {
                 "files"
             }
         );
-        if self.touches_frontend(repo, &detail) {
-            summary.push_str(" · front-end");
-        }
         let error = self
             .repo(repo)
             .and_then(|mapped| self.prefetch(mapped, number).err())
@@ -567,14 +553,15 @@ impl WorkItemSource for GithubSource {
             },
             disabled_reason: None,
         });
+        let workflow = self.workflow(repo.unwrap_or(&item.external_id));
         ItemChoices {
             choices,
             default_choice_id: Some(
                 default_choice(
                     detail.as_ref(),
                     mapped,
-                    self.config.small_diff_lines,
-                    &self.docs,
+                    workflow.config.small_diff_lines,
+                    &workflow.docs,
                 )
                 .into(),
             ),
@@ -598,6 +585,7 @@ impl WorkItemSource for GithubSource {
         let detail = item_detail(item).ok_or_else(|| {
             "pull request details are not available yet; try again shortly".to_string()
         })?;
+        let workflow = &self.workflow(repo_name).config;
         let short_name = repo_name.rsplit('/').next().unwrap_or(repo_name);
         let workspace_label = truncate_chars(
             &format!("#{number} {}", item.title),
@@ -605,70 +593,55 @@ impl WorkItemSource for GithubSource {
         );
         let agent_name_hint = format!("review-{number}");
         let brief = brief(repo_name, item, &detail, mode);
-        let Some(repo) = mapped.filter(|_| mode.checks_out()) else {
-            return Ok(ProvisionPlan {
-                source: WorkspaceSource::Download(DownloadSpec {
-                    directory: crate::worktree::default_checkout_path(
-                        worktree_directory,
-                        short_name,
-                        &format!("pr-{number}-agent"),
-                    ),
-                    program: self.config.gh_path.clone(),
-                    args: vec![
-                        "pr".into(),
-                        "diff".into(),
-                        number.to_string(),
-                        "--repo".into(),
-                        repo_name.into(),
-                        "--color".into(),
-                        "never".into(),
-                    ],
-                    env: gh_env(),
-                    file_name: diff_file_name(number),
-                }),
-                workspace_label,
-                agent_name_hint,
-                brief,
-                install_command: None,
-                server: None,
-                server_skip_reason: "no checkout".into(),
-            });
+        let layout = WorkspaceLayout {
+            agent: workflow.agent.clone(),
+            editor_command: workflow.editor_command.clone(),
+            lazygit_command: workflow.lazygit_command.clone(),
+            diff_command: workflow.diff_command.clone(),
         };
-        let checkout_path = crate::worktree::default_checkout_path(
-            worktree_directory,
-            short_name,
-            &format!("pr-{number}"),
-        );
-        let server = self
-            .touches_frontend(repo_name, &detail)
-            .then(|| repo.server_command.clone())
-            .flatten()
-            .map(|command| ServerPlan {
-                command,
-                port: repo.server_port,
-            });
-        let server_skip_reason = if server.is_some() {
-            String::new()
-        } else if self.touches_frontend(repo_name, &detail) {
-            format!("no server_command configured for {repo_name}")
-        } else {
-            "no front-end changes".into()
-        };
-        Ok(ProvisionPlan {
-            source: WorkspaceSource::Worktree(CheckoutSpec {
+        let source = match mapped.filter(|_| mode.checks_out()) {
+            Some(repo) => WorkspaceSource::Worktree(WorktreeSpec {
                 repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
                 remote: repo.remote.clone(),
                 fetch_refspec: format!("+refs/pull/{number}/head:refs/herdr/pull/{number}"),
-                checkout_ref: format!("refs/herdr/pull/{number}"),
-                checkout_path,
+                base_ref: format!("refs/herdr/pull/{number}"),
+                branch: format!("review/pr-{number}"),
             }),
+            None => WorkspaceSource::Download(DownloadSpec {
+                directory: crate::worktree::default_checkout_path(
+                    worktree_directory,
+                    short_name,
+                    &format!("pr-{number}-agent"),
+                ),
+                program: self.config.gh_path.clone(),
+                args: vec![
+                    "pr".into(),
+                    "diff".into(),
+                    number.to_string(),
+                    "--repo".into(),
+                    repo_name.into(),
+                    "--color".into(),
+                    "never".into(),
+                ],
+                env: gh_env(),
+                file_name: diff_file_name(number),
+            }),
+        };
+        Ok(ProvisionPlan {
+            source,
             workspace_label,
             agent_name_hint,
             brief,
-            install_command: repo.install_command.clone(),
-            server,
-            server_skip_reason,
+            layout,
+            delete_branch: workflow.delete_branch,
         })
+    }
+
+    fn remove_on_resolved(&self, item: &WorkItem) -> bool {
+        let repo = parse_external_id(&item.external_id)
+            .map(|(repo, _)| repo)
+            .unwrap_or(&item.external_id);
+        self.workflow(repo).config.on_resolved == OnResolvedConfig::Remove
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
@@ -682,6 +655,7 @@ impl WorkItemSource for GithubSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[cfg(unix)]
     fn output(stderr: &str, code: i32) -> Output {
@@ -793,17 +767,15 @@ mod tests {
             prepared_for: None,
             prepare_in_flight: false,
             provisioning: None,
+            resolve_error: None,
         }
     }
 
     fn mapped_source(repo: GithubRepoConfig) -> GithubSource {
-        GithubSource::new(
-            GithubWorkItemsConfig {
-                repos: vec![repo],
-                ..GithubWorkItemsConfig::default()
-            },
-            true,
-        )
+        GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![repo],
+            ..GithubWorkItemsConfig::default()
+        })
     }
 
     fn repo_config() -> GithubRepoConfig {
@@ -811,10 +783,6 @@ mod tests {
             name: "o/r".into(),
             path: "/src/r".into(),
             remote: "origin".into(),
-            install_command: Some("npm ci".into()),
-            server_command: Some("npm run dev".into()),
-            server_port: Some(3000),
-            frontend_patterns: None,
         }
     }
 
@@ -826,7 +794,7 @@ mod tests {
 
     #[test]
     fn unmapped_repository_defaults_to_github_and_disables_local_review() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default(), true);
+        let source = GithubSource::new(GithubWorkItemsConfig::default());
         let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
         assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
         let local = &choices.choices[0];
@@ -863,17 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_frontend_patterns_override_the_defaults() {
-        let source = mapped_source(GithubRepoConfig {
-            frontend_patterns: Some(vec![r"^web/".into()]),
-            ..repo_config()
-        });
-        assert!(source.touches_frontend("o/r", &detail(&[("web/app.rs", 1, 0)])));
-        assert!(!source.touches_frontend("o/r", &detail(&[("src/view.tsx", 1, 0)])));
-    }
-
-    #[test]
-    fn provision_plan_checks_out_under_the_worktree_root_and_briefs_the_change() {
+    fn local_review_plans_a_review_branch_from_the_fetched_pull_request() {
         let source = mapped_source(repo_config());
         let change = detail(&[("src/a.rs", 40, 2), ("src/b.rs", 1, 1)]);
         let plan = source
@@ -883,41 +841,56 @@ mod tests {
                 Path::new("/worktrees"),
             )
             .expect("plan");
-        let WorkspaceSource::Worktree(checkout) = &plan.source else {
-            panic!("local review checks out a worktree");
-        };
-        assert_eq!(checkout.checkout_path, Path::new("/worktrees/r/pr-5"));
-        assert_eq!(checkout.checkout_ref, "refs/herdr/pull/5");
-        assert_eq!(plan.server, None);
-        assert_eq!(plan.server_skip_reason, "no front-end changes");
+        assert_eq!(
+            plan.source,
+            WorkspaceSource::Worktree(WorktreeSpec {
+                repo_path: PathBuf::from("/src/r"),
+                remote: "origin".into(),
+                fetch_refspec: "+refs/pull/5/head:refs/herdr/pull/5".into(),
+                base_ref: "refs/herdr/pull/5".into(),
+                branch: "review/pr-5".into(),
+            })
+        );
+        assert!(plan.delete_branch);
         assert!(plan.brief.contains("Add the thing"));
         assert!(plan.brief.contains("- src/a.rs (+40 −2)"));
         assert!(plan.brief.contains("- src/b.rs (+1 −1)"));
     }
 
     #[test]
-    fn provision_plan_starts_a_server_for_frontend_changes() {
-        let source = mapped_source(repo_config());
-        let change = detail(&[("web/app.tsx", 40, 2)]);
+    fn matching_review_requested_block_sets_layout_and_branch_policy() {
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![repo_config()],
+            review_requested: vec![
+                ReviewRequestedConfig {
+                    repos: vec!["other/repo".into()],
+                    agent: "codex".into(),
+                    ..ReviewRequestedConfig::default()
+                },
+                ReviewRequestedConfig {
+                    repos: vec!["o/r".into()],
+                    delete_branch: false,
+                    on_resolved: OnResolvedConfig::Remove,
+                    editor_command: "hx .".into(),
+                    ..ReviewRequestedConfig::default()
+                },
+            ],
+            ..GithubWorkItemsConfig::default()
+        });
+        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
         let plan = source
-            .provision_plan(
-                &work_item("o/r", Some(&change)),
-                "local",
-                Path::new("/worktrees"),
-            )
+            .provision_plan(&item, "local", Path::new("/worktrees"))
             .expect("plan");
-        assert_eq!(
-            plan.server,
-            Some(ServerPlan {
-                command: "npm run dev".into(),
-                port: Some(3000),
-            })
-        );
+        assert!(!plan.delete_branch);
+        assert_eq!(plan.layout.editor_command, "hx .");
+        assert_eq!(plan.layout.agent, "claude");
+        assert!(source.remove_on_resolved(&item));
+        assert!(!source.remove_on_resolved(&work_item("x/y", None)));
     }
 
     #[test]
     fn agent_review_needs_no_checkout_and_downloads_the_diff_with_gh() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default(), true);
+        let source = GithubSource::new(GithubWorkItemsConfig::default());
         let change = detail(&[("src/a.rs", 40, 2)]);
         let item = work_item("o/r", Some(&change));
         let choices = source.choices(&item);
@@ -943,7 +916,7 @@ mod tests {
 
     #[test]
     fn posting_agent_review_asks_for_a_comment_only_review() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default(), true);
+        let source = GithubSource::new(GithubWorkItemsConfig::default());
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
         let plan = source
             .provision_plan(&item, "agent_post", Path::new("/worktrees"))
@@ -968,13 +941,14 @@ mod tests {
 
     #[test]
     fn agent_led_choices_are_disabled_without_an_agent() {
-        let source = GithubSource::new(
-            GithubWorkItemsConfig {
-                repos: vec![repo_config()],
-                ..GithubWorkItemsConfig::default()
-            },
-            false,
-        );
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![repo_config()],
+            review_requested: vec![ReviewRequestedConfig {
+                agent: String::new(),
+                ..ReviewRequestedConfig::default()
+            }],
+            ..GithubWorkItemsConfig::default()
+        });
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
         let choices = source.choices(&item);
         let disabled: Vec<&str> = choices
@@ -991,14 +965,14 @@ mod tests {
 
     #[test]
     fn invalid_pattern_is_surfaced_by_poll() {
-        let source = GithubSource::new(
-            GithubWorkItemsConfig {
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            gh_path: "/nonexistent/gh".into(),
+            review_requested: vec![ReviewRequestedConfig {
                 docs_patterns: vec!["(".into()],
-                gh_path: "/nonexistent/gh".into(),
-                ..GithubWorkItemsConfig::default()
-            },
-            true,
-        );
+                ..ReviewRequestedConfig::default()
+            }],
+            ..GithubWorkItemsConfig::default()
+        });
         let error = source.poll().expect_err("poll fails");
         assert!(
             error.starts_with("invalid docs_patterns pattern"),

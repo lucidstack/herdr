@@ -50,9 +50,8 @@ pub struct WorkItemChoiceInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemStep {
+    /// The worktree or scratch directory is ready.
     Checkout,
-    Dependencies,
-    Server,
     AgentBrief,
     #[serde(other)]
     Unknown,

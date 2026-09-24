@@ -752,8 +752,14 @@ impl App {
     }
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
-        if let crate::api::schema::EventData::WorkspaceClosed { workspace_id, .. } = &event.data {
-            self.work_items_workspace_closed(workspace_id);
+        match &event.data {
+            crate::api::schema::EventData::WorkspaceClosed { workspace_id, .. } => {
+                self.work_items_workspace_closed(workspace_id);
+            }
+            crate::api::schema::EventData::WorktreeRemoved { worktree, .. } => {
+                self.work_items_worktree_removed(&worktree.path);
+            }
+            _ => {}
         }
         self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);

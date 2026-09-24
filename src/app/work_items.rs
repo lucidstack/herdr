@@ -9,19 +9,24 @@ use std::time::{Duration, Instant};
 
 use super::{App, AppPolicy};
 use crate::api::schema::{
-    AgentPromptParams, AgentStartParams, ErrorBody, ErrorResponse, Method, PaneSendInputParams,
-    Request, ResponseResult, SuccessResponse, TabCreateParams, TabRenameParams, WorkItemStep,
-    WorkItemStepStatus, WorkspaceCreateParams,
+    AgentPromptParams, AgentStartParams, ErrorBody, ErrorResponse, Method, PaneInfo,
+    PaneSendInputParams, Request, ResponseResult, SuccessResponse, TabCreateParams, TabInfo,
+    TabRenameParams, WorkItemStep, WorkItemStepStatus, WorkspaceCloseParams, WorkspaceCreateParams,
+    WorkspaceInfo, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 use crate::events::AppEvent;
-use crate::work_items::provision::{self, AgentAttempt};
+use crate::work_items::provision::{self, AgentAttempt, PendingResponse, SourceReady};
 use crate::work_items::source::WorkspaceSource;
-use crate::work_items::{StorePolicy, WorkItemNotice, WorkItemsEvent};
+use crate::work_items::{
+    OwnedWorktree, PendingRemoval, StorePolicy, WorkItemNotice, WorkItemsEvent,
+};
 
 /// How long the agent may take to accept `agent.start` and then its brief.
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 const AGENT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BRIEF_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How often a deferred worktree request is checked for its response.
+const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_AGENT_NAME_SUFFIX: usize = 9;
 
 pub(super) fn store_policy(policy: AppPolicy) -> StorePolicy {
@@ -65,6 +70,26 @@ impl App {
         self.work_items.workspace_closed(workspace_id);
     }
 
+    /// Deletes the review branch of a removed worktree when its workflow asks for it.
+    pub(super) fn work_items_worktree_removed(&mut self, checkout_path: &str) {
+        let Some(owned) = self.work_items.take_owned_worktree(checkout_path) else {
+            return;
+        };
+        if !owned.delete_branch {
+            return;
+        }
+        std::thread::spawn(move || {
+            if let Err(err) = provision::delete_branch(&owned.repo_path, &owned.branch) {
+                tracing::warn!(
+                    branch = %owned.branch,
+                    repo = %owned.repo_path.display(),
+                    err = %err,
+                    "failed to delete review branch"
+                );
+            }
+        });
+    }
+
     fn request_work_items_render(&self) {
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
@@ -91,8 +116,10 @@ impl App {
         }
         let revision = self.work_items.revision();
         for job_id in self.work_items.job_ids() {
+            self.advance_work_item_worktree(job_id, now);
             self.advance_work_item_agent(job_id, now);
         }
+        self.advance_work_item_removals(now);
         let changed = self.work_items.revision() != revision;
         if changed {
             self.request_work_items_render();
@@ -109,20 +136,7 @@ impl App {
         let mut notices = Vec::new();
         match event {
             WorkItemsEvent::CheckoutFinished { job_id, result } => {
-                self.work_item_checkout_finished(job_id, result, now);
-            }
-            WorkItemsEvent::DependenciesFinished { job_id, result } => {
-                self.work_item_dependencies_finished(job_id, result);
-            }
-            WorkItemsEvent::ServerProbeFinished { job_id, result } => {
-                let (status, detail) = match result {
-                    Ok(()) => (WorkItemStepStatus::Done, None),
-                    Err(err) => (WorkItemStepStatus::Failed, Some(err)),
-                };
-                self.work_items.update_progress(job_id, |progress| {
-                    provision::set_step(progress, WorkItemStep::Server, status, detail)
-                });
-                self.work_items.finish_job_if_done(job_id);
+                self.work_item_source_ready(job_id, result, now);
             }
             event => {
                 let polled_source = match &event {
@@ -136,6 +150,7 @@ impl App {
                 if let Some(source_id) = polled_source {
                     self.start_work_items_prepare(&source_id);
                 }
+                self.start_work_item_resolutions(now);
             }
         }
         notices.extend(self.work_items.take_notices());
@@ -199,10 +214,9 @@ impl App {
             .provision_plan(&item, choice_id, &self.state.worktree_directory)
             .map_err(|message| ("work_item_unavailable", message))?;
         let workspace_source = plan.source.clone();
-        let agent = self.work_items.config().workspace.agent.clone();
         let job_id = self
             .work_items
-            .start_job(key, plan, &agent)
+            .start_job(key, plan)
             .map_err(|_| ("work_item_not_found", format!("unknown work item {key}")))?;
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
@@ -224,27 +238,215 @@ impl App {
         parse_response(&self.handle_api_request_after_internal_events_drained(request))
     }
 
-    fn work_item_checkout_finished(
+    fn fail_work_item_workspace(&mut self, job_id: u64, detail: String) {
+        self.work_items.update_progress(job_id, |progress| {
+            provision::fail_checkout(progress, detail)
+        });
+        self.work_items.finish_job_if_done(job_id);
+    }
+
+    /// The background preparation finished: create or reopen the workspace.
+    fn work_item_source_ready(
         &mut self,
         job_id: u64,
-        result: Result<(), String>,
+        result: Result<SourceReady, String>,
         now: Instant,
     ) {
-        if let Err(err) = result {
-            self.work_items
-                .update_progress(job_id, |progress| provision::fail_checkout(progress, err));
-            self.work_items.finish_job_if_done(job_id);
+        let Some(job) = self.work_items.job(job_id) else {
+            return;
+        };
+        let plan = job.plan.clone();
+        let ready = match result {
+            Ok(ready) => ready,
+            Err(err) => return self.fail_work_item_workspace(job_id, err),
+        };
+        match (&plan.source, ready) {
+            (WorkspaceSource::Worktree(spec), SourceReady::NewBranch { branch, base }) => {
+                // worktree.create runs through Herdr so worktree.created hooks fire.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let request = Request {
+                    id: "work-items".into(),
+                    method: Method::WorktreeCreate(WorktreeCreateParams {
+                        workspace_id: None,
+                        cwd: Some(spec.repo_path.display().to_string()),
+                        branch: Some(branch.clone()),
+                        base: Some(base),
+                        path: None,
+                        label: Some(plan.workspace_label.clone()),
+                        focus: false,
+                        trust_repository: false,
+                    }),
+                };
+                if let Some(job) = self.work_items.job_mut(job_id) {
+                    job.branch = Some(branch);
+                    job.worktree = Some(PendingResponse {
+                        next_check: now + RESPONSE_POLL_INTERVAL,
+                        response: rx,
+                    });
+                }
+                if !self.handle_deferred_worktree_api_request(request, tx) {
+                    self.fail_work_item_workspace(job_id, "worktree.create is unavailable".into());
+                }
+            }
+            (WorkspaceSource::Worktree(spec), SourceReady::ExistingWorktree(path)) => {
+                let opened = self.work_items_api(Method::WorktreeOpen(WorktreeOpenParams {
+                    workspace_id: None,
+                    cwd: Some(spec.repo_path.display().to_string()),
+                    path: Some(path.display().to_string()),
+                    branch: None,
+                    label: Some(plan.workspace_label.clone()),
+                    focus: false,
+                    trust_repository: false,
+                }));
+                match opened {
+                    Ok(ResponseResult::WorktreeOpened {
+                        workspace,
+                        tab,
+                        root_pane,
+                        worktree,
+                        ..
+                    }) => {
+                        if let Some(job) = self.work_items.job_mut(job_id) {
+                            job.branch = Some(spec.branch.clone());
+                        }
+                        self.work_item_workspace_ready(
+                            job_id,
+                            workspace,
+                            tab,
+                            root_pane,
+                            &worktree.path,
+                            Some(format!("reopened {}", spec.branch)),
+                            now,
+                        );
+                    }
+                    Ok(_) => self.fail_work_item_workspace(
+                        job_id,
+                        unexpected_response("worktree.open").message,
+                    ),
+                    Err(err) => self.fail_work_item_workspace(
+                        job_id,
+                        format!("worktree.open: {}", err.message),
+                    ),
+                }
+            }
+            (WorkspaceSource::Download(spec), SourceReady::Downloaded) => {
+                let cwd = spec.directory.display().to_string();
+                match self.work_items_api(Method::WorkspaceCreate(WorkspaceCreateParams {
+                    source_workspace_id: None,
+                    cwd: Some(cwd.clone()),
+                    focus: false,
+                    label: Some(plan.workspace_label.clone()),
+                    env: Default::default(),
+                })) {
+                    Ok(ResponseResult::WorkspaceCreated {
+                        workspace,
+                        tab,
+                        root_pane,
+                    }) => self.work_item_workspace_ready(
+                        job_id, workspace, tab, root_pane, &cwd, None, now,
+                    ),
+                    Ok(_) => self.fail_work_item_workspace(
+                        job_id,
+                        unexpected_response("workspace.create").message,
+                    ),
+                    Err(err) => self.fail_work_item_workspace(
+                        job_id,
+                        format!("workspace.create: {}", err.message),
+                    ),
+                }
+            }
+            (_, ready) => {
+                self.fail_work_item_workspace(job_id, format!("unexpected preparation {ready:?}"))
+            }
+        }
+    }
+
+    /// Checks a pending `worktree.create` and continues once Herdr answers.
+    fn advance_work_item_worktree(&mut self, job_id: u64, now: Instant) {
+        let Some(pending) = self
+            .work_items
+            .job_mut(job_id)
+            .and_then(|job| job.worktree.as_mut())
+        else {
+            return;
+        };
+        if pending.next_check > now {
             return;
         }
+        let response = match pending.response.try_recv() {
+            Ok(response) => response,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                pending.next_check = now + RESPONSE_POLL_INTERVAL;
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return self
+                    .fail_work_item_workspace(job_id, "worktree.create response was lost".into());
+            }
+        };
+        let Some(job) = self.work_items.job_mut(job_id) else {
+            return;
+        };
+        job.worktree = None;
+        let WorkspaceSource::Worktree(spec) = job.plan.source.clone() else {
+            return;
+        };
+        let delete_branch = job.plan.delete_branch;
+        let branch = job.branch.clone().unwrap_or_else(|| spec.branch.clone());
+        match parse_response(&response) {
+            Ok(ResponseResult::WorktreeCreated {
+                workspace,
+                tab,
+                root_pane,
+                worktree,
+            }) => {
+                self.work_items.record_owned_worktree(OwnedWorktree {
+                    checkout_path: worktree.path.clone(),
+                    repo_path: spec.repo_path.clone(),
+                    branch: branch.clone(),
+                    delete_branch,
+                });
+                self.work_item_workspace_ready(
+                    job_id,
+                    workspace,
+                    tab,
+                    root_pane,
+                    &worktree.path,
+                    Some(format!("on {branch}")),
+                    now,
+                );
+            }
+            Ok(_) => self
+                .fail_work_item_workspace(job_id, unexpected_response("worktree.create").message),
+            Err(err) => {
+                self.fail_work_item_workspace(job_id, format!("worktree.create: {}", err.message))
+            }
+        }
+    }
+
+    /// The workspace exists: link it to the item, add the tool tabs and start the agent.
+    #[allow(clippy::too_many_arguments)] // One call per provisioning path; a struct would only rename the fields.
+    fn work_item_workspace_ready(
+        &mut self,
+        job_id: u64,
+        workspace: WorkspaceInfo,
+        tab: TabInfo,
+        root_pane: PaneInfo,
+        cwd: &str,
+        detail: Option<String>,
+        now: Instant,
+    ) {
+        self.work_items
+            .link_workspace(job_id, &workspace.workspace_id);
         self.work_items.update_progress(job_id, |progress| {
             provision::set_step(
                 progress,
                 WorkItemStep::Checkout,
                 WorkItemStepStatus::Done,
-                None,
+                detail,
             )
         });
-        if let Err(err) = self.create_work_item_workspace(job_id) {
+        if let Err(err) = self.add_work_item_tabs(job_id, &workspace.workspace_id, tab, cwd) {
             let detail = format!("workspace setup failed: {}", err.message);
             self.work_items.update_progress(job_id, |progress| {
                 provision::end_unfinished(progress, WorkItemStepStatus::Failed, &detail)
@@ -252,57 +454,34 @@ impl App {
             self.work_items.finish_job_if_done(job_id);
             return;
         }
-        let dependencies_pending = self
-            .work_items
-            .progress(job_id)
-            .and_then(|progress| provision::status(progress, WorkItemStep::Dependencies))
-            == Some(WorkItemStepStatus::Pending);
-        if dependencies_pending {
-            self.start_work_item_dependencies(job_id);
-        } else {
-            self.start_work_item_server(job_id);
+        if let Some(job) = self.work_items.job_mut(job_id) {
+            job.agent_pane_id = Some(root_pane.pane_id);
         }
         self.start_work_item_agent(job_id, now);
         self.work_items.finish_job_if_done(job_id);
     }
 
-    /// Creates the workspace and its tabs for a checked-out job.
-    fn create_work_item_workspace(&mut self, job_id: u64) -> Result<(), ErrorBody> {
+    fn add_work_item_tabs(
+        &mut self,
+        job_id: u64,
+        workspace_id: &str,
+        first_tab: TabInfo,
+        cwd: &str,
+    ) -> Result<(), ErrorBody> {
         let Some(job) = self.work_items.job(job_id) else {
             return Ok(());
         };
         let plan = job.plan.clone();
-        let layout: crate::config::WorkItemWorkspaceConfig =
-            self.work_items.config().workspace.clone();
-        let cwd = plan.source.directory().display().to_string();
-        let ResponseResult::WorkspaceCreated {
-            workspace,
-            tab,
-            root_pane,
-        } = self.work_items_api(Method::WorkspaceCreate(WorkspaceCreateParams {
-            source_workspace_id: None,
-            cwd: Some(cwd.clone()),
-            focus: false,
-            label: Some(plan.workspace_label.clone()),
-            env: Default::default(),
-        }))?
-        else {
-            return Err(unexpected_response("workspace.create"));
-        };
-        self.work_items
-            .link_workspace(job_id, &workspace.workspace_id);
-        let first_tab = if layout.agent.is_empty() {
-            "shell"
-        } else {
-            "agent"
-        };
+        let layout = &plan.layout;
         self.work_items_api(Method::TabRename(TabRenameParams {
-            tab_id: tab.tab_id,
-            label: first_tab.into(),
+            tab_id: first_tab.tab_id,
+            label: if layout.agent.is_empty() {
+                "shell"
+            } else {
+                "agent"
+            }
+            .into(),
         }))?;
-        if let Some(job) = self.work_items.job_mut(job_id) {
-            job.agent_pane_id = Some(root_pane.pane_id);
-        }
         let tools: Vec<(&str, String)> = match &plan.source {
             WorkspaceSource::Worktree(_) => vec![
                 ("editor", layout.editor_command.clone()),
@@ -317,18 +496,12 @@ impl App {
             if command.is_empty() {
                 continue;
             }
-            let pane_id = self.create_work_item_tab(&workspace.workspace_id, &cwd, label)?;
+            let pane_id = self.create_work_item_tab(workspace_id, cwd, label)?;
             self.work_items_api(Method::PaneSendInput(PaneSendInputParams {
                 pane_id,
                 text: command,
                 keys: vec!["enter".into()],
             }))?;
-        }
-        if plan.server.is_some() {
-            let pane_id = self.create_work_item_tab(&workspace.workspace_id, &cwd, "server")?;
-            if let Some(job) = self.work_items.job_mut(job_id) {
-                job.server_pane_id = Some(pane_id);
-            }
         }
         Ok(())
     }
@@ -351,102 +524,81 @@ impl App {
         }
     }
 
-    fn start_work_item_dependencies(&mut self, job_id: u64) {
-        let Some(job) = self.work_items.job(job_id) else {
-            return;
-        };
-        let Some(command) = job.plan.install_command.clone() else {
-            return;
-        };
-        let cwd = job.plan.source.directory().to_path_buf();
-        self.work_items.update_progress(job_id, |progress| {
-            provision::set_step(
-                progress,
-                WorkItemStep::Dependencies,
-                WorkItemStepStatus::Running,
-                None,
-            )
-        });
-        let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let result = provision::install(&command, &cwd);
-            send_event(
-                &event_tx,
-                WorkItemsEvent::DependenciesFinished { job_id, result },
-            );
-        });
-    }
-
-    fn work_item_dependencies_finished(&mut self, job_id: u64, result: Result<(), String>) {
-        match result {
-            Ok(()) => {
-                self.work_items.update_progress(job_id, |progress| {
-                    provision::set_step(
-                        progress,
-                        WorkItemStep::Dependencies,
-                        WorkItemStepStatus::Done,
-                        None,
-                    )
-                });
-                self.start_work_item_server(job_id);
+    /// Removes the workspaces of items that resolved under an `on_resolved = "remove"` workflow.
+    fn start_work_item_resolutions(&mut self, now: Instant) {
+        for key in self.work_items.take_pending_resolutions() {
+            let Some(workspace_id) = self
+                .work_items
+                .get(&key)
+                .and_then(|item| item.workspace_id.clone())
+            else {
+                continue;
+            };
+            let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
+                continue;
+            };
+            let linked_worktree = self.state.workspaces[ws_idx]
+                .worktree_space()
+                .is_some_and(|space| space.is_linked_worktree);
+            if !linked_worktree {
+                if let Err(err) =
+                    self.work_items_api(Method::WorkspaceClose(WorkspaceCloseParams {
+                        workspace_id,
+                        close_group: false,
+                    }))
+                {
+                    self.work_items
+                        .set_resolve_error(&key, Some(format!("not closed: {}", err.message)));
+                }
+                continue;
             }
-            Err(err) => self.work_items.update_progress(job_id, |progress| {
-                provision::fail_dependencies(progress, err)
-            }),
+            // Refuses to discard uncommitted changes; worktree.removed hooks and the
+            // branch policy run once Herdr removes it.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let request = Request {
+                id: "work-items".into(),
+                method: Method::WorktreeRemove(WorktreeRemoveParams {
+                    workspace_id,
+                    force: false,
+                    trust_repository: false,
+                }),
+            };
+            if self.handle_deferred_worktree_api_request(request, tx) {
+                self.work_items.start_removal(PendingRemoval {
+                    key,
+                    pending: PendingResponse {
+                        next_check: now + RESPONSE_POLL_INTERVAL,
+                        response: rx,
+                    },
+                });
+            }
         }
-        self.work_items.finish_job_if_done(job_id);
     }
 
-    fn start_work_item_server(&mut self, job_id: u64) {
-        let Some(job) = self.work_items.job(job_id) else {
-            return;
-        };
-        let (Some(server), Some(pane_id)) = (job.plan.server.clone(), job.server_pane_id.clone())
-        else {
-            return;
-        };
-        if let Err(err) = self.work_items_api(Method::PaneSendInput(PaneSendInputParams {
-            pane_id,
-            text: server.command,
-            keys: vec!["enter".into()],
-        })) {
-            self.work_items.update_progress(job_id, |progress| {
-                provision::set_step(
-                    progress,
-                    WorkItemStep::Server,
-                    WorkItemStepStatus::Failed,
-                    Some(err.message),
-                )
-            });
-            return;
+    fn advance_work_item_removals(&mut self, now: Instant) {
+        let mut failures = Vec::new();
+        self.work_items.removals_mut().retain_mut(|removal| {
+            if removal.pending.next_check > now {
+                return true;
+            }
+            match removal.pending.response.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    removal.pending.next_check = now + RESPONSE_POLL_INTERVAL;
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+                Ok(response) => {
+                    if let Err(err) = parse_response(&response) {
+                        failures.push((removal.key.clone(), err.message));
+                    }
+                    false
+                }
+            }
+        });
+        for (key, message) in failures {
+            self.work_items
+                .set_resolve_error(&key, Some(format!("worktree kept: {message}")));
         }
-        let Some(port) = server.port else {
-            self.work_items.update_progress(job_id, |progress| {
-                provision::set_step(
-                    progress,
-                    WorkItemStep::Server,
-                    WorkItemStepStatus::Done,
-                    Some("started".into()),
-                )
-            });
-            return;
-        };
-        self.work_items.update_progress(job_id, |progress| {
-            provision::set_step(
-                progress,
-                WorkItemStep::Server,
-                WorkItemStepStatus::Running,
-                None,
-            )
-        });
-        let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let result = provision::probe(port);
-            send_event(
-                &event_tx,
-                WorkItemsEvent::ServerProbeFinished { job_id, result },
-            );
-        });
     }
 
     fn set_work_item_agent_step(
@@ -505,7 +657,7 @@ impl App {
             return;
         };
         let hint = job.plan.agent_name_hint.clone();
-        let kind = self.work_items.config().workspace.agent.clone();
+        let kind = job.plan.layout.agent.clone();
         for suffix in 1..=MAX_AGENT_NAME_SUFFIX {
             let name = if suffix == 1 {
                 hint.clone()
@@ -700,15 +852,15 @@ mod tests {
     /// Runs due tasks and drains events until `done` holds or two seconds pass.
     fn run_until(app: &mut App, mut done: impl FnMut(&mut App) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(2);
-        app.run_work_items_tasks(Instant::now());
         while Instant::now() < deadline {
+            app.run_work_items_tasks(Instant::now());
             app.drain_all_internal_events();
             if done(app) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("condition not reached within 2 s");
+        panic!("condition not reached within 2 s: {:#?}", list(app));
     }
 
     #[test]
@@ -798,74 +950,148 @@ mod tests {
             })
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn local_choice_provisions_a_worktree_workspace_owned_by_the_item() {
-        use crate::api::schema::{TabListParams, WorkItemStepStatus, WorkspaceCloseParams};
-        use crate::work_items::source::{CheckoutSpec, ProvisionPlan, WorkspaceSource};
+    struct ReviewRepo {
+        root: std::path::PathBuf,
+        repo: std::path::PathBuf,
+    }
 
-        let root = std::env::temp_dir().join(format!(
-            "herdr-work-items-provision-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "--quiet"]);
-        git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
-        git(
-            &repo,
-            &["commit", "--quiet", "--allow-empty", "-m", "change"],
-        );
-        git(&repo, &["update-ref", "refs/pull/1/head", "HEAD"]);
-        git(&repo, &["reset", "--quiet", "--hard", "HEAD~1"]);
-        let checkout_path = root.join("worktrees").join("repo").join("pr-1");
+    impl ReviewRepo {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "herdr-work-items-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let repo = root.join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "--quiet"]);
+            git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+            git(
+                &repo,
+                &["commit", "--quiet", "--allow-empty", "-m", "change"],
+            );
+            git(&repo, &["update-ref", "refs/pull/1/head", "HEAD"]);
+            git(&repo, &["reset", "--quiet", "--hard", "HEAD~1"]);
+            Self { root, repo }
+        }
+
+        fn branch_exists(&self, branch: &str) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.repo)
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ])
+                .output()
+                .expect("git")
+                .status
+                .success()
+        }
+
+        fn worktree_path(&self, branch: &str) -> Option<std::path::PathBuf> {
+            let listing = git(&self.repo, &["worktree", "list", "--porcelain"]);
+            let mut path = None;
+            for line in listing.lines() {
+                if let Some(found) = line.strip_prefix("worktree ") {
+                    path = Some(std::path::PathBuf::from(found));
+                } else if line == format!("branch refs/heads/{branch}") {
+                    return path;
+                }
+            }
+            None
+        }
+    }
+
+    impl Drop for ReviewRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// App with a fake source whose "local" choice plans a worktree review of `repo`.
+    fn provisioning_app(repo: &ReviewRepo) -> (App, Arc<FakeSource>) {
+        use crate::work_items::source::{
+            ProvisionPlan, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+        };
 
         let mut app = test_app();
         app.state.default_shell = "/bin/sh".into();
         app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app.state.worktree_directory = repo.root.join("worktrees");
         let source = FakeSource::with_items(vec![source_item("1")]);
         *source.plan.lock().unwrap() = Some(ProvisionPlan {
-            source: WorkspaceSource::Worktree(CheckoutSpec {
-                repo_path: repo.clone(),
-                remote: repo.display().to_string(),
+            source: WorkspaceSource::Worktree(WorktreeSpec {
+                repo_path: repo.repo.clone(),
+                remote: repo.repo.display().to_string(),
                 fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
-                checkout_ref: "refs/herdr/pull/1".into(),
-                checkout_path: checkout_path.clone(),
+                base_ref: "refs/herdr/pull/1".into(),
+                branch: "review/pr-1".into(),
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
-            install_command: None,
-            server: None,
-            server_skip_reason: "no front-end changes".into(),
-        });
-        app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
-        app.work_items
-            .set_workspace_layout_for_test(crate::config::WorkItemWorkspaceConfig {
+            layout: WorkspaceLayout {
                 agent: String::new(),
                 editor_command: "true".into(),
                 lazygit_command: "true".into(),
                 diff_command: String::new(),
-            });
+            },
+            delete_branch: true,
+        });
+        app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
         run_until(&mut app, |app| !list(app).is_empty());
+        (app, source)
+    }
 
-        let choose = || {
+    fn choose_local(app: &mut App) -> Result<ResponseResult, String> {
+        api(
+            app,
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:1".into(),
                 choice_id: "local".into(),
-            })
-        };
-        api(&mut app, choose()).expect("local choice accepted");
-        run_until(&mut app, |app| {
+            }),
+        )
+    }
+
+    fn provision(app: &mut App) -> String {
+        choose_local(app).expect("local choice accepted");
+        run_until(app, |app| {
             list(app)[0]
                 .provisioning
                 .as_ref()
                 .is_some_and(|provisioning| provisioning.finished)
         });
+        list(app)[0]
+            .workspace_id
+            .clone()
+            .expect("item owns a workspace")
+    }
+
+    fn wait_for(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if done() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("condition not reached within 2 s");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_choice_creates_a_herdr_worktree_on_a_review_branch() {
+        use crate::api::schema::{TabListParams, WorkItemStepStatus};
+
+        let repo = ReviewRepo::new("provision");
+        let (mut app, _source) = provisioning_app(&repo);
+        let workspace_id = provision(&mut app);
 
         let item = list(&mut app).remove(0);
         let statuses: Vec<_> = item
@@ -878,25 +1104,18 @@ mod tests {
             .collect();
         assert_eq!(
             statuses,
-            vec![
-                WorkItemStepStatus::Done,
-                WorkItemStepStatus::Skipped,
-                WorkItemStepStatus::Skipped,
-                WorkItemStepStatus::Skipped,
-            ]
+            vec![WorkItemStepStatus::Done, WorkItemStepStatus::Skipped]
         );
         assert_eq!(item.phase, WorkItemPhase::Local);
-        let workspace_id = item.workspace_id.clone().expect("item owns a workspace");
-        let Ok(ResponseResult::WorkspaceList { workspaces }) =
-            api(&mut app, Method::WorkspaceList(EmptyParams::default()))
-        else {
-            panic!("workspace list");
-        };
-        let workspace = workspaces
-            .iter()
-            .find(|workspace| workspace.workspace_id == workspace_id)
-            .expect("provisioned workspace exists");
-        assert_eq!(workspace.label, "#1 Title 1");
+        let ws_idx = app
+            .parse_workspace_id(&workspace_id)
+            .expect("workspace exists");
+        assert!(
+            app.state.workspaces[ws_idx]
+                .worktree_space()
+                .is_some_and(|space| space.is_linked_worktree),
+            "workspace is registered as a Herdr worktree"
+        );
         let Ok(ResponseResult::TabList { tabs }) = api(
             &mut app,
             Method::TabList(TabListParams {
@@ -907,29 +1126,60 @@ mod tests {
         };
         let labels: Vec<_> = tabs.iter().map(|tab| tab.label.as_str()).collect();
         assert_eq!(labels, vec!["shell", "editor", "lazygit"]);
+        let checkout = repo.worktree_path("review/pr-1").expect("review worktree");
         assert_eq!(
-            git(&checkout_path, &["rev-parse", "HEAD"]),
-            git(&repo, &["rev-parse", "refs/pull/1/head"])
+            git(&checkout, &["rev-parse", "HEAD"]),
+            git(&repo.repo, &["rev-parse", "refs/pull/1/head"])
         );
-
         assert_eq!(
-            api(&mut app, choose()).expect_err("second choice rejected"),
+            choose_local(&mut app).expect_err("second choice rejected"),
             "work_item_already_provisioned"
         );
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
 
-        api(
-            &mut app,
-            Method::WorkspaceClose(WorkspaceCloseParams {
-                workspace_id,
-                close_group: false,
-            }),
-        )
-        .expect("workspace closes");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn removing_the_review_worktree_deletes_its_branch() {
+        let repo = ReviewRepo::new("remove-branch");
+        let (mut app, _source) = provisioning_app(&repo);
+        let workspace_id = provision(&mut app);
+        assert!(repo.branch_exists("review/pr-1"));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(app.handle_deferred_worktree_api_request(
+            request(Method::WorktreeRemove(
+                crate::api::schema::WorktreeRemoveParams {
+                    workspace_id,
+                    force: false,
+                    trust_repository: false,
+                }
+            )),
+            tx,
+        ));
+        run_until(&mut app, |_| rx.try_recv().is_ok());
+        wait_for(|| !repo.branch_exists("review/pr-1"));
         let item = list(&mut app).remove(0);
         assert_eq!(item.phase, WorkItemPhase::Pending);
         assert_eq!(item.workspace_id, None);
-
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
-        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolution_removes_the_worktree_when_the_workflow_asks_for_it() {
+        let repo = ReviewRepo::new("resolve-remove");
+        let (mut app, source) = provisioning_app(&repo);
+        provision(&mut app);
+        source
+            .remove_on_resolved
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        source.set_items(Vec::new());
+        app.work_items.schedule_all_for_test(Instant::now());
+        run_until(&mut app, |app| list(app).is_empty());
+        assert_eq!(repo.worktree_path("review/pr-1"), None);
+        wait_for(|| !repo.branch_exists("review/pr-1"));
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }
 }
