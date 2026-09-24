@@ -109,6 +109,7 @@ impl ClientShellState {
 
     pub(crate) fn retire_endpoint(&mut self, endpoint_id: &ClientEndpointId) {
         self.retire_endpoint_notifications(endpoint_id);
+        self.work_items.remove_endpoint(endpoint_id);
         if let Some(endpoint) = self
             .endpoints
             .iter_mut()

@@ -9,6 +9,8 @@ pub(crate) mod process;
 pub(crate) mod source;
 pub(crate) mod state;
 pub(crate) mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -172,6 +174,11 @@ impl WorkItems {
         !self.sources.is_empty()
     }
 
+    /// Bumped on every visible change; 0 while no source was ever enabled.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.next_poll
             .iter()
@@ -223,13 +230,20 @@ impl WorkItems {
                 self.next_poll
                     .insert(source_id.clone(), now + source.poll_interval());
                 let (changed, arrivals) = self.state.apply_poll(&source_id, result);
+                // One notice per poll: a first poll can report many items at once.
                 let notices = arrivals
-                    .iter()
-                    .filter_map(|key| self.state.get(key))
+                    .first()
+                    .and_then(|key| self.state.get(key))
                     .map(|item| {
                         let (title, body) = source.arrival_notice(&item.source_item());
+                        let body = if arrivals.len() > 1 {
+                            Some(format!("{} new from {}", arrivals.len(), source.label()))
+                        } else {
+                            body
+                        };
                         WorkItemNotice { title, body }
                     })
+                    .into_iter()
                     .collect();
                 if changed {
                     self.changed();
@@ -322,5 +336,49 @@ impl WorkItems {
     #[cfg(test)]
     pub(crate) fn schedule_all_for_test(&mut self, now: Instant) {
         self.schedule_all(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{source_item, FakeSource};
+    use super::*;
+
+    fn poll(items: &mut WorkItems, ids: &[&str]) -> Vec<WorkItemNotice> {
+        items
+            .apply_event(
+                WorkItemsEvent::Polled {
+                    source_id: "fake".into(),
+                    result: Ok(ids.iter().map(|id| source_item(id)).collect()),
+                },
+                Instant::now(),
+            )
+            .1
+    }
+
+    #[test]
+    fn single_arrival_uses_the_source_notice() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        assert_eq!(
+            poll(&mut items, &["a"]),
+            vec![WorkItemNotice {
+                title: "Arrived".into(),
+                body: Some("Title a".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn many_arrivals_in_one_poll_collapse_into_one_notice() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        assert_eq!(
+            poll(&mut items, &["a", "b", "c"]),
+            vec![WorkItemNotice {
+                title: "Arrived".into(),
+                body: Some("3 new from Fake".into()),
+            }]
+        );
     }
 }

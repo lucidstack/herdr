@@ -80,6 +80,7 @@ mod pane_graphics;
 mod render;
 mod retained_surface;
 mod surface_interest;
+mod work_items;
 
 pub use bootstrap::run_server;
 use lifecycle::wait_for_live_handoff_response_write;
@@ -2064,6 +2065,25 @@ impl HeadlessServer {
                     self.send_to_client(client_id, message);
                 }
                 self.send_to_client(client_id, snapshot_message);
+                if self.app.work_items.revision() > 0 {
+                    match Self::frame_work_items_projection(&self.app, &self.client_shell_boot_id) {
+                        Ok(framed) => {
+                            if let Some(client) = self.clients.get_mut(&client_id) {
+                                if client
+                                    .writer
+                                    .as_ref()
+                                    .is_some_and(|writer| writer.control.send(framed).is_ok())
+                                {
+                                    client.shell_work_items_revision =
+                                        self.app.work_items.revision();
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode endpoint work items")
+                        }
+                    }
+                }
                 if surface_active {
                     self.foreground_client_id = Some(client_id);
                 }

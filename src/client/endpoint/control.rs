@@ -10,6 +10,7 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
+    WorkItems(Box<crate::protocol::work_items::EndpointWorkItemsProjection>),
     Ignored,
 }
 
@@ -46,6 +47,12 @@ pub(crate) fn decode_endpoint_control(
                 view,
             },
         ));
+    }
+    if kind == crate::protocol::work_items::WORK_ITEMS_PROJECTION_KIND {
+        return Ok(match serde_json::from_str(data) {
+            Ok(projection) => EndpointControlMessage::WorkItems(Box::new(projection)),
+            Err(_) => EndpointControlMessage::Ignored,
+        });
     }
     if kind == crate::protocol::endpoint::ENDPOINT_SNAPSHOT_KIND {
         let snapshot = serde_json::from_str(data)
@@ -127,6 +134,35 @@ mod tests {
         assert!(matches!(
             decode_endpoint_control(
                 crate::protocol::endpoint::AGENT_VIEW_PROJECTION_KIND,
+                "not json"
+            )
+            .unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+    }
+
+    #[test]
+    fn work_items_projection_decodes() {
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::work_items::projection_message("boot", 2, Vec::new(), Vec::new())
+                .unwrap()
+        else {
+            panic!("expected endpoint control");
+        };
+        let EndpointControlMessage::WorkItems(projection) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("decoded work items");
+        };
+        assert_eq!(projection.revision, 2);
+        assert_eq!(projection.boot_id, "boot");
+    }
+
+    #[test]
+    fn malformed_work_items_projection_is_ignored() {
+        assert!(matches!(
+            decode_endpoint_control(
+                crate::protocol::work_items::WORK_ITEMS_PROJECTION_KIND,
                 "not json"
             )
             .unwrap(),

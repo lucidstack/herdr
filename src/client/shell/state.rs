@@ -981,6 +981,7 @@ pub(crate) struct ClientShellState {
     pub(super) endpoint_error: Option<String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
     pub(super) dismissed_product_announcement: Option<(String, String)>,
+    pub(super) work_items: super::work_items::ClientWorkItems,
 }
 
 pub(super) fn product_announcement_state(
@@ -1140,6 +1141,7 @@ impl ClientShellState {
             host_background: None,
             config_diagnostic: local_config_diagnostic.clone(),
             local_config_diagnostic,
+            work_items: Default::default(),
             endpoint_error: None,
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,

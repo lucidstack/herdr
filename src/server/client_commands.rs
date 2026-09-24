@@ -42,6 +42,8 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.focus",
     "tab.move",
     "tab.rename",
+    "work_item.choose",
+    "work_item.mark_seen",
     "workspace.close",
     "workspace.create",
     "workspace.focus",
@@ -291,6 +293,14 @@ mod tests {
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        assert_eq!(
+            actual.remove("work_item.choose").as_deref(),
+            Some("f17df9c37fc54879cf5012c04aac0de1cf9995970b0b50679135bd4e2df622fe")
+        );
+        assert_eq!(
+            actual.remove("work_item.mark_seen").as_deref(),
+            Some("69251d91a2261d33afceddbcbcb133ff91a49ee7c8e37a515576a5f491886634")
         );
 
         assert_eq!(

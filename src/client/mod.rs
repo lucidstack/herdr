@@ -1890,6 +1890,23 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::WorkItems(projection)) => {
+                                let frame = state.shell.as_mut().and_then(|shell| {
+                                    shell
+                                        .set_endpoint_work_items(&endpoint_id, *projection)
+                                        .then(|| {
+                                            shell.compose(
+                                                state.reported_size.0,
+                                                state.reported_size.1,
+                                            )
+                                        })
+                                        .flatten()
+                                });
+                                if let Some(frame) = frame {
+                                    state.present_frame(frame);
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

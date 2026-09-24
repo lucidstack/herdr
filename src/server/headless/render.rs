@@ -458,6 +458,7 @@ impl HeadlessServer {
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
+        let work_items_revision = self.app.work_items.revision();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             #[cfg(unix)]
             if matches!(mode, ClientConnectionMode::TerminalObserve { .. })
@@ -561,6 +562,28 @@ impl HeadlessServer {
                     }
                     client.shell_snapshot = Some(candidate);
                     client.shell_agent_view = agent_view;
+                }
+                if client.shell_work_items_revision != work_items_revision {
+                    let framed = match Self::frame_work_items_projection(
+                        &self.app,
+                        &self.client_shell_boot_id,
+                    ) {
+                        Ok(framed) => framed,
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode endpoint work items");
+                            broken_clients.push(client_id);
+                            continue;
+                        }
+                    };
+                    let Some(writer) = client.writer.as_ref() else {
+                        broken_clients.push(client_id);
+                        continue;
+                    };
+                    if writer.control.send(framed).is_err() {
+                        broken_clients.push(client_id);
+                        continue;
+                    }
+                    client.shell_work_items_revision = work_items_revision;
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {
