@@ -717,6 +717,16 @@ impl App {
         self.set_work_item_agent_step(job_id, WorkItemStepStatus::Failed, Some(message));
     }
 
+    /// Agents enable bracketed paste once their prompt accepts input. A multi-line brief sent
+    /// before that arrives as plain keystrokes, which Claude Code reads as a paste burst: the
+    /// text lands in its input box and the submitting Enter becomes a newline.
+    fn work_item_agent_accepts_paste(&self, agent_name: &str) -> bool {
+        self.resolve_agent_target(agent_name)
+            .ok()
+            .and_then(|target| self.lookup_runtime_sender(target.ws_idx, target.pane_id))
+            .is_some_and(|runtime| runtime.bracketed_paste_enabled())
+    }
+
     fn advance_work_item_brief(&mut self, job_id: u64, now: Instant) {
         enum Next {
             Wait,
@@ -724,15 +734,23 @@ impl App {
             Done,
             Fail(String),
         }
+        let agent_name = self
+            .work_items
+            .job(job_id)
+            .and_then(|job| job.agent_name.clone());
+        let accepts_paste = agent_name
+            .as_deref()
+            .is_some_and(|name| self.work_item_agent_accepts_paste(name));
         let next = {
             let Some(job) = self.work_items.job_mut(job_id) else {
                 return;
             };
-            let agent_name = job.agent_name.clone();
             let text = job.plan.brief.clone();
             let Some(attempt) = job.brief.as_mut() else {
                 return;
             };
+            let waiting_for_paste = !accepts_paste
+                && now.saturating_duration_since(attempt.started) < AGENT_READY_TIMEOUT;
             match attempt.pending.as_ref().map(|pending| pending.try_recv()) {
                 Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {
                     attempt.next_attempt = now + BRIEF_POLL_INTERVAL;
@@ -761,6 +779,11 @@ impl App {
                     }
                 }
                 None if attempt.next_attempt > now => Next::Wait,
+                // After the timeout the brief is sent anyway, for agents that never enable it.
+                None if waiting_for_paste => {
+                    attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
+                    Next::Wait
+                }
                 None => match agent_name {
                     Some(agent_name) => Next::Send { agent_name, text },
                     None => Next::Fail("agent name is unknown".into()),
@@ -1181,5 +1204,79 @@ mod tests {
         assert_eq!(repo.worktree_path("review/pr-1"), None);
         wait_for(|| !repo.branch_exists("review/pr-1"));
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[tokio::test]
+    async fn brief_waits_until_the_agent_enables_bracketed_paste() {
+        use crate::detect::{Agent, AgentState};
+        use crate::work_items::provision::AgentAttempt;
+        use crate::work_items::source::{
+            ProvisionPlan, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+        };
+
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("review")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("review-1".into());
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let (runtime, mut pty_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let source = FakeSource::with_items(vec![source_item("1")]);
+        app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        let plan = ProvisionPlan {
+            source: WorkspaceSource::Worktree(WorktreeSpec {
+                repo_path: "/unused".into(),
+                remote: "origin".into(),
+                fetch_refspec: String::new(),
+                base_ref: String::new(),
+                branch: "review/pr-1".into(),
+            }),
+            workspace_label: "#1 Title 1".into(),
+            agent_name_hint: "review-1".into(),
+            brief: "line one\nline two".into(),
+            layout: WorkspaceLayout {
+                agent: "claude".into(),
+                editor_command: String::new(),
+                lazygit_command: String::new(),
+                diff_command: String::new(),
+            },
+            delete_branch: true,
+        };
+        let job_id = app.work_items.start_job("fake:1", plan).unwrap();
+        let started = Instant::now();
+        let job = app.work_items.job_mut(job_id).unwrap();
+        job.agent_name = Some("review-1".into());
+        job.brief = Some(AgentAttempt {
+            started,
+            next_attempt: started,
+            pending: None,
+        });
+
+        app.advance_work_item_brief(job_id, started);
+        assert!(
+            pty_rx.try_recv().is_err(),
+            "a brief typed before bracketed paste is on would not be submitted"
+        );
+
+        app.lookup_runtime_sender(0, pane_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[?2004h");
+        app.advance_work_item_brief(job_id, started + Duration::from_secs(1));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let sent = loop {
+            if let Ok(bytes) = pty_rx.try_recv() {
+                break bytes;
+            }
+            assert!(Instant::now() < deadline, "brief not sent");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(&sent[..], b"\x1b[200~line one\nline two\x1b[201~");
     }
 }

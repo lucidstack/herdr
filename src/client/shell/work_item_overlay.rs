@@ -3,7 +3,7 @@ use crate::api::schema::WorkItemStepStatus;
 
 use super::super::super::work_items::{ClientWorkItemOverlay, SPINNER_FRAMES};
 
-const WIDTH: u16 = 64;
+const WIDTH: u16 = 80;
 
 pub(super) fn render_work_item_overlay(
     b: &mut Buffer,
@@ -23,12 +23,16 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
     // Heading (3 rows), gap, one row per choice, gap, detail, hint, plus borders.
     let q = popup(b.area, WIDTH, choice_count + 9)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
+    let heading = match &item.author {
+        Some(author) => format!(" {} · @{author}", item.context),
+        None => format!(" {}", item.context),
+    };
     put_text(
         b,
         i.x,
         i.y,
         i.width,
-        &format!(" {}", item.context),
+        &heading,
         Style::default()
             .fg(p.accent)
             .bg(p.panel_bg)

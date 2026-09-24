@@ -350,11 +350,11 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -
                   Order your findings by severity and cite file:line for each.";
     let instructions = match mode {
         ReviewMode::Local => format!(
-            "This directory is a detached checkout of the pull request head.\n\
+            "This directory is a worktree checked out at the pull request head.\n\
              Inspect the change with git (for example `git diff origin/{base}...HEAD`), summarise it and wait for my instructions before changing anything."
         ),
         ReviewMode::LocalAgentReview => format!(
-            "This directory is a detached checkout of the pull request head.\n\
+            "This directory is a worktree checked out at the pull request head.\n\
              Start reviewing now: read the diff (`git diff origin/{base}...HEAD`) and the surrounding code. {review}\n\
              Report the findings to me here. Do not modify files, commit, or post anything to GitHub."
         ),
@@ -418,7 +418,9 @@ fn parse_search(bytes: &[u8]) -> Result<Vec<SourceItem>, String> {
                 warn!(url = %item.html_url, "skipping search result without a repository");
                 return None;
             };
-            let mut context = format!("{repo} #{}", item.number);
+            // Number first: the sidebar truncates from the right, and the number is what tells
+            // two pull requests of the same repository apart.
+            let mut context = format!("#{} {repo}", item.number);
             if item.draft == Some(true) {
                 context.push_str(" · draft");
             }
@@ -683,7 +685,7 @@ mod tests {
                 SourceItem {
                     external_id: "o/r#12".into(),
                     title: "Fix it".into(),
-                    context: "o/r #12".into(),
+                    context: "#12 o/r".into(),
                     author: Some("alice".into()),
                     url: "https://github.com/o/r/pull/12".into(),
                     updated_at: "2026-01-02T00:00:00Z".into(),
@@ -691,7 +693,7 @@ mod tests {
                 SourceItem {
                     external_id: "x/y#3".into(),
                     title: "WIP".into(),
-                    context: "x/y #3 · draft".into(),
+                    context: "#3 x/y · draft".into(),
                     author: Some("bob".into()),
                     url: "https://github.com/x/y/pull/3".into(),
                     updated_at: "2026-01-01T00:00:00Z".into(),
@@ -753,7 +755,7 @@ mod tests {
             source_id: "github".into(),
             external_id: format!("{repo}#5"),
             title: "Add the thing".into(),
-            context: format!("{repo} #5"),
+            context: format!("#5 {repo}"),
             author: Some("alice".into()),
             url: format!("https://github.com/{repo}/pull/5"),
             updated_at: "2026-01-01T00:00:00Z".into(),
