@@ -172,7 +172,9 @@ pub(super) struct ShellHitMap {
     pub(super) notification_toast: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
     pub(super) work_items: Vec<super::work_items::WorkItemHit>,
+    pub(super) inbox: super::work_items::InboxHits,
     pub(super) overlay_choice_rows: Vec<(Rect, usize)>,
+    pub(super) overlay_area: Rect,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
@@ -346,6 +348,7 @@ pub(super) enum ClientShellOverlayKind {
     GlobalMenu,
     Settings,
     WorkItem,
+    Inbox,
 }
 
 #[derive(Debug)]
@@ -583,6 +586,14 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    WorkItemChoose,
+    WorkItemProgress,
+    WorkItemFocus,
+    WorkItemOpenUrl,
+    WorkItemSnoozeHour,
+    WorkItemSnoozeDay,
+    WorkItemDismiss,
+    WorkItemUnhide,
 }
 
 #[derive(Debug)]
@@ -604,6 +615,14 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+    },
+    WorkItem {
+        item_id: String,
+        /// Workspace that exists in the snapshot.
+        workspace_id: Option<String>,
+        is_linked_worktree: bool,
+        has_progress: bool,
+        hidden: bool,
     },
 }
 
@@ -643,6 +662,7 @@ pub(super) enum ClientShellOverlay {
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
     WorkItem(Box<super::work_items::ClientWorkItemOverlay>),
+    Inbox(super::work_items::ClientInboxOverlay),
 }
 
 impl ClientShellOverlay {
@@ -662,6 +682,7 @@ impl ClientShellOverlay {
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
             Self::WorkItem(_) => ClientShellOverlayKind::WorkItem,
+            Self::Inbox(_) => ClientShellOverlayKind::Inbox,
         }
     }
 }

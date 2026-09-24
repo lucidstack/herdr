@@ -4447,6 +4447,26 @@
           ],
           "type": "object"
         },
+        "WorkItemHideParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "snooze_seconds": {
+              "description": "Hide for this many seconds. Absent dismisses the item until it is requested again.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "item_id"
+          ],
+          "type": "object"
+        },
         "WorkItemTarget": {
           "properties": {
             "item_id": {
@@ -5245,6 +5265,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemChooseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.hide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemHideParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.unhide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemTarget"
             }
           },
           "required": [
@@ -10937,6 +10989,11 @@
                 "null"
               ]
             },
+            "dismissed": {
+              "default": false,
+              "description": "Hidden until the source requests the item again.",
+              "type": "boolean"
+            },
             "item_id": {
               "type": "string"
             },
@@ -10965,6 +11022,15 @@
             },
             "seen": {
               "type": "boolean"
+            },
+            "snoozed_until": {
+              "description": "Hidden until this Unix time in seconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "source_id": {
               "type": "string"

@@ -147,6 +147,8 @@ mod tests {
             seen: true,
             resolved: false,
             workspace_id: Some("w1".into()),
+            dismissed: false,
+            snoozed_until: None,
             prepared_for: Some("2026-01-01T00:00:00Z".into()),
             prepare_in_flight: true,
             provisioning: Some(WorkItemProvisioningInfo {

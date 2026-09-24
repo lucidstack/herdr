@@ -542,6 +542,12 @@
           "description": "Open the session navigator."
         },
         {
+          "key": "keys.inbox",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Open the work item inbox."
+        },
+        {
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",

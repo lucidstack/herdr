@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::api::schema::{
-    Method, WorkItemChoiceAction, WorkItemChooseParams, WorkItemInfo, WorkItemPhase,
-    WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
+    Method, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemInfo,
+    WorkItemPhase, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
 };
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -22,6 +22,10 @@ pub(crate) struct ClientWorkItems {
     by_endpoint: HashMap<ClientEndpointId, EndpointWorkItemsProjection>,
     pub(super) spinner_frame: usize,
     spinner_last_tick: Option<Instant>,
+    /// The inbox may take most of the sidebar instead of half of it.
+    pub(super) expanded: bool,
+    /// Visible items skipped at the top of the inbox.
+    pub(super) scroll: usize,
 }
 
 impl ClientWorkItems {
@@ -48,6 +52,24 @@ impl ClientWorkItems {
 pub(super) struct WorkItemHit {
     pub(super) rect: Rect,
     pub(super) item_id: String,
+}
+
+/// Inbox regions of the last frame, for mouse input.
+#[derive(Default)]
+pub(super) struct InboxHits {
+    pub(super) area: Rect,
+    pub(super) header: Rect,
+    pub(super) more_above: Rect,
+    pub(super) more_below: Rect,
+    /// Items drawn in the last frame.
+    pub(super) shown: usize,
+    /// Items not hidden by dismissing or snoozing.
+    pub(super) visible: usize,
+}
+
+/// Dismissed and snoozed items stay out of the sidebar.
+pub(super) fn is_hidden(item: &WorkItemInfo) -> bool {
+    item.dismissed || item.snoozed_until.is_some()
 }
 
 #[derive(Debug)]
@@ -104,14 +126,14 @@ fn item_animates(item: &WorkItemInfo) -> bool {
 
 /// Renders the inbox section at the top of `area`. Returns the rows it used and the
 /// workspaces drawn nested under their items; only those leave the spaces list, so a
-/// workspace whose item overflowed stays reachable.
+/// workspace whose item is hidden or scrolled away stays reachable.
 pub(super) fn render_items_section<'a>(
     buffer: &mut Buffer,
     area: Rect,
     projection: &'a EndpointWorkItemsProjection,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
-    spinner_frame: usize,
+    view: &ClientWorkItems,
     hits: &mut ShellHitMap,
 ) -> (u16, Vec<&'a str>) {
     let mut nested_workspace_ids = Vec::new();
@@ -119,36 +141,57 @@ pub(super) fn render_items_section<'a>(
         return (0, nested_workspace_ids);
     }
     let palette = &config.palette;
-    let limit = area
-        .y
-        .saturating_add(3.max(area.height / 2).min(area.height));
+    let visible: Vec<&WorkItemInfo> = projection
+        .items
+        .iter()
+        .filter(|item| !is_hidden(item))
+        .collect();
+    let hidden = projection.items.len() - visible.len();
+    // Expanded, the spaces list keeps its header and one row.
+    let budget = if view.expanded {
+        area.height.saturating_sub(3)
+    } else {
+        area.height / 2
+    };
+    let limit = area.y.saturating_add(3.max(budget).min(area.height));
+    let width = area.width.saturating_sub(1);
     let mut y = area.y;
+    hits.inbox = InboxHits {
+        header: Rect::new(area.x, y, width, 1),
+        visible: visible.len(),
+        ..InboxHits::default()
+    };
     put_text(
         buffer,
         area.x,
         y,
         area.width,
-        " inbox",
+        if view.expanded {
+            " inbox ▴"
+        } else {
+            " inbox"
+        },
         Style::default()
             .fg(palette.overlay0)
             .add_modifier(Modifier::BOLD),
     );
-    let unseen = projection.items.iter().filter(|item| !item.seen).count();
-    if unseen > 0 {
+    let unseen = visible.iter().filter(|item| !item.seen).count();
+    let (status, color) = if unseen > 0 {
+        (format!("{unseen} new "), palette.teal)
+    } else if hidden > 0 {
+        (format!("{hidden} hidden "), palette.overlay0)
+    } else if visible.is_empty() {
+        ("none ".to_string(), palette.overlay0)
+    } else {
+        (String::new(), palette.overlay0)
+    };
+    if !status.is_empty() {
         put_right_text(
             buffer,
-            Rect::new(area.x, y, area.width.saturating_sub(1), 1),
+            Rect::new(area.x, y, width, 1),
             y,
-            &format!("{unseen} new "),
-            Style::default().fg(palette.teal),
-        );
-    } else if projection.items.is_empty() {
-        put_right_text(
-            buffer,
-            Rect::new(area.x, y, area.width.saturating_sub(1), 1),
-            y,
-            "none ",
-            Style::default().fg(palette.overlay0),
+            &status,
+            Style::default().fg(color),
         );
     }
     y += 1;
@@ -163,15 +206,28 @@ pub(super) fn render_items_section<'a>(
             buffer,
             area.x,
             y,
-            area.width.saturating_sub(1),
+            width,
             &format!(" ! {}: {error}", source.label),
             Style::default().fg(palette.peach),
         );
         y += 1;
     }
 
+    let scroll = view.scroll.min(visible.len().saturating_sub(1));
+    if scroll > 0 && y < limit {
+        hits.inbox.more_above = Rect::new(area.x, y, width, 1);
+        put_text(
+            buffer,
+            area.x,
+            y,
+            width,
+            &format!(" ↑ {scroll} more"),
+            Style::default().fg(palette.overlay0),
+        );
+        y += 1;
+    }
     let focused_workspace_id = snapshot.focused_workspace_id.as_deref();
-    for (index, item) in projection.items.iter().enumerate() {
+    for (index, item) in visible.iter().copied().enumerate().skip(scroll) {
         let nested = item.workspace_id.as_deref().and_then(|workspace_id| {
             snapshot
                 .workspaces
@@ -190,28 +246,31 @@ pub(super) fn render_items_section<'a>(
         let nested_height = nested_rows
             .as_ref()
             .map_or(0, |rows| rows.len().max(1) as u16);
-        let remaining = projection.items.len() - index;
+        let remaining = visible.len() - index;
         // Keep one row for the "more" marker unless this is the last item.
         let reserve = u16::from(remaining > 1);
         if y.saturating_add(2 + nested_height + reserve) > limit {
+            let row_y = y.min(limit.saturating_sub(1));
+            hits.inbox.more_below = Rect::new(area.x, row_y, width, 1);
             put_text(
                 buffer,
                 area.x,
-                y.min(limit.saturating_sub(1)),
-                area.width.saturating_sub(1),
-                &format!(" +{remaining} more"),
+                row_y,
+                width,
+                &format!(" ↓ {remaining} more"),
                 Style::default().fg(palette.overlay0),
             );
             y = y.saturating_add(1).min(limit);
             break;
         }
-        let item_rect = Rect::new(area.x, y, area.width.saturating_sub(1), 2);
+        hits.inbox.shown += 1;
+        let item_rect = Rect::new(area.x, y, width, 2);
         render_item_rows(
             buffer,
             item_rect,
             item,
             focused_workspace_id,
-            spinner_frame,
+            view.spinner_frame,
             palette,
         );
         hits.work_items.push(WorkItemHit {
@@ -256,7 +315,9 @@ pub(super) fn render_items_section<'a>(
         }
     }
     // Blank separator before the spaces list.
-    ((y + 1).min(area.bottom()) - area.y, nested_workspace_ids)
+    let used = (y + 1).min(area.bottom()) - area.y;
+    hits.inbox.area = Rect::new(area.x, area.y, width, used);
+    (used, nested_workspace_ids)
 }
 
 fn render_item_rows(
@@ -346,6 +407,24 @@ fn render_item_rows(
     }
 }
 
+/// Keyboard access to every item: `inbox` keybinding (default prefix+i).
+#[derive(Debug, Default)]
+pub(super) struct ClientInboxOverlay {
+    /// Visible items first, then dismissed and snoozed ones.
+    pub(super) items: Vec<WorkItemInfo>,
+    pub(super) highlighted: usize,
+}
+
+fn inbox_order(projection: &EndpointWorkItemsProjection) -> Vec<WorkItemInfo> {
+    let (mut items, hidden): (Vec<WorkItemInfo>, Vec<WorkItemInfo>) = projection
+        .items
+        .iter()
+        .cloned()
+        .partition(|item| !is_hidden(item));
+    items.extend(hidden);
+    items
+}
+
 impl ClientShellState {
     pub(crate) fn set_endpoint_work_items(
         &mut self,
@@ -357,8 +436,155 @@ impl ClientShellState {
         }
         if endpoint_id.is_local() {
             self.refresh_work_item_overlay();
+            self.refresh_inbox_overlay();
         }
         true
+    }
+
+    fn local_items_in_inbox_order(&self) -> Option<Vec<WorkItemInfo>> {
+        let snapshot = self.snapshot.as_deref()?;
+        local_projection(&self.work_items, snapshot).map(inbox_order)
+    }
+
+    pub(super) fn open_inbox_overlay(&mut self) {
+        match self.local_items_in_inbox_order() {
+            Some(items) => {
+                self.overlay = Some(ClientShellOverlay::Inbox(ClientInboxOverlay {
+                    items,
+                    highlighted: 0,
+                }));
+            }
+            None => self.set_endpoint_error("No work item sources are configured."),
+        }
+    }
+
+    fn refresh_inbox_overlay(&mut self) {
+        if !matches!(self.overlay, Some(ClientShellOverlay::Inbox(_))) {
+            return;
+        }
+        let items = self.local_items_in_inbox_order().unwrap_or_default();
+        if let Some(ClientShellOverlay::Inbox(inbox)) = self.overlay.as_mut() {
+            // Follow the highlighted item when the order changes.
+            let current = inbox
+                .items
+                .get(inbox.highlighted)
+                .map(|item| item.item_id.clone());
+            inbox.highlighted = current
+                .and_then(|id| items.iter().position(|item| item.item_id == id))
+                .unwrap_or(inbox.highlighted)
+                .min(items.len().saturating_sub(1));
+            inbox.items = items;
+        }
+    }
+
+    /// Keys while the inbox list is open. Returns false for other overlays.
+    pub(super) fn route_inbox_overlay_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(ClientShellOverlay::Inbox(inbox)) = self.overlay.as_mut() else {
+            return false;
+        };
+        outcome.repaint = true;
+        let last = inbox.items.len().saturating_sub(1);
+        let selected = inbox.items.get(inbox.highlighted).cloned();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                inbox.highlighted = inbox.highlighted.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                inbox.highlighted = inbox.highlighted.saturating_add(1).min(last)
+            }
+            KeyCode::Esc => self.overlay = None,
+            _ => {
+                if let Some(item) = selected {
+                    self.inbox_item_key(key.code, item, outcome);
+                }
+            }
+        }
+        true
+    }
+
+    fn inbox_item_key(
+        &mut self,
+        code: KeyCode,
+        item: WorkItemInfo,
+        outcome: &mut ClientShellInput,
+    ) {
+        let hide = |snooze_seconds| {
+            Method::WorkItemHide(WorkItemHideParams {
+                item_id: item.item_id.clone(),
+                snooze_seconds,
+            })
+        };
+        match code {
+            KeyCode::Enter => {
+                self.overlay = None;
+                self.activate_work_item(&item.item_id, outcome);
+            }
+            KeyCode::Right | KeyCode::Char('m') => {
+                let (x, y) = self
+                    .hits
+                    .overlay_choice_rows
+                    .iter()
+                    .find(|(_, index)| {
+                        matches!(
+                            &self.overlay,
+                            Some(ClientShellOverlay::Inbox(inbox)) if inbox.highlighted == *index
+                        )
+                    })
+                    .map_or((0, 0), |(rect, _)| (rect.x + 2, rect.y));
+                self.open_work_item_context_menu(&item.item_id, x, y);
+            }
+            KeyCode::Char('d') if !is_hidden(&item) => {
+                self.push_endpoint_method(hide(None), outcome)
+            }
+            KeyCode::Char('s') if !is_hidden(&item) => {
+                self.push_endpoint_method(hide(Some(60 * 60)), outcome)
+            }
+            KeyCode::Char('u') if is_hidden(&item) => self.push_endpoint_method(
+                Method::WorkItemUnhide(WorkItemTarget {
+                    item_id: item.item_id.clone(),
+                }),
+                outcome,
+            ),
+            _ => {}
+        }
+    }
+
+    pub(super) fn handle_inbox_overlay_click(
+        &mut self,
+        point: (u16, u16),
+        right: bool,
+        outcome: &mut ClientShellInput,
+    ) {
+        outcome.repaint = true;
+        let Some(index) = self
+            .hits
+            .overlay_choice_rows
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .map(|(_, index)| *index)
+        else {
+            if !super::contains(self.hits.overlay_area, point) {
+                self.overlay = None;
+            }
+            return;
+        };
+        let Some(ClientShellOverlay::Inbox(inbox)) = self.overlay.as_mut() else {
+            return;
+        };
+        inbox.highlighted = index;
+        let Some(item_id) = inbox.items.get(index).map(|item| item.item_id.clone()) else {
+            return;
+        };
+        if right {
+            self.open_work_item_context_menu(&item_id, point.0, point.1);
+        } else {
+            self.overlay = None;
+            self.activate_work_item(&item_id, outcome);
+        }
     }
 
     fn local_work_item(&self, item_id: &str) -> Option<&WorkItemInfo> {
@@ -478,32 +704,39 @@ impl ClientShellState {
         })
     }
 
+    fn work_item_hit_at(&self, point: (u16, u16)) -> Option<String> {
+        self.hits
+            .work_items
+            .iter()
+            .find(|hit| super::contains(hit.rect, point))
+            .map(|hit| hit.item_id.clone())
+    }
+
     pub(super) fn handle_work_item_click(
         &mut self,
         point: (u16, u16),
         outcome: &mut ClientShellInput,
     ) -> bool {
-        let Some(item_id) = self
-            .hits
-            .work_items
-            .iter()
-            .find(|hit| super::contains(hit.rect, point))
-            .map(|hit| hit.item_id.clone())
-        else {
-            return false;
-        };
-        let Some(item) = self.local_work_item(&item_id).cloned() else {
+        if self.handle_inbox_control_click(point, outcome) {
+            return true;
+        }
+        match self.work_item_hit_at(point) {
+            Some(item_id) => self.activate_work_item(&item_id, outcome),
+            None => false,
+        }
+    }
+
+    /// Primary action of an item: its running progress, its workspace, or the choices.
+    pub(super) fn activate_work_item(
+        &mut self,
+        item_id: &str,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let Some(item) = self.local_work_item(item_id).cloned() else {
             return false;
         };
         outcome.repaint = true;
-        if !item.seen {
-            self.push_endpoint_method(
-                Method::WorkItemMarkSeen(WorkItemTarget {
-                    item_id: item.item_id.clone(),
-                }),
-                outcome,
-            );
-        }
+        self.mark_work_item_seen(&item, outcome);
         if provisioning_running(&item) {
             self.open_work_item_overlay(item, true);
         } else if let Some(workspace_id) = item
@@ -519,6 +752,165 @@ impl ClientShellState {
             self.open_work_item_overlay(item, false);
         }
         true
+    }
+
+    fn mark_work_item_seen(&mut self, item: &WorkItemInfo, outcome: &mut ClientShellInput) {
+        if !item.seen {
+            self.push_endpoint_method(
+                Method::WorkItemMarkSeen(WorkItemTarget {
+                    item_id: item.item_id.clone(),
+                }),
+                outcome,
+            );
+        }
+    }
+
+    /// The inbox header toggles the expanded layout; the "more" rows page through items.
+    fn handle_inbox_control_click(
+        &mut self,
+        point: (u16, u16),
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        let inbox = &self.hits.inbox;
+        let page = inbox.shown.max(1);
+        let last = inbox.visible.saturating_sub(1);
+        let view = &mut self.work_items;
+        if super::contains(inbox.header, point) {
+            view.expanded = !view.expanded;
+            view.scroll = 0;
+        } else if super::contains(inbox.more_below, point) {
+            if view.expanded {
+                view.scroll = view.scroll.saturating_add(page).min(last);
+            } else {
+                view.expanded = true;
+            }
+        } else if super::contains(inbox.more_above, point) {
+            view.scroll = view.scroll.saturating_sub(page);
+        } else {
+            return false;
+        }
+        outcome.repaint = true;
+        true
+    }
+
+    /// Wheel over the inbox scrolls it by one item. Returns whether the inbox took it.
+    pub(super) fn scroll_inbox(
+        &mut self,
+        point: (u16, u16),
+        delta: isize,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !super::contains(self.hits.inbox.area, point) {
+            return false;
+        }
+        let last = self.hits.inbox.visible.saturating_sub(1);
+        let next = self
+            .work_items
+            .scroll
+            .min(last)
+            .saturating_add_signed(delta)
+            .min(last);
+        if next != self.work_items.scroll {
+            self.work_items.scroll = next;
+            outcome.repaint = true;
+        }
+        true
+    }
+
+    /// Right-click on an item row. Returns false when `point` is not on an item.
+    pub(super) fn open_work_item_context_menu_at(&mut self, point: (u16, u16)) -> bool {
+        match self.work_item_hit_at(point) {
+            Some(item_id) => self.open_work_item_context_menu(&item_id, point.0, point.1),
+            None => false,
+        }
+    }
+
+    pub(super) fn open_work_item_context_menu(&mut self, item_id: &str, x: u16, y: u16) -> bool {
+        let Some(item) = self.local_work_item(item_id) else {
+            return false;
+        };
+        let workspace = item.workspace_id.as_deref().and_then(|workspace_id| {
+            self.snapshot.as_deref().and_then(|snapshot| {
+                snapshot
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.workspace_id == workspace_id)
+            })
+        });
+        let target = ClientContextMenuTarget::WorkItem {
+            item_id: item.item_id.clone(),
+            workspace_id: workspace.map(|workspace| workspace.workspace_id.clone()),
+            is_linked_worktree: workspace
+                .and_then(|workspace| workspace.worktree.as_ref())
+                .is_some_and(|worktree| worktree.is_linked_worktree),
+            has_progress: item.provisioning.is_some(),
+            hidden: is_hidden(item),
+        };
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target,
+            x,
+            y,
+            highlighted: 0,
+        }));
+        true
+    }
+
+    pub(super) fn activate_work_item_context_action(
+        &mut self,
+        item_id: String,
+        workspace_id: Option<String>,
+        action: ClientContextMenuAction,
+        outcome: &mut ClientShellInput,
+    ) {
+        const HOUR: u64 = 60 * 60;
+        let Some(item) = self.local_work_item(&item_id).cloned() else {
+            return;
+        };
+        let hide = |snooze_seconds| {
+            Method::WorkItemHide(WorkItemHideParams {
+                item_id: item_id.clone(),
+                snooze_seconds,
+            })
+        };
+        match action {
+            ClientContextMenuAction::WorkItemChoose => {
+                self.mark_work_item_seen(&item, outcome);
+                self.open_work_item_overlay(item, false);
+            }
+            ClientContextMenuAction::WorkItemProgress => self.open_work_item_overlay(item, true),
+            ClientContextMenuAction::WorkItemFocus => {
+                if let Some(workspace_id) = workspace_id {
+                    self.mark_work_item_seen(&item, outcome);
+                    self.push_endpoint_method(
+                        Method::WorkspaceFocus(WorkspaceTarget { workspace_id }),
+                        outcome,
+                    );
+                }
+            }
+            ClientContextMenuAction::WorkItemOpenUrl => {
+                self.mark_work_item_seen(&item, outcome);
+                outcome
+                    .actions
+                    .push(ClientShellAction::OpenSafeWebUrl(item.url));
+            }
+            ClientContextMenuAction::WorkItemSnoozeHour => {
+                self.push_endpoint_method(hide(Some(HOUR)), outcome)
+            }
+            ClientContextMenuAction::WorkItemSnoozeDay => {
+                self.push_endpoint_method(hide(Some(24 * HOUR)), outcome)
+            }
+            ClientContextMenuAction::WorkItemDismiss => {
+                self.push_endpoint_method(hide(None), outcome)
+            }
+            ClientContextMenuAction::WorkItemUnhide => self
+                .push_endpoint_method(Method::WorkItemUnhide(WorkItemTarget { item_id }), outcome),
+            ClientContextMenuAction::RemoveWorktree | ClientContextMenuAction::Close => {
+                if let Some(workspace_id) = workspace_id {
+                    self.activate_workspace_context_action(workspace_id, action, outcome);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Handles keys while the work-item dialog is open. Returns false for other overlays.

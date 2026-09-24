@@ -79,6 +79,7 @@ pub(crate) fn render_client_overlay(
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
         ClientShellOverlay::WorkItem(v) => work_item_overlay::render_work_item_overlay(b, v, p),
+        ClientShellOverlay::Inbox(v) => work_item_overlay::render_inbox_overlay(b, v, p),
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
 }

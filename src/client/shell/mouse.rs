@@ -1657,6 +1657,18 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Inbox(_))) {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.handle_inbox_overlay_click(point, false, outcome)
+                }
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.handle_inbox_overlay_click(point, true, outcome)
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.overlay.is_some() {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
@@ -1791,6 +1803,10 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                if !self.sidebar_collapsed && self.open_work_item_context_menu_at(point) {
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -1850,6 +1866,12 @@ impl ClientShellState {
                     crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextTab),
                     outcome,
                 );
+            }
+            MouseEventKind::ScrollUp if super::contains(self.hits.inbox.area, point) => {
+                self.scroll_inbox(point, -1, outcome);
+            }
+            MouseEventKind::ScrollDown if super::contains(self.hits.inbox.area, point) => {
+                self.scroll_inbox(point, 1, outcome);
             }
             MouseEventKind::ScrollUp if super::contains(self.hits.agent_body, point) => {
                 let next = self.agent_scroll.saturating_sub(1);

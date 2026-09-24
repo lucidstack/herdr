@@ -208,7 +208,7 @@ pub(crate) fn render_sidebar(
             projection,
             snapshot,
             config,
-            state.work_items.spinner_frame,
+            state.work_items,
             hits,
         );
         workspace_area.y += used;

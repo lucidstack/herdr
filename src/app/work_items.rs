@@ -124,6 +124,7 @@ impl App {
             self.advance_work_item_agent(job_id, now);
         }
         self.advance_work_item_removals(now);
+        self.work_items.expire_snoozes();
         let changed = self.work_items.revision() != revision;
         if changed {
             self.request_work_items_render();

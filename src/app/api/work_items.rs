@@ -1,5 +1,5 @@
 use crate::api::schema::{
-    ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemTarget,
+    ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemTarget,
 };
 use crate::app::App;
 
@@ -89,6 +89,33 @@ impl App {
                 "work_item_choice_unavailable",
                 format!("choice {} is not supported", params.choice_id),
             ),
+        }
+    }
+
+    pub(super) fn handle_work_item_hide(
+        &mut self,
+        id: String,
+        params: WorkItemHideParams,
+    ) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        let until = params
+            .snooze_seconds
+            .map(|seconds| crate::work_items::unix_now().saturating_add(seconds.max(1)));
+        match self.work_items.hide(&params.item_id, until) {
+            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Err(_) => not_found(id, &params.item_id),
+        }
+    }
+
+    pub(super) fn handle_work_item_unhide(&mut self, id: String, params: WorkItemTarget) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        match self.work_items.unhide(&params.item_id) {
+            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Err(_) => not_found(id, &params.item_id),
         }
     }
 }

@@ -414,6 +414,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::WorkItemList(_) => "work_item.list",
         Method::WorkItemMarkSeen(_) => "work_item.mark_seen",
         Method::WorkItemChoose(_) => "work_item.choose",
+        Method::WorkItemHide(_) => "work_item.hide",
+        Method::WorkItemUnhide(_) => "work_item.unhide",
         Method::TabCreate(_) => "tab.create",
         Method::TabList(_) => "tab.list",
         Method::TabGet(_) => "tab.get",

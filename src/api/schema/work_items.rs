@@ -11,6 +11,14 @@ pub struct WorkItemChooseParams {
     pub choice_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemHideParams {
+    pub item_id: String,
+    /// Hide for this many seconds. Absent dismisses the item until it is requested again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemPhase {
@@ -103,6 +111,12 @@ pub struct WorkItemInfo {
     pub resolved: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// Hidden until the source requests the item again.
+    #[serde(default)]
+    pub dismissed: bool,
+    /// Hidden until this Unix time in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<u64>,
     #[serde(default)]
     pub choices: Vec<WorkItemChoiceInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

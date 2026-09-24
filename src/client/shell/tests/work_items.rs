@@ -20,6 +20,8 @@ fn item(id: &str) -> WorkItemInfo {
         seen: false,
         resolved: false,
         workspace_id: None,
+        dismissed: false,
+        snoozed_until: None,
         choices: vec![
             WorkItemChoiceInfo {
                 choice_id: "local".into(),
@@ -295,5 +297,146 @@ fn checklist_enter_focuses_the_provisioned_workspace() {
     assert!(matches!(
         endpoint_methods(&input)[..],
         [Method::WorkspaceFocus(target)] if target.workspace_id == "ws_2"
+    ));
+}
+
+fn mouse(
+    state: &mut ClientShellState,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })])
+}
+
+#[test]
+fn hidden_items_leave_the_sidebar_and_are_counted() {
+    let mut dismissed = item("7");
+    dismissed.dismissed = true;
+    let mut snoozed = item("8");
+    snoozed.snoozed_until = Some(4_000_000_000);
+    let mut state = shell_with(vec![dismissed, snoozed, item("9")]);
+    let text = screen_text(&mut state);
+    assert!(
+        !text.contains("o/r #7") && !text.contains("o/r #8"),
+        "{text}"
+    );
+    assert!(text.contains("o/r #9"), "{text}");
+    let mut seen = item("9");
+    seen.seen = true;
+    let mut dismissed = item("7");
+    dismissed.dismissed = true;
+    state.set_endpoint_work_items(
+        &ClientEndpointId::Local,
+        projection(2, vec![dismissed, seen]),
+    );
+    assert!(screen_text(&mut state).contains("1 hidden"));
+}
+
+#[test]
+fn overflowed_items_are_reachable_by_expanding_and_scrolling() {
+    let items: Vec<_> = (1..=10).map(|n| item(&n.to_string())).collect();
+    let mut state = shell_with(items);
+    state.compose(106, 30).expect("frame");
+    let shown_collapsed = state.hits.inbox.shown;
+    let more = state.hits.inbox.more_below;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        more.x + 1,
+        more.y,
+    );
+    state.compose(106, 30).expect("frame");
+    assert!(state.hits.inbox.shown > shown_collapsed);
+    assert!(!screen_text(&mut state).contains("o/r #10"));
+
+    let area = state.hits.inbox.area;
+    for _ in 0..9 {
+        mouse(
+            &mut state,
+            MouseEventKind::ScrollDown,
+            area.x + 2,
+            area.y + 2,
+        );
+    }
+    let text = screen_text(&mut state);
+    assert!(text.contains("o/r #10"), "{text}");
+    assert!(text.contains("↑ 9 more"), "{text}");
+}
+
+#[test]
+fn item_context_menu_dismisses_the_item() {
+    let mut state = shell_with(vec![item("7")]);
+    state.compose(106, 30).expect("frame");
+    let rect = state.hits.work_items[0].rect;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        rect.x + 2,
+        rect.y,
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    let dismiss = menu
+        .items()
+        .iter()
+        .position(|entry| entry.label == "Dismiss")
+        .expect("dismiss offered");
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[dismiss];
+    let input = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(matches!(
+        endpoint_methods(&input)[..],
+        [Method::WorkItemHide(params)] if params.item_id == "github:o/r#7" && params.snooze_seconds.is_none()
+    ));
+}
+
+#[test]
+fn inbox_keybinding_lists_items_for_the_keyboard() {
+    let mut dismissed = item("8");
+    dismissed.dismissed = true;
+    let mut state = shell_with(vec![dismissed, item("7")]);
+    let mut open = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::OpenInbox),
+        &mut open,
+    );
+    let Some(ClientShellOverlay::Inbox(inbox)) = state.overlay.as_ref() else {
+        panic!("inbox opens");
+    };
+    let order: Vec<&str> = inbox
+        .items
+        .iter()
+        .map(|item| item.item_id.as_str())
+        .collect();
+    assert_eq!(order, vec!["github:o/r#7", "github:o/r#8"]);
+
+    let snooze = state.handle_input_bytes(b"s");
+    assert!(matches!(
+        endpoint_methods(&snooze)[..],
+        [Method::WorkItemHide(params)] if params.item_id == "github:o/r#7" && params.snooze_seconds == Some(3600)
+    ));
+    state.handle_input_bytes(b"j");
+    let unhide = state.handle_input_bytes(b"u");
+    assert!(matches!(
+        endpoint_methods(&unhide)[..],
+        [Method::WorkItemUnhide(target)] if target.item_id == "github:o/r#8"
+    ));
+    state.handle_input_bytes(b"k");
+    state.handle_input_bytes(b"\r");
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#7"
     ));
 }

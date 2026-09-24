@@ -16,7 +16,7 @@ pub(crate) mod test_support;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
     WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo, WorkItemSourceInfo,
@@ -27,6 +27,13 @@ use provision::ProvisionJob;
 pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
 use state::{NotFound, WorkItem, WorkItemsState};
 use store::StoreWriter;
+
+/// Current wall-clock time in Unix seconds; 0 if the clock is before 1970.
+pub(crate) fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
 
 #[derive(Debug)]
 pub(crate) enum WorkItemsEvent {
@@ -222,6 +229,11 @@ impl WorkItems {
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        // Snoozes are stored as wall-clock times so they survive restarts.
+        let snooze_end = self
+            .state
+            .next_snooze_end()
+            .map(|until| Instant::now() + Duration::from_secs(until.saturating_sub(unix_now())));
         self.next_poll
             .iter()
             .filter(|(id, _)| !self.polls_in_flight.contains(*id))
@@ -232,7 +244,17 @@ impl WorkItems {
                     .iter()
                     .map(|removal| removal.pending.next_check),
             )
+            .chain(snooze_end)
             .min()
+    }
+
+    /// Brings back items whose snooze ended. Returns whether anything changed.
+    pub(crate) fn expire_snoozes(&mut self) -> bool {
+        let changed = self.state.expire_snoozes(unix_now());
+        if changed {
+            self.changed();
+        }
+        changed
     }
 
     pub(crate) fn source(&self, source_id: &str) -> Option<&Arc<dyn WorkItemSource>> {
@@ -336,6 +358,21 @@ impl WorkItems {
 
     pub(crate) fn set_awaiting_external(&mut self, key: &str) -> Result<(), NotFound> {
         if self.state.set_awaiting_external(key)? {
+            self.changed();
+        }
+        Ok(())
+    }
+
+    /// Dismisses (`until` is `None`) or snoozes an item until a Unix time.
+    pub(crate) fn hide(&mut self, key: &str, until: Option<u64>) -> Result<(), NotFound> {
+        if self.state.hide(key, until)? {
+            self.changed();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unhide(&mut self, key: &str) -> Result<(), NotFound> {
+        if self.state.unhide(key)? {
             self.changed();
         }
         Ok(())

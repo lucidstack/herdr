@@ -107,6 +107,10 @@ pub enum Method {
     WorkItemMarkSeen(WorkItemTarget),
     #[serde(rename = "work_item.choose")]
     WorkItemChoose(WorkItemChooseParams),
+    #[serde(rename = "work_item.hide")]
+    WorkItemHide(WorkItemHideParams),
+    #[serde(rename = "work_item.unhide")]
+    WorkItemUnhide(WorkItemTarget),
     #[serde(rename = "tab.create")]
     TabCreate(TabCreateParams),
     #[serde(rename = "tab.list")]

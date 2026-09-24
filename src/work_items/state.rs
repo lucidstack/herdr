@@ -30,6 +30,12 @@ pub(crate) struct WorkItem {
     pub resolved: bool,
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Hidden until the source stops listing the item or requests it again.
+    #[serde(default)]
+    pub dismissed: bool,
+    /// Hidden until this Unix time (seconds); cleared once it passes.
+    #[serde(default)]
+    pub snoozed_until: Option<u64>,
     /// `updated_at` the prepared detail belongs to.
     #[serde(skip)]
     pub prepared_for: Option<String>,
@@ -64,6 +70,8 @@ impl WorkItem {
             seen: false,
             resolved: false,
             workspace_id: None,
+            dismissed: false,
+            snoozed_until: None,
             prepared_for: None,
             prepare_in_flight: false,
             provisioning: None,
@@ -99,6 +107,8 @@ impl WorkItem {
             seen: self.seen,
             resolved: self.resolved,
             workspace_id: self.workspace_id.clone(),
+            dismissed: self.dismissed,
+            snoozed_until: self.snoozed_until,
             choices: choices.choices,
             default_choice_id: choices.default_choice_id,
             provisioning: self.provisioning.clone(),
@@ -185,6 +195,9 @@ impl WorkItemsState {
             if item.resolved {
                 item.resolved = false;
                 item.seen = false;
+                // A new request brings a hidden item back.
+                item.dismissed = false;
+                item.snoozed_until = None;
                 arrivals.push(key);
             }
             if item.workspace_id.is_none() && item.phase == WorkItemPhase::Local {
@@ -266,6 +279,46 @@ impl WorkItemsState {
         item.phase = WorkItemPhase::AwaitingExternal;
         item.seen = true;
         Ok(changed)
+    }
+
+    /// Hides an item: dismissed when `snooze_until` is `None`, else snoozed until then.
+    pub(crate) fn hide(&mut self, key: &str, snooze_until: Option<u64>) -> Result<bool, NotFound> {
+        let item = self.get_mut(key).ok_or(NotFound)?;
+        let before = (item.dismissed, item.snoozed_until, item.seen);
+        item.dismissed = snooze_until.is_none();
+        item.snoozed_until = snooze_until;
+        item.seen = true;
+        Ok(before != (item.dismissed, item.snoozed_until, item.seen))
+    }
+
+    /// Brings a dismissed or snoozed item back.
+    pub(crate) fn unhide(&mut self, key: &str) -> Result<bool, NotFound> {
+        let item = self.get_mut(key).ok_or(NotFound)?;
+        let changed = item.dismissed || item.snoozed_until.is_some();
+        item.dismissed = false;
+        item.snoozed_until = None;
+        Ok(changed)
+    }
+
+    /// Ends snoozes that passed `now` (Unix seconds); woken items count as new again.
+    pub(crate) fn expire_snoozes(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for item in &mut self.items {
+            if item.snoozed_until.is_some_and(|until| until <= now) {
+                item.snoozed_until = None;
+                item.seen = false;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The earliest snooze end, in Unix seconds.
+    pub(crate) fn next_snooze_end(&self) -> Option<u64> {
+        self.items
+            .iter()
+            .filter_map(|item| item.snoozed_until)
+            .min()
     }
 
     pub(crate) fn workspace_closed(&mut self, workspace_id: &str) -> bool {
@@ -416,6 +469,49 @@ mod tests {
         let item = state.get("gh:a").expect("item");
         assert!(!item.resolved);
         assert!(!item.seen);
+    }
+
+    #[test]
+    fn dismissed_item_stays_hidden_while_the_source_keeps_listing_it() {
+        let mut state = state_with("gh", &["a"]);
+        assert_eq!(state.hide("gh:a", None), Ok(true));
+        state.apply_poll("gh", Ok(vec![polled("a", "t2")]));
+        let item = state.get("gh:a").expect("item");
+        assert!(item.dismissed);
+        assert!(item.seen);
+    }
+
+    #[test]
+    fn a_new_request_brings_a_dismissed_item_back() {
+        let mut state = state_with("gh", &["a"]);
+        state.get_mut("gh:a").expect("item").workspace_id = Some("w1".into());
+        state.hide("gh:a", Some(500)).expect("item");
+        state.apply_poll("gh", Ok(Vec::new()));
+        state.apply_poll("gh", Ok(vec![polled("a", "t2")]));
+        let item = state.get("gh:a").expect("item");
+        assert!(!item.dismissed);
+        assert_eq!(item.snoozed_until, None);
+    }
+
+    #[test]
+    fn snooze_ends_at_its_time_and_the_item_counts_as_new() {
+        let mut state = state_with("gh", &["a"]);
+        state.hide("gh:a", Some(100)).expect("item");
+        assert_eq!(state.next_snooze_end(), Some(100));
+        assert!(!state.expire_snoozes(99));
+        assert!(state.expire_snoozes(100));
+        let item = state.get("gh:a").expect("item");
+        assert_eq!(item.snoozed_until, None);
+        assert!(!item.seen);
+    }
+
+    #[test]
+    fn unhide_shows_an_item_again() {
+        let mut state = state_with("gh", &["a"]);
+        state.hide("gh:a", None).expect("item");
+        assert_eq!(state.unhide("gh:a"), Ok(true));
+        assert!(!state.get("gh:a").expect("item").dismissed);
+        assert_eq!(state.unhide("gh:missing"), Err(NotFound));
     }
 
     #[test]

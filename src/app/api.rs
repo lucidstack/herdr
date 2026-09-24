@@ -1068,6 +1068,10 @@ impl App {
             Method::WorkItemChoose(params) => {
                 return self.handle_work_item_choose(request.id, params)
             }
+            Method::WorkItemHide(params) => return self.handle_work_item_hide(request.id, params),
+            Method::WorkItemUnhide(params) => {
+                return self.handle_work_item_unhide(request.id, params)
+            }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),

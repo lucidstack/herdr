@@ -1,7 +1,9 @@
 use super::*;
 use crate::api::schema::WorkItemStepStatus;
 
-use super::super::super::work_items::{ClientWorkItemOverlay, SPINNER_FRAMES};
+use super::super::super::work_items::{
+    is_hidden, ClientInboxOverlay, ClientWorkItemOverlay, SPINNER_FRAMES,
+};
 
 const WIDTH: u16 = 80;
 
@@ -241,6 +243,107 @@ fn render_checklist(
         area: q,
         primary: *open,
         cancel: *back,
+        ..OverlayRender::default()
+    })
+}
+
+/// Keyboard list of every item, hidden ones last.
+pub(super) fn render_inbox_overlay(
+    b: &mut Buffer,
+    o: &ClientInboxOverlay,
+    p: &Palette,
+) -> Option<OverlayRender> {
+    let max_rows = b.area.height.saturating_sub(8).max(1);
+    let list_rows = (o.items.len().max(1) as u16).min(max_rows);
+    let q = popup(b.area, WIDTH, list_rows + 4)?;
+    let i = panel(b, q, p.accent, p.panel_bg)?;
+    put_text(
+        b,
+        i.x,
+        i.y,
+        i.width,
+        " Inbox",
+        Style::default()
+            .fg(p.accent)
+            .bg(p.panel_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    if o.items.is_empty() {
+        put_text(
+            b,
+            i.x,
+            i.y + 1,
+            i.width,
+            " Nothing needs you right now",
+            Style::default().fg(p.subtext0).bg(p.panel_bg),
+        );
+    }
+    // Keep the highlighted row in view.
+    let first = o
+        .highlighted
+        .saturating_sub(usize::from(list_rows).saturating_sub(1));
+    let mut menu_rows = Vec::new();
+    for (row, (index, item)) in o
+        .items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(usize::from(list_rows))
+        .enumerate()
+    {
+        let y = i.y + 1 + row as u16;
+        let rect = Rect::new(i.x, y, i.width, 1);
+        let highlighted = index == o.highlighted;
+        let hidden = is_hidden(item);
+        let base = if highlighted {
+            Style::default().fg(contrast(p)).bg(p.accent)
+        } else {
+            Style::default()
+                .fg(if hidden { p.overlay0 } else { p.text })
+                .bg(p.panel_bg)
+        };
+        b.set_style(rect, base);
+        let marker = if !item.seen {
+            "●"
+        } else if item.resolved {
+            "✓"
+        } else {
+            "·"
+        };
+        let x = put_segment(b, i.x + 1, y, i.right(), marker, base);
+        let x = put_segment(
+            b,
+            x.saturating_add(1),
+            y,
+            i.right(),
+            &item.context,
+            base.add_modifier(Modifier::BOLD),
+        );
+        let state = if item.dismissed {
+            "  dismissed"
+        } else if item.snoozed_until.is_some() {
+            "  snoozed"
+        } else {
+            ""
+        };
+        let title_end = i.right().saturating_sub(display_width(state) + 1);
+        put_segment(b, x, y, title_end, &format!("  {}", item.title), base);
+        if !state.is_empty() {
+            put_segment(b, title_end, y, i.right(), state, base);
+        }
+        menu_rows.push((rect, index));
+    }
+    put_text(
+        b,
+        i.x,
+        i.bottom().saturating_sub(1),
+        i.width,
+        " ↑/↓ select · ↵ open · m more · d dismiss · s snooze 1 h · u show again · esc close",
+        Style::default().fg(p.overlay0).bg(p.panel_bg),
+    );
+    Some(OverlayRender {
+        area: q,
+        menu_rows,
         ..OverlayRender::default()
     })
 }

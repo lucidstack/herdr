@@ -1193,6 +1193,8 @@ mod tests {
             seen: false,
             resolved: false,
             workspace_id: None,
+            dismissed: false,
+            snoozed_until: None,
             prepared_for: None,
             prepare_in_flight: false,
             provisioning: None,
