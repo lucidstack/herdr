@@ -56,13 +56,16 @@ pub(super) struct ClientWorkItemOverlay {
     pub(super) highlighted: usize,
     pub(super) return_workspace_id: Option<String>,
     pub(super) return_label: String,
+    /// The user confirmed local review and the server has not reported progress yet.
     pub(super) awaiting_provisioning: bool,
+    /// Shows provisioning progress instead of the choices.
+    pub(super) show_checklist: bool,
     pub(super) spinner_frame: usize,
 }
 
 impl ClientWorkItemOverlay {
     pub(super) fn checklist(&self) -> bool {
-        self.awaiting_provisioning || self.item.provisioning.is_some()
+        self.show_checklist
     }
 }
 
@@ -428,7 +431,7 @@ impl ClientShellState {
         true
     }
 
-    fn open_work_item_overlay(&mut self, item: WorkItemInfo) {
+    fn open_work_item_overlay(&mut self, item: WorkItemInfo, show_checklist: bool) {
         let snapshot = self.snapshot.as_deref();
         let return_workspace_id =
             snapshot.and_then(|snapshot| snapshot.focused_workspace_id.clone());
@@ -460,6 +463,7 @@ impl ClientShellState {
                 return_workspace_id,
                 return_label,
                 awaiting_provisioning: false,
+                show_checklist,
                 spinner_frame: self.work_items.spinner_frame,
             },
         )));
@@ -501,7 +505,7 @@ impl ClientShellState {
             );
         }
         if provisioning_running(&item) {
-            self.open_work_item_overlay(item);
+            self.open_work_item_overlay(item, true);
         } else if let Some(workspace_id) = item
             .workspace_id
             .clone()
@@ -512,7 +516,7 @@ impl ClientShellState {
                 outcome,
             );
         } else {
-            self.open_work_item_overlay(item);
+            self.open_work_item_overlay(item, false);
         }
         true
     }
@@ -608,6 +612,9 @@ impl ClientShellState {
             WorkItemChoiceAction::ProvisionWorkspace => {
                 overlay.highlighted = index;
                 overlay.awaiting_provisioning = true;
+                overlay.show_checklist = true;
+                // Progress from an earlier attempt must not stand in for this one.
+                overlay.item.provisioning = None;
                 self.push_endpoint_method(method, outcome);
             }
             WorkItemChoiceAction::Unknown => {}

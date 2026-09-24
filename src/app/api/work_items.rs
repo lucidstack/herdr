@@ -78,13 +78,17 @@ impl App {
                     Err(_) => not_found(id, &params.item_id),
                 }
             }
-            WorkItemChoiceAction::ProvisionWorkspace | WorkItemChoiceAction::Unknown => {
-                encode_error(
-                    id,
-                    "work_item_choice_unavailable",
-                    format!("choice {} is not supported", params.choice_id),
-                )
+            WorkItemChoiceAction::ProvisionWorkspace => {
+                match self.start_work_item_provisioning(&params.item_id) {
+                    Ok(()) => encode_success(id, ResponseResult::Ok {}),
+                    Err((code, message)) => encode_error(id, code, message),
+                }
             }
+            WorkItemChoiceAction::Unknown => encode_error(
+                id,
+                "work_item_choice_unavailable",
+                format!("choice {} is not supported", params.choice_id),
+            ),
         }
     }
 }

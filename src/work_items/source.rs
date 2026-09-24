@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::schema::WorkItemChoiceInfo;
@@ -30,6 +31,39 @@ pub(crate) struct ItemChoices {
     pub default_choice_id: Option<String>,
 }
 
+/// How to obtain a local checkout of an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckoutSpec {
+    /// Existing clone the worktree is added to.
+    pub repo_path: PathBuf,
+    /// Remote name or URL that serves `fetch_refspec`.
+    pub remote: String,
+    pub fetch_refspec: String,
+    /// Local ref checked out detached.
+    pub checkout_ref: String,
+    pub checkout_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServerPlan {
+    pub command: String,
+    pub port: Option<u16>,
+}
+
+/// Everything needed to provision a local workspace for an item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProvisionPlan {
+    pub checkout: CheckoutSpec,
+    pub workspace_label: String,
+    pub agent_name_hint: String,
+    /// Prompt delivered to the agent once it is ready.
+    pub brief: String,
+    pub install_command: Option<String>,
+    pub server: Option<ServerPlan>,
+    /// Shown on the server step when `server` is `None`.
+    pub server_skip_reason: String,
+}
+
 /// An external system that produces work items.
 pub(crate) trait WorkItemSource: Send + Sync {
     /// Stable identifier used as the item-key prefix, e.g. "github".
@@ -43,6 +77,12 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn prepare(&self, item: &SourceItem) -> PreparedItem;
     /// Pure: choices offered for an item.
     fn choices(&self, item: &WorkItem) -> ItemChoices;
+    /// Pure: plan for the choice whose action provisions a workspace.
+    fn provision_plan(
+        &self,
+        item: &WorkItem,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String>;
     /// Pure: notification text when an item arrives or is requested again.
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>);
 }

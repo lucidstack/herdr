@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use super::source::ItemChoices;
 use super::state::WorkItem;
-use super::{PreparedItem, SourceItem, WorkItemSource};
+use super::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
 use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
 
 /// Scripted source: each poll returns the current `items`.
@@ -14,6 +14,8 @@ use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
 pub(crate) struct FakeSource {
     pub items: Mutex<Vec<SourceItem>>,
     pub prepare_calls: AtomicUsize,
+    /// Plan returned for the "local" choice; `None` makes it unavailable.
+    pub plan: Mutex<Option<ProvisionPlan>>,
 }
 
 impl FakeSource {
@@ -21,6 +23,7 @@ impl FakeSource {
         Arc::new(Self {
             items: Mutex::new(items),
             prepare_calls: AtomicUsize::new(0),
+            plan: Mutex::new(None),
         })
     }
 
@@ -72,16 +75,36 @@ impl WorkItemSource for FakeSource {
 
     fn choices(&self, item: &WorkItem) -> ItemChoices {
         ItemChoices {
-            choices: vec![WorkItemChoiceInfo {
-                choice_id: "web".into(),
-                label: "Open".into(),
-                action: WorkItemChoiceAction::OpenUrl {
-                    url: item.url.clone(),
+            choices: vec![
+                WorkItemChoiceInfo {
+                    choice_id: "local".into(),
+                    label: "Local".into(),
+                    action: WorkItemChoiceAction::ProvisionWorkspace,
+                    disabled_reason: None,
                 },
-                disabled_reason: None,
-            }],
+                WorkItemChoiceInfo {
+                    choice_id: "web".into(),
+                    label: "Open".into(),
+                    action: WorkItemChoiceAction::OpenUrl {
+                        url: item.url.clone(),
+                    },
+                    disabled_reason: None,
+                },
+            ],
             default_choice_id: Some("web".into()),
         }
+    }
+
+    fn provision_plan(
+        &self,
+        _item: &WorkItem,
+        _worktree_directory: &std::path::Path,
+    ) -> Result<ProvisionPlan, String> {
+        self.plan
+            .lock()
+            .expect("fake source lock")
+            .clone()
+            .ok_or_else(|| "no plan scripted".to_string())
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {

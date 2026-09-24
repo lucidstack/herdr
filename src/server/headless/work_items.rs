@@ -15,6 +15,19 @@ impl HeadlessServer {
             return self.app.handle_internal_event_with_render_impact(ev);
         };
         let (changed, notices) = self.app.handle_work_items_event(*event);
+        self.send_work_item_notices(notices);
+        changed
+    }
+
+    /// Runs periodic work-item tasks and delivers any notices they produced.
+    pub(super) fn run_work_items_tasks_headless(&mut self, now: std::time::Instant) -> bool {
+        let changed = self.app.run_work_items_tasks(now);
+        let notices = self.app.work_items.take_notices();
+        self.send_work_item_notices(notices);
+        changed
+    }
+
+    fn send_work_item_notices(&mut self, notices: Vec<crate::work_items::WorkItemNotice>) {
         for notice in notices {
             self.send_to_client_shells(ServerMessage::SemanticNotification(SemanticNotification {
                 kind: SemanticNotificationKind::Custom,
@@ -28,7 +41,6 @@ impl HeadlessServer {
                 position: None,
             }));
         }
-        changed
     }
 
     /// Frames the current work-item projection for one client shell.

@@ -6,6 +6,7 @@
 
 pub(crate) mod github;
 pub(crate) mod process;
+pub(crate) mod provision;
 pub(crate) mod source;
 pub(crate) mod state;
 pub(crate) mod store;
@@ -17,10 +18,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::api::schema::{WorkItemInfo, WorkItemSourceInfo};
+use crate::api::schema::{
+    WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo, WorkItemSourceInfo,
+};
 use crate::config::WorkItemsConfig;
 
-pub(crate) use source::{PreparedItem, SourceItem, WorkItemSource};
+use provision::ProvisionJob;
+pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
 use state::{NotFound, WorkItem, WorkItemsState};
 use store::StoreWriter;
 
@@ -34,6 +38,18 @@ pub(crate) enum WorkItemsEvent {
         key: String,
         updated_at: String,
         prepared: PreparedItem,
+    },
+    CheckoutFinished {
+        job_id: u64,
+        result: Result<(), String>,
+    },
+    DependenciesFinished {
+        job_id: u64,
+        result: Result<(), String>,
+    },
+    ServerProbeFinished {
+        job_id: u64,
+        result: Result<(), String>,
     },
 }
 
@@ -52,6 +68,11 @@ pub(crate) struct WorkItems {
     polls_in_flight: HashSet<String>,
     store: Option<StoreWriter>,
     loaded: bool,
+    /// Running local provisioning, keyed by item key.
+    jobs: HashMap<String, ProvisionJob>,
+    next_job_id: u64,
+    /// Provisioning notices waiting for delivery to client shells.
+    notices: Vec<WorkItemNotice>,
 }
 
 impl std::fmt::Debug for WorkItems {
@@ -91,6 +112,9 @@ impl WorkItems {
             polls_in_flight: HashSet::new(),
             store: None,
             loaded: false,
+            jobs: HashMap::new(),
+            next_job_id: 1,
+            notices: Vec::new(),
         }
     }
 
@@ -179,11 +203,16 @@ impl WorkItems {
         self.revision
     }
 
+    pub(crate) fn config(&self) -> &WorkItemsConfig {
+        &self.config
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
         self.next_poll
             .iter()
             .filter(|(id, _)| !self.polls_in_flight.contains(*id))
             .map(|(_, deadline)| *deadline)
+            .chain(self.jobs.values().filter_map(ProvisionJob::next_attempt))
             .min()
     }
 
@@ -261,6 +290,10 @@ impl WorkItems {
                 }
                 (changed, Vec::new())
             }
+            // Provisioning results need the app and are handled by its driver.
+            WorkItemsEvent::CheckoutFinished { .. }
+            | WorkItemsEvent::DependenciesFinished { .. }
+            | WorkItemsEvent::ServerProbeFinished { .. } => (false, Vec::new()),
         }
     }
 
@@ -283,9 +316,136 @@ impl WorkItems {
     }
 
     pub(crate) fn workspace_closed(&mut self, workspace_id: &str) {
+        // Late worker results for a dropped job are ignored by job id.
+        self.jobs
+            .retain(|_, job| job.workspace_id.as_deref() != Some(workspace_id));
         if self.state.workspace_closed(workspace_id) {
             self.changed();
         }
+    }
+
+    pub(crate) fn has_job(&self, key: &str) -> bool {
+        self.jobs.contains_key(key)
+    }
+
+    /// Starts provisioning `key`; returns the new job id.
+    pub(crate) fn start_job(
+        &mut self,
+        key: &str,
+        plan: ProvisionPlan,
+        agent: &str,
+    ) -> Result<u64, NotFound> {
+        let item = self.state.get_mut(key).ok_or(NotFound)?;
+        item.phase = WorkItemPhase::Local;
+        item.seen = true;
+        item.provisioning = Some(provision::initial_progress(&plan, agent));
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+        self.jobs.insert(
+            key.to_string(),
+            ProvisionJob {
+                job_id,
+                key: key.to_string(),
+                plan,
+                workspace_id: None,
+                agent_pane_id: None,
+                agent_name: None,
+                server_pane_id: None,
+                agent_start: None,
+                brief: None,
+            },
+        );
+        self.changed();
+        Ok(job_id)
+    }
+
+    pub(crate) fn job(&self, job_id: u64) -> Option<&ProvisionJob> {
+        self.jobs.values().find(|job| job.job_id == job_id)
+    }
+
+    pub(crate) fn job_mut(&mut self, job_id: u64) -> Option<&mut ProvisionJob> {
+        self.jobs.values_mut().find(|job| job.job_id == job_id)
+    }
+
+    pub(crate) fn job_ids(&self) -> Vec<u64> {
+        self.jobs.values().map(|job| job.job_id).collect()
+    }
+
+    /// Applies `update` to the progress of the job's item.
+    pub(crate) fn update_progress(
+        &mut self,
+        job_id: u64,
+        update: impl FnOnce(&mut WorkItemProvisioningInfo),
+    ) {
+        let Some(key) = self.job(job_id).map(|job| job.key.clone()) else {
+            return;
+        };
+        let Some(progress) = self
+            .state
+            .get_mut(&key)
+            .and_then(|item| item.provisioning.as_mut())
+        else {
+            return;
+        };
+        let before = progress.clone();
+        update(progress);
+        if *progress != before {
+            self.changed();
+        }
+    }
+
+    pub(crate) fn progress(&self, job_id: u64) -> Option<&WorkItemProvisioningInfo> {
+        let job = self.job(job_id)?;
+        self.state.get(&job.key)?.provisioning.as_ref()
+    }
+
+    /// Records the provisioned workspace on the job and its item.
+    pub(crate) fn link_workspace(&mut self, job_id: u64, workspace_id: &str) {
+        let Some(job) = self.job_mut(job_id) else {
+            return;
+        };
+        job.workspace_id = Some(workspace_id.to_string());
+        let key = job.key.clone();
+        if let Some(item) = self.state.get_mut(&key) {
+            item.workspace_id = Some(workspace_id.to_string());
+            self.changed();
+        }
+    }
+
+    pub(crate) fn take_notices(&mut self) -> Vec<WorkItemNotice> {
+        std::mem::take(&mut self.notices)
+    }
+
+    /// Removes a job whose steps are all terminal and queues its notice.
+    pub(crate) fn finish_job_if_done(&mut self, job_id: u64) {
+        if let Some(notice) = self.finished_job_notice(job_id) {
+            self.notices.push(notice);
+        }
+    }
+
+    fn finished_job_notice(&mut self, job_id: u64) -> Option<WorkItemNotice> {
+        let progress = self.progress(job_id)?;
+        if !progress.finished {
+            return None;
+        }
+        let failed = provision::has_failure(progress);
+        let key = self.job(job_id)?.key.clone();
+        self.jobs.remove(&key);
+        let item = self.state.get_mut(&key)?;
+        if item.workspace_id.is_none() {
+            item.phase = WorkItemPhase::Pending;
+            self.changed();
+        }
+        let context = self.state.get(&key).map(|item| item.context.clone());
+        let title = match (failed, self.state.get(&key)?.workspace_id.is_some()) {
+            (false, _) => "Review workspace ready",
+            (true, true) => "Review workspace finished with errors",
+            (true, false) => "Review workspace failed",
+        };
+        Some(WorkItemNotice {
+            title: title.into(),
+            body: context,
+        })
     }
 
     pub(crate) fn projection_items(&self) -> Vec<WorkItemInfo> {
@@ -331,6 +491,14 @@ impl WorkItems {
         items.schedule_all(now);
         items.revision = 1;
         items
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_workspace_layout_for_test(
+        &mut self,
+        layout: crate::config::WorkItemWorkspaceConfig,
+    ) {
+        self.config.workspace = layout;
     }
 
     #[cfg(test)]

@@ -37,7 +37,9 @@ pub use self::{
     tab_bar::TabBarRightEntryConfig,
     theme::{parse_color, CustomThemeColors, ModeThemeColors, ThemeConfig, THEME_NAMES},
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
-    work_items::{GithubRepoConfig, GithubWorkItemsConfig, WorkItemsConfig},
+    work_items::{
+        GithubRepoConfig, GithubWorkItemsConfig, WorkItemWorkspaceConfig, WorkItemsConfig,
+    },
 };
 
 pub(crate) use self::keybinds::parse_key_combo;

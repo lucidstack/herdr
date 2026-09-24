@@ -1,6 +1,7 @@
 //! GitHub pull request review requests, read through the GitHub CLI.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
 
@@ -12,7 +13,9 @@ use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
 use crate::config::{GithubRepoConfig, GithubWorkItemsConfig};
 
 use super::process::{failure_detail, run_with_timeout};
-use super::source::{ItemChoices, PreparedItem, SourceItem, WorkItemSource};
+use super::source::{
+    CheckoutSpec, ItemChoices, PreparedItem, ProvisionPlan, ServerPlan, SourceItem, WorkItemSource,
+};
 use super::state::WorkItem;
 
 const SOURCE_ID: &str = "github";
@@ -21,9 +24,14 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const MIN_POLL_SECONDS: u64 = 30;
 const MAX_POLL_SECONDS: u64 = 3600;
 const GITHUB_CHOICE_ID: &str = "github";
+const LOCAL_CHOICE_ID: &str = "local";
+const MAX_WORKSPACE_LABEL_CHARS: usize = 40;
+const MAX_BRIEF_BODY_CHARS: usize = 4000;
+const MAX_BRIEF_FILES: usize = 100;
 
 pub(crate) struct GithubSource {
     config: GithubWorkItemsConfig,
+    docs: Vec<Regex>,
     frontend: Vec<Regex>,
     repo_frontend: HashMap<String, Vec<Regex>>,
     build_error: Option<String>,
@@ -109,8 +117,7 @@ impl GithubSource {
                 Vec::new()
             })
         };
-        // Validated now so a bad pattern is reported by the first poll.
-        compile(&config.docs_patterns, "docs_patterns");
+        let docs = compile(&config.docs_patterns, "docs_patterns");
         let frontend = compile(&config.frontend_patterns, "frontend_patterns");
         let mut repo_frontend = HashMap::new();
         for repo in &config.repos {
@@ -123,6 +130,7 @@ impl GithubSource {
         }
         Self {
             config,
+            docs,
             frontend,
             repo_frontend,
             build_error,
@@ -189,6 +197,91 @@ impl GithubSource {
             Err(err) => Err(err.to_string()),
         }
     }
+}
+
+fn item_detail(item: &WorkItem) -> Option<GithubDetail> {
+    item.detail
+        .clone()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+/// Heuristic default: small or documentation-only changes are quicker to review on GitHub.
+fn default_choice(
+    detail: Option<&GithubDetail>,
+    mapped: bool,
+    small_diff_lines: u64,
+    docs: &[Regex],
+) -> &'static str {
+    if !mapped {
+        return GITHUB_CHOICE_ID;
+    }
+    let Some(detail) = detail else {
+        return LOCAL_CHOICE_ID;
+    };
+    let docs_only = !detail.files.is_empty()
+        && detail
+            .files
+            .iter()
+            .all(|file| docs.iter().any(|pattern| pattern.is_match(&file.path)));
+    if docs_only || detail.additions + detail.deletions <= small_diff_lines {
+        GITHUB_CHOICE_ID
+    } else {
+        LOCAL_CHOICE_ID
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail) -> String {
+    let author = item.author.as_deref().unwrap_or("unknown");
+    let head: String = detail.head_ref_oid.chars().take(8).collect();
+    let body = if detail.body.trim().is_empty() {
+        "(no description)".to_string()
+    } else {
+        truncate_chars(detail.body.trim(), MAX_BRIEF_BODY_CHARS)
+    };
+    let mut files: Vec<String> = detail
+        .files
+        .iter()
+        .take(MAX_BRIEF_FILES)
+        .map(|file| format!("- {} (+{} −{})", file.path, file.additions, file.deletions))
+        .collect();
+    if detail.files.len() > MAX_BRIEF_FILES {
+        files.push(format!(
+            "- … and {} more",
+            detail.files.len() - MAX_BRIEF_FILES
+        ));
+    }
+    format!(
+        "You are reviewing GitHub pull request {repo}#{number}: {title}\n\
+         Author: @{author} · {url}\n\
+         Base {base} ← head {head_ref} ({head})\n\
+         This directory is a detached checkout of the pull request head.\n\
+         \n\
+         Description:\n\
+         {body}\n\
+         \n\
+         Changed files ({changed}, +{additions} −{deletions}):\n\
+         {files}\n\
+         \n\
+         Inspect the change with git (for example `git diff origin/{base}...HEAD`), summarise it and wait for my instructions before changing anything.",
+        number = detail.number,
+        title = item.title,
+        url = item.url,
+        base = detail.base_ref_name,
+        head_ref = detail.head_ref_name,
+        changed = detail.changed_files,
+        additions = detail.additions,
+        deletions = detail.deletions,
+        files = files.join("\n"),
+    )
 }
 
 fn gh_error(output: &Output) -> String {
@@ -328,17 +421,94 @@ impl WorkItemSource for GithubSource {
     }
 
     fn choices(&self, item: &WorkItem) -> ItemChoices {
+        let repo = parse_external_id(&item.external_id).map(|(repo, _)| repo);
+        let mapped = repo.and_then(|repo| self.repo(repo)).is_some();
+        let detail = item_detail(item);
+        let local = WorkItemChoiceInfo {
+            choice_id: LOCAL_CHOICE_ID.into(),
+            label: "Review locally".into(),
+            action: WorkItemChoiceAction::ProvisionWorkspace,
+            disabled_reason: (!mapped).then(|| {
+                format!(
+                    "No local checkout configured for {}",
+                    repo.unwrap_or(&item.external_id)
+                )
+            }),
+        };
+        let github = WorkItemChoiceInfo {
+            choice_id: GITHUB_CHOICE_ID.into(),
+            label: "Review on GitHub".into(),
+            action: WorkItemChoiceAction::OpenUrl {
+                url: item.url.clone(),
+            },
+            disabled_reason: None,
+        };
         ItemChoices {
-            choices: vec![WorkItemChoiceInfo {
-                choice_id: GITHUB_CHOICE_ID.into(),
-                label: "Review on GitHub".into(),
-                action: WorkItemChoiceAction::OpenUrl {
-                    url: item.url.clone(),
-                },
-                disabled_reason: None,
-            }],
-            default_choice_id: Some(GITHUB_CHOICE_ID.into()),
+            choices: vec![local, github],
+            default_choice_id: Some(
+                default_choice(
+                    detail.as_ref(),
+                    mapped,
+                    self.config.small_diff_lines,
+                    &self.docs,
+                )
+                .into(),
+            ),
         }
+    }
+
+    fn provision_plan(
+        &self,
+        item: &WorkItem,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String> {
+        let (repo_name, number) = parse_external_id(&item.external_id)
+            .ok_or_else(|| format!("unrecognised pull request id {}", item.external_id))?;
+        let repo = self
+            .repo(repo_name)
+            .ok_or_else(|| format!("No local checkout configured for {repo_name}"))?;
+        let detail = item_detail(item).ok_or_else(|| {
+            "pull request details are not available yet; try again shortly".to_string()
+        })?;
+        let short_name = repo_name.rsplit('/').next().unwrap_or(repo_name);
+        let checkout_path = crate::worktree::default_checkout_path(
+            worktree_directory,
+            short_name,
+            &format!("pr-{number}"),
+        );
+        let server = self
+            .touches_frontend(repo_name, &detail)
+            .then(|| repo.server_command.clone())
+            .flatten()
+            .map(|command| ServerPlan {
+                command,
+                port: repo.server_port,
+            });
+        let server_skip_reason = if server.is_some() {
+            String::new()
+        } else if self.touches_frontend(repo_name, &detail) {
+            format!("no server_command configured for {repo_name}")
+        } else {
+            "no front-end changes".into()
+        };
+        Ok(ProvisionPlan {
+            checkout: CheckoutSpec {
+                repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
+                remote: repo.remote.clone(),
+                fetch_refspec: format!("+refs/pull/{number}/head:refs/herdr/pull/{number}"),
+                checkout_ref: format!("refs/herdr/pull/{number}"),
+                checkout_path,
+            },
+            workspace_label: truncate_chars(
+                &format!("#{number} {}", item.title),
+                MAX_WORKSPACE_LABEL_CHARS,
+            ),
+            agent_name_hint: format!("review-{number}"),
+            brief: brief(repo_name, item, &detail),
+            install_command: repo.install_command.clone(),
+            server,
+            server_skip_reason,
+        })
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
@@ -420,6 +590,155 @@ mod tests {
     fn other_gh_failures_report_the_last_stderr_line() {
         let message = gh_error(&output("warning\nHTTP 422: Validation Failed\n", 1));
         assert_eq!(message, "gh api failed: HTTP 422: Validation Failed");
+    }
+
+    fn detail(files: &[(&str, u64, u64)]) -> GithubDetail {
+        GithubDetail {
+            number: 5,
+            body: "Adds the thing.".into(),
+            additions: files.iter().map(|file| file.1).sum(),
+            deletions: files.iter().map(|file| file.2).sum(),
+            changed_files: files.len() as u64,
+            files: files
+                .iter()
+                .map(|(path, additions, deletions)| GithubFile {
+                    path: (*path).into(),
+                    additions: *additions,
+                    deletions: *deletions,
+                })
+                .collect(),
+            base_ref_name: "main".into(),
+            head_ref_name: "feature".into(),
+            head_ref_oid: "0123456789abcdef".into(),
+        }
+    }
+
+    fn work_item(repo: &str, detail: Option<&GithubDetail>) -> WorkItem {
+        WorkItem {
+            key: format!("github:{repo}#5"),
+            source_id: "github".into(),
+            external_id: format!("{repo}#5"),
+            title: "Add the thing".into(),
+            context: format!("{repo} #5"),
+            author: Some("alice".into()),
+            url: format!("https://github.com/{repo}/pull/5"),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
+            summary: None,
+            prepare_error: None,
+            phase: crate::api::schema::WorkItemPhase::Pending,
+            seen: false,
+            resolved: false,
+            workspace_id: None,
+            prepared_for: None,
+            prepare_in_flight: false,
+            provisioning: None,
+        }
+    }
+
+    fn mapped_source(repo: GithubRepoConfig) -> GithubSource {
+        GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![repo],
+            ..GithubWorkItemsConfig::default()
+        })
+    }
+
+    fn repo_config() -> GithubRepoConfig {
+        GithubRepoConfig {
+            name: "o/r".into(),
+            path: "/src/r".into(),
+            remote: "origin".into(),
+            install_command: Some("npm ci".into()),
+            server_command: Some("npm run dev".into()),
+            server_port: Some(3000),
+            frontend_patterns: None,
+        }
+    }
+
+    fn default_for(source: &GithubSource, detail: &GithubDetail) -> Option<String> {
+        source
+            .choices(&work_item("o/r", Some(detail)))
+            .default_choice_id
+    }
+
+    #[test]
+    fn unmapped_repository_defaults_to_github_and_disables_local_review() {
+        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
+        assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
+        let local = &choices.choices[0];
+        assert_eq!(local.choice_id, "local");
+        assert_eq!(
+            local.disabled_reason.as_deref(),
+            Some("No local checkout configured for o/r")
+        );
+    }
+
+    #[test]
+    fn documentation_only_change_defaults_to_github() {
+        let source = mapped_source(repo_config());
+        let docs = detail(&[("README.md", 300, 10), ("docs/guide/setup.txt", 200, 0)]);
+        assert_eq!(default_for(&source, &docs).as_deref(), Some("github"));
+    }
+
+    #[test]
+    fn small_change_defaults_to_github() {
+        let source = mapped_source(repo_config());
+        assert_eq!(
+            default_for(&source, &detail(&[("src/a.rs", 15, 5)])).as_deref(),
+            Some("github")
+        );
+    }
+
+    #[test]
+    fn large_code_change_defaults_to_local_review() {
+        let source = mapped_source(repo_config());
+        assert_eq!(
+            default_for(&source, &detail(&[("src/a.rs", 15, 6)])).as_deref(),
+            Some("local")
+        );
+    }
+
+    #[test]
+    fn repository_frontend_patterns_override_the_defaults() {
+        let source = mapped_source(GithubRepoConfig {
+            frontend_patterns: Some(vec![r"^web/".into()]),
+            ..repo_config()
+        });
+        assert!(source.touches_frontend("o/r", &detail(&[("web/app.rs", 1, 0)])));
+        assert!(!source.touches_frontend("o/r", &detail(&[("src/view.tsx", 1, 0)])));
+    }
+
+    #[test]
+    fn provision_plan_checks_out_under_the_worktree_root_and_briefs_the_change() {
+        let source = mapped_source(repo_config());
+        let change = detail(&[("src/a.rs", 40, 2), ("src/b.rs", 1, 1)]);
+        let plan = source
+            .provision_plan(&work_item("o/r", Some(&change)), Path::new("/worktrees"))
+            .expect("plan");
+        assert_eq!(plan.checkout.checkout_path, Path::new("/worktrees/r/pr-5"));
+        assert_eq!(plan.checkout.checkout_ref, "refs/herdr/pull/5");
+        assert_eq!(plan.server, None);
+        assert_eq!(plan.server_skip_reason, "no front-end changes");
+        assert!(plan.brief.contains("Add the thing"));
+        assert!(plan.brief.contains("- src/a.rs (+40 −2)"));
+        assert!(plan.brief.contains("- src/b.rs (+1 −1)"));
+    }
+
+    #[test]
+    fn provision_plan_starts_a_server_for_frontend_changes() {
+        let source = mapped_source(repo_config());
+        let change = detail(&[("web/app.tsx", 40, 2)]);
+        let plan = source
+            .provision_plan(&work_item("o/r", Some(&change)), Path::new("/worktrees"))
+            .expect("plan");
+        assert_eq!(
+            plan.server,
+            Some(ServerPlan {
+                command: "npm run dev".into(),
+                port: Some(3000),
+            })
+        );
     }
 
     #[test]
