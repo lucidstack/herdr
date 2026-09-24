@@ -1,6 +1,7 @@
 use super::*;
 
 mod settings_overlay;
+mod work_item_overlay;
 mod worktree_overlays;
 
 #[derive(Default)]
@@ -77,6 +78,7 @@ pub(crate) fn render_client_overlay(
         ClientShellOverlay::WorktreeRemove(v) => {
             worktree_overlays::render_worktree_remove_overlay(b, v, p)
         }
+        ClientShellOverlay::WorkItem(v) => work_item_overlay::render_work_item_overlay(b, v, p),
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
 }

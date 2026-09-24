@@ -195,10 +195,26 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
+    let (mut workspace_area, detail_area) =
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    let mut nested_workspace_ids = Vec::new();
+    if let Some(projection) = super::super::work_items::local_projection(state.work_items, snapshot)
+    {
+        let (used, nested) = super::super::work_items::render_items_section(
+            buffer,
+            workspace_area,
+            projection,
+            snapshot,
+            config,
+            state.work_items.spinner_frame,
+            hits,
+        );
+        workspace_area.y += used;
+        workspace_area.height -= used;
+        nested_workspace_ids = nested;
+    }
     put_text(
         buffer,
         workspace_area.x,
@@ -210,7 +226,12 @@ pub(crate) fn render_sidebar(
             .add_modifier(Modifier::BOLD),
     );
 
-    let entries = workspace_entries(snapshot, state.collapsed_groups);
+    let mut entries = workspace_entries(snapshot, state.collapsed_groups);
+    if !nested_workspace_ids.is_empty() {
+        entries.retain(|entry| {
+            !nested_workspace_ids.contains(&snapshot.workspaces[entry.index].workspace_id.as_str())
+        });
+    }
     let body = Rect::new(
         workspace_area.x,
         workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),

@@ -171,6 +171,8 @@ pub(super) struct ShellHitMap {
     pub(super) global_launcher: Rect,
     pub(super) notification_toast: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
+    pub(super) work_items: Vec<super::work_items::WorkItemHit>,
+    pub(super) overlay_choice_rows: Vec<(Rect, usize)>,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
@@ -343,6 +345,7 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    WorkItem,
 }
 
 #[derive(Debug)]
@@ -639,6 +642,7 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    WorkItem(Box<super::work_items::ClientWorkItemOverlay>),
 }
 
 impl ClientShellOverlay {
@@ -657,6 +661,7 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::WorkItem(_) => ClientShellOverlayKind::WorkItem,
         }
     }
 }

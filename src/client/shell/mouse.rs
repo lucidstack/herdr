@@ -1651,6 +1651,12 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::WorkItem(_))) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.handle_work_item_overlay_click(point, outcome);
+            }
+            return;
+        }
         if self.overlay.is_some() {
             if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
                 return;
@@ -1981,6 +1987,9 @@ impl ClientShellState {
                     return;
                 }
                 if self.handle_endpoint_machine_click(point, outcome) {
+                    return;
+                }
+                if self.handle_work_item_click(point, outcome) {
                     return;
                 }
                 if super::contains(self.hits.global_launcher, point) {
