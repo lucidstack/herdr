@@ -31,7 +31,7 @@ pub(crate) struct ItemChoices {
     pub default_choice_id: Option<String>,
 }
 
-/// A worktree created through Herdr's worktree support on a local review branch.
+/// A worktree created through Herdr's worktree support on a local branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorktreeSpec {
     /// Existing clone the worktree is added to.
@@ -39,10 +39,13 @@ pub(crate) struct WorktreeSpec {
     /// Remote name or URL that serves `fetch_refspec`.
     pub remote: String,
     pub fetch_refspec: String,
-    /// Fetched ref the review branch starts from.
+    /// Fetched ref a new branch starts from.
     pub base_ref: String,
-    /// Local branch created for the review.
+    /// Local branch the worktree is on.
     pub branch: String,
+    /// Work on `branch` when it already exists locally (the pull request's own branch).
+    /// Otherwise an existing `branch` is kept and a suffixed branch continues from it.
+    pub reuse_branch: bool,
 }
 
 /// A scratch directory holding one file produced by a command, e.g. a diff.

@@ -27,6 +27,8 @@ pub(crate) struct AgentAttempt {
     pub next_attempt: Instant,
     /// Response channel of an in-flight `agent.prompt`.
     pub pending: Option<std::sync::mpsc::Receiver<String>>,
+    /// The agent was last seen asking the user something.
+    pub blocked: bool,
 }
 
 /// An in-flight deferred API request (e.g. `worktree.create`).
@@ -84,9 +86,9 @@ impl ProvisionJob {
 /// Outcome of preparing the workspace source on a background thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SourceReady {
-    /// Create a worktree on a new `branch` starting at `base`.
-    NewBranch { branch: String, base: String },
-    /// The review branch is already checked out here; reopen it.
+    /// Create a worktree on `branch`; a branch that does not exist yet starts at `base`.
+    CreateWorktree { branch: String, base: String },
+    /// The branch is already checked out here; reopen that worktree.
     ExistingWorktree(PathBuf),
     /// The download workspace's file is in place.
     Downloaded,
@@ -274,7 +276,7 @@ fn prepare_worktree(spec: &WorktreeSpec) -> Result<SourceReady, String> {
     )
     .map_err(|err| format!("fetch: {err}"))?;
     if !branch_exists(&spec.repo_path, &spec.branch)? {
-        return Ok(SourceReady::NewBranch {
+        return Ok(SourceReady::CreateWorktree {
             branch: spec.branch.clone(),
             base: spec.base_ref.clone(),
         });
@@ -282,12 +284,20 @@ fn prepare_worktree(spec: &WorktreeSpec) -> Result<SourceReady, String> {
     if let Some(path) = worktree_for_branch(&spec.repo_path, &spec.branch)? {
         return Ok(SourceReady::ExistingWorktree(path));
     }
+    if spec.reuse_branch {
+        // Local commits on the branch stay; the fetched remote state is only the base
+        // for a branch that did not exist.
+        return Ok(SourceReady::CreateWorktree {
+            branch: spec.branch.clone(),
+            base: spec.base_ref.clone(),
+        });
+    }
     // A kept review branch without a worktree: continue from it on a fresh branch so
     // Herdr creates the worktree (and its hooks run) without discarding the kept work.
     for suffix in 2..=MAX_BRANCH_SUFFIX {
         let branch = format!("{}-{suffix}", spec.branch);
         if !branch_exists(&spec.repo_path, &branch)? {
-            return Ok(SourceReady::NewBranch {
+            return Ok(SourceReady::CreateWorktree {
                 branch,
                 base: spec.branch.clone(),
             });
@@ -343,6 +353,7 @@ mod tests {
                 fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
                 base_ref: "refs/herdr/pull/1".into(),
                 branch: "review/pr-1".into(),
+                reuse_branch: false,
             }),
             workspace_label: "#1 Title".into(),
             agent_name_hint: "review-1".into(),
@@ -474,6 +485,7 @@ mod tests {
             fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
             base_ref: "refs/herdr/pull/1".into(),
             branch: "review/pr-1".into(),
+            reuse_branch: false,
         }
     }
 
@@ -485,7 +497,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
         assert_eq!(
             ready,
-            Ok(SourceReady::NewBranch {
+            Ok(SourceReady::CreateWorktree {
                 branch: "review/pr-1".into(),
                 base: "refs/herdr/pull/1".into(),
             })
@@ -501,9 +513,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
         assert_eq!(
             ready,
-            Ok(SourceReady::NewBranch {
+            Ok(SourceReady::CreateWorktree {
                 branch: "review/pr-1-2".into(),
                 base: "review/pr-1".into(),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_request_branch_is_reused_when_it_exists_locally() {
+        let repo = test_repo("reuse");
+        git(&repo, &["branch", "feature", "HEAD"], GIT_TIMEOUT).unwrap();
+        let ready = prepare_worktree(&WorktreeSpec {
+            branch: "feature".into(),
+            reuse_branch: true,
+            ..spec(&repo)
+        });
+        let _ = std::fs::remove_dir_all(&repo);
+        assert_eq!(
+            ready,
+            Ok(SourceReady::CreateWorktree {
+                branch: "feature".into(),
+                base: "refs/herdr/pull/1".into(),
             })
         );
     }

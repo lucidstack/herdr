@@ -1,4 +1,5 @@
-//! GitHub pull request review requests, read through the GitHub CLI.
+//! GitHub pull requests read through the GitHub CLI: review requests for you, and your own
+//! pull requests with changes requested.
 
 use std::path::Path;
 use std::process::Output;
@@ -10,7 +11,8 @@ use tracing::warn;
 
 use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
 use crate::config::{
-    GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig, ReviewRequestedConfig,
+    ChangesRequestedConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
+    ReviewRequestedConfig,
 };
 
 use super::process::{failure_detail, run_with_timeout};
@@ -29,6 +31,58 @@ const GITHUB_CHOICE_ID: &str = "github";
 const MAX_WORKSPACE_LABEL_CHARS: usize = 40;
 const MAX_BRIEF_BODY_CHARS: usize = 4000;
 const MAX_BRIEF_FILES: usize = 100;
+const MAX_BRIEF_COMMENTS: usize = 50;
+const MAX_COMMENT_CHARS: usize = 600;
+/// External-id prefix of changes-requested items. Review requests carry none, which keeps
+/// the ids of items stored before this event existed.
+const CHANGES_PREFIX: &str = "changes:";
+
+/// What a GitHub item asks of you.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Event {
+    /// Someone requested your review.
+    ReviewRequested,
+    /// A reviewer requested changes on your pull request.
+    ChangesRequested,
+}
+
+impl Event {
+    const ALL: [Self; 2] = [Self::ReviewRequested, Self::ChangesRequested];
+
+    fn of(external_id: &str) -> Self {
+        if external_id.starts_with(CHANGES_PREFIX) {
+            Self::ChangesRequested
+        } else {
+            Self::ReviewRequested
+        }
+    }
+
+    fn id_prefix(self) -> &'static str {
+        match self {
+            Self::ReviewRequested => "",
+            Self::ChangesRequested => CHANGES_PREFIX,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::ReviewRequested => "review requests",
+            Self::ChangesRequested => "changes requested",
+        }
+    }
+
+    fn modes(self) -> &'static [ReviewMode] {
+        match self {
+            Self::ReviewRequested => &[
+                ReviewMode::Local,
+                ReviewMode::LocalAgentReview,
+                ReviewMode::AgentReport,
+                ReviewMode::AgentPost,
+            ],
+            Self::ChangesRequested => &[ReviewMode::Address, ReviewMode::AddressAgent],
+        }
+    }
+}
 
 pub(crate) struct GithubSource {
     config: GithubWorkItemsConfig,
@@ -36,6 +90,7 @@ pub(crate) struct GithubSource {
     review_requested: Vec<Workflow>,
     /// Defaults used when no block matches a repository.
     fallback: Workflow,
+    changes_fallback: ChangesRequestedConfig,
     build_error: Option<String>,
 }
 
@@ -43,6 +98,16 @@ pub(crate) struct GithubSource {
 struct Workflow {
     config: ReviewRequestedConfig,
     docs: Vec<Regex>,
+}
+
+/// The workflow settings that apply to one item.
+struct Settings<'a> {
+    agent: &'a str,
+    editor_command: &'a str,
+    lazygit_command: &'a str,
+    diff_command: &'a str,
+    delete_branch: bool,
+    on_resolved: OnResolvedConfig,
 }
 
 #[derive(Deserialize)]
@@ -90,6 +155,53 @@ pub(crate) struct GithubDetail {
     pub head_ref_name: String,
     #[serde(default)]
     pub head_ref_oid: String,
+    /// The head branch lives in a fork, so the configured remote does not serve it.
+    #[serde(default)]
+    pub is_cross_repository: bool,
+    /// Submitted reviews; only fetched for changes-requested items.
+    #[serde(default)]
+    pub reviews: Vec<GithubReview>,
+    /// Inline review comments; only fetched for changes-requested items.
+    #[serde(default)]
+    pub inline_comments: Vec<GithubInlineComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GithubLogin {
+    pub login: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GithubReview {
+    #[serde(default)]
+    pub author: Option<GithubLogin>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GithubInlineComment {
+    pub path: String,
+    #[serde(default)]
+    pub line: Option<u64>,
+    pub author: String,
+    pub body: String,
+}
+
+/// One entry of `GET repos/{repo}/pulls/{n}/comments`.
+#[derive(Deserialize)]
+struct RestReviewComment {
+    path: String,
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    original_line: Option<u64>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    user: Option<SearchUser>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,9 +213,12 @@ pub(crate) struct GithubFile {
     pub deletions: u64,
 }
 
-/// `owner/repo#123` split into repository and number.
+/// `owner/repo#123`, optionally behind the event prefix, split into repository and number.
 fn parse_external_id(external_id: &str) -> Option<(&str, u64)> {
-    let (repo, number) = external_id.rsplit_once('#')?;
+    let id = external_id
+        .strip_prefix(CHANGES_PREFIX)
+        .unwrap_or(external_id);
+    let (repo, number) = id.rsplit_once('#')?;
     Some((repo, number.parse().ok()?))
 }
 
@@ -132,6 +247,7 @@ impl GithubSource {
             config,
             review_requested,
             fallback,
+            changes_fallback: ChangesRequestedConfig::default(),
             build_error,
         }
     }
@@ -142,6 +258,48 @@ impl GithubSource {
             .iter()
             .find(|workflow| workflow.config.applies_to(repo))
             .unwrap_or(&self.fallback)
+    }
+
+    fn changes_workflow(&self, repo: &str) -> &ChangesRequestedConfig {
+        self.config
+            .changes_requested
+            .iter()
+            .find(|block| block.applies_to(repo))
+            .unwrap_or(&self.changes_fallback)
+    }
+
+    fn settings(&self, event: Event, repo: &str) -> Settings<'_> {
+        match event {
+            Event::ReviewRequested => {
+                let config = &self.workflow(repo).config;
+                Settings {
+                    agent: &config.agent,
+                    editor_command: &config.editor_command,
+                    lazygit_command: &config.lazygit_command,
+                    diff_command: &config.diff_command,
+                    delete_branch: config.delete_branch,
+                    on_resolved: config.on_resolved,
+                }
+            }
+            Event::ChangesRequested => {
+                let config = self.changes_workflow(repo);
+                Settings {
+                    agent: &config.agent,
+                    editor_command: &config.editor_command,
+                    lazygit_command: &config.lazygit_command,
+                    diff_command: "",
+                    delete_branch: config.delete_branch,
+                    on_resolved: config.on_resolved,
+                }
+            }
+        }
+    }
+
+    fn query(&self, event: Event) -> &str {
+        match event {
+            Event::ReviewRequested => &self.config.queries.review_requested,
+            Event::ChangesRequested => &self.config.queries.changes_requested,
+        }
     }
 
     fn repo(&self, name: &str) -> Option<&GithubRepoConfig> {
@@ -158,12 +316,18 @@ impl GithubSource {
     }
 
     /// Why `mode` cannot be offered for `repo`, if it cannot.
-    fn mode_unavailable(&self, mode: ReviewMode, repo: &str, mapped: bool) -> Option<String> {
+    fn mode_unavailable(
+        &self,
+        mode: ReviewMode,
+        event: Event,
+        repo: &str,
+        mapped: bool,
+    ) -> Option<String> {
         if mode.checks_out() && !mapped {
             return Some(format!("No local checkout configured for {repo}"));
         }
-        if mode.needs_agent() && self.workflow(repo).config.agent.is_empty() {
-            return Some(format!("No agent configured for {repo} review requests"));
+        if mode.needs_agent() && self.settings(event, repo).agent.is_empty() {
+            return Some(format!("No agent configured for {repo} {}", event.name()));
         }
         None
     }
@@ -216,8 +380,10 @@ fn item_detail(item: &WorkItem) -> Option<GithubDetail> {
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
-/// Heuristic default: small or documentation-only changes are quicker to review on GitHub.
+/// Heuristic default: small or documentation-only changes are quicker to review on GitHub;
+/// requested changes are worked on locally whenever there is a checkout.
 fn default_choice(
+    event: Event,
     detail: Option<&GithubDetail>,
     mapped: bool,
     small_diff_lines: u64,
@@ -225,6 +391,9 @@ fn default_choice(
 ) -> &'static str {
     if !mapped {
         return GITHUB_CHOICE_ID;
+    }
+    if event == Event::ChangesRequested {
+        return ReviewMode::Address.choice_id();
     }
     let Some(detail) = detail else {
         return ReviewMode::Local.choice_id();
@@ -250,7 +419,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
     truncated
 }
 
-/// How a pull request is reviewed once the user picks a provisioning choice.
+/// How an item is worked on once the user picks a provisioning choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReviewMode {
     /// Worktree checkout; the agent is briefed and waits.
@@ -261,14 +430,20 @@ enum ReviewMode {
     AgentReport,
     /// No checkout; the agent reviews through gh and posts a review comment.
     AgentPost,
+    /// Worktree on the pull request branch; the agent summarises the feedback and waits.
+    Address,
+    /// Worktree on the pull request branch; the agent addresses the feedback.
+    AddressAgent,
 }
 
 impl ReviewMode {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 6] = [
         Self::Local,
         Self::LocalAgentReview,
         Self::AgentReport,
         Self::AgentPost,
+        Self::Address,
+        Self::AddressAgent,
     ];
 
     fn choice_id(self) -> &'static str {
@@ -277,6 +452,8 @@ impl ReviewMode {
             Self::LocalAgentReview => "local_agent",
             Self::AgentReport => "agent_report",
             Self::AgentPost => "agent_post",
+            Self::Address => "address",
+            Self::AddressAgent => "address_agent",
         }
     }
 
@@ -292,6 +469,8 @@ impl ReviewMode {
             Self::LocalAgentReview => "Review locally, agent reviews first",
             Self::AgentReport => "Agent review, report back to me",
             Self::AgentPost => "Agent review, post on GitHub",
+            Self::Address => "Work on it locally",
+            Self::AddressAgent => "Agent addresses the feedback",
         }
     }
 
@@ -301,15 +480,22 @@ impl ReviewMode {
             Self::LocalAgentReview => "Worktree and tools; the agent starts reviewing",
             Self::AgentReport => "No checkout; the agent reviews with gh and reports here",
             Self::AgentPost => "No checkout; the agent reviews and comments on the PR",
+            Self::Address => "Worktree on the PR branch; the agent sums up the feedback and waits",
+            Self::AddressAgent => {
+                "Worktree on the PR branch; the agent makes the changes, no commit or push"
+            }
         }
     }
 
     fn checks_out(self) -> bool {
-        matches!(self, Self::Local | Self::LocalAgentReview)
+        matches!(
+            self,
+            Self::Local | Self::LocalAgentReview | Self::Address | Self::AddressAgent
+        )
     }
 
     fn needs_agent(self) -> bool {
-        self != Self::Local
+        !matches!(self, Self::Local | Self::Address)
     }
 }
 
@@ -317,14 +503,7 @@ fn diff_file_name(number: u64) -> String {
     format!("pr-{number}.diff")
 }
 
-fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
-    let author = item.author.as_deref().unwrap_or("unknown");
-    let head: String = detail.head_ref_oid.chars().take(8).collect();
-    let body = if detail.body.trim().is_empty() {
-        "(no description)".to_string()
-    } else {
-        truncate_chars(detail.body.trim(), MAX_BRIEF_BODY_CHARS)
-    };
+fn changed_files_list(detail: &GithubDetail) -> String {
     let mut files: Vec<String> = detail
         .files
         .iter()
@@ -337,6 +516,120 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -
             detail.files.len() - MAX_BRIEF_FILES
         ));
     }
+    files.join("\n")
+}
+
+/// Collapses whitespace and drops HTML tags, which review bots use heavily.
+fn one_line(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for character in text.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                plain.push(' ');
+            }
+            _ if !in_tag => plain.push(character),
+            _ => {}
+        }
+    }
+    truncate_chars(
+        &plain.split_whitespace().collect::<Vec<_>>().join(" "),
+        MAX_COMMENT_CHARS,
+    )
+}
+
+/// Reviews that requested changes, then inline comments, as brief lines. Other reviews are
+/// left to the full threads the brief points at.
+fn feedback_list(detail: &GithubDetail) -> String {
+    let mut lines: Vec<String> = detail
+        .reviews
+        .iter()
+        .filter(|review| review.state == "CHANGES_REQUESTED")
+        .map(|review| {
+            let author = review
+                .author
+                .as_ref()
+                .map_or("unknown", |author| author.login.as_str());
+            let state = review.state.to_lowercase().replace('_', " ");
+            let body = if review.body.trim().is_empty() {
+                "(no summary; see the inline comments)".to_string()
+            } else {
+                one_line(&review.body)
+            };
+            format!("- @{author} ({state}): {body}")
+        })
+        .collect();
+    let skipped = detail
+        .inline_comments
+        .len()
+        .saturating_sub(MAX_BRIEF_COMMENTS);
+    for comment in detail.inline_comments.iter().skip(skipped) {
+        let location = match comment.line {
+            Some(line) => format!("{}:{line}", comment.path),
+            None => comment.path.clone(),
+        };
+        lines.push(format!(
+            "- {location} @{}: {}",
+            comment.author,
+            one_line(&comment.body)
+        ));
+    }
+    if skipped > 0 {
+        lines.push(format!("- … and {skipped} older inline comments"));
+    }
+    if lines.is_empty() {
+        "(no review text was found)".into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn changes_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
+    let number = detail.number;
+    let head = &detail.head_ref_name;
+    let instructions = if mode == ReviewMode::AddressAgent {
+        "Address each point now: make the changes and run the relevant tests. Do not commit, \
+         push or reply on GitHub. Report what you changed and any point you disagree with."
+    } else {
+        "Summarise what the reviewers asked for, propose how to address each point and wait \
+         for my instructions before changing anything."
+    };
+    format!(
+        "Reviewers requested changes on your GitHub pull request {repo}#{number}: {title}\n\
+         {url}\n\
+         This directory is a worktree on the pull request branch {head} (base {base}).\n\
+         \n\
+         Review feedback:\n\
+         {feedback}\n\
+         \n\
+         Use `gh pr view {number} --repo {repo} --comments` and \
+         `gh api repos/{repo}/pulls/{number}/comments` for the full threads.\n\
+         \n\
+         Changed files ({changed}, +{additions} −{deletions}):\n\
+         {files}\n\
+         \n\
+         {instructions}",
+        title = item.title,
+        url = item.url,
+        base = detail.base_ref_name,
+        feedback = feedback_list(detail),
+        changed = detail.changed_files,
+        additions = detail.additions,
+        deletions = detail.deletions,
+        files = changed_files_list(detail),
+    )
+}
+
+fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
+    let author = item.author.as_deref().unwrap_or("unknown");
+    let head: String = detail.head_ref_oid.chars().take(8).collect();
+    let body = if detail.body.trim().is_empty() {
+        "(no description)".to_string()
+    } else {
+        truncate_chars(detail.body.trim(), MAX_BRIEF_BODY_CHARS)
+    };
     let number = detail.number;
     let base = &detail.base_ref_name;
     let gh_context = format!(
@@ -370,6 +663,9 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -
              `gh pr review {number} --repo {repo} --comment --body-file <file>`. \
              Only comment: never approve or request changes."
         ),
+        ReviewMode::Address | ReviewMode::AddressAgent => {
+            return changes_brief(repo, item, detail, mode)
+        }
     };
     format!(
         "You are reviewing GitHub pull request {repo}#{number}: {title}\n\
@@ -389,7 +685,7 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -
         changed = detail.changed_files,
         additions = detail.additions,
         deletions = detail.deletions,
-        files = files.join("\n"),
+        files = changed_files_list(detail),
     )
 }
 
@@ -401,7 +697,7 @@ fn gh_error(output: &Output) -> String {
     format!("gh api failed: {}", failure_detail(output))
 }
 
-fn parse_search(bytes: &[u8]) -> Result<Vec<SourceItem>, String> {
+fn parse_search(bytes: &[u8], event: Event) -> Result<Vec<SourceItem>, String> {
     let response: SearchResponse =
         serde_json::from_slice(bytes).map_err(|err| format!("unexpected gh api output: {err}"))?;
     Ok(response
@@ -419,13 +715,17 @@ fn parse_search(bytes: &[u8]) -> Result<Vec<SourceItem>, String> {
                 return None;
             };
             // Number first: the sidebar truncates from the right, and the number is what tells
-            // two pull requests of the same repository apart.
-            let mut context = format!("#{} {repo}", item.number);
+            // two pull requests of the same repository apart. The event goes before the
+            // repository for the same reason.
+            let mut context = match event {
+                Event::ReviewRequested => format!("#{} {repo}", item.number),
+                Event::ChangesRequested => format!("#{} changes · {repo}", item.number),
+            };
             if item.draft == Some(true) {
                 context.push_str(" · draft");
             }
             Some(SourceItem {
-                external_id: format!("{repo}#{}", item.number),
+                external_id: format!("{}{repo}#{}", event.id_prefix(), item.number),
                 title: item.title,
                 context,
                 author: item.user.map(|user| user.login),
@@ -457,22 +757,30 @@ impl WorkItemSource for GithubSource {
         if let Some(error) = &self.build_error {
             return Err(error.clone());
         }
-        let query = format!("q={}", self.config.queries.review_requested);
-        let stdout = self.run_gh(&[
-            "api",
-            "--method",
-            "GET",
-            "search/issues",
-            "-f",
-            &query,
-            "-f",
-            "per_page=50",
-            "-f",
-            "sort=updated",
-            "-f",
-            "order=desc",
-        ])?;
-        parse_search(&stdout)
+        let mut items = Vec::new();
+        for event in Event::ALL {
+            let query = self.query(event);
+            if query.trim().is_empty() {
+                continue;
+            }
+            let query = format!("q={query}");
+            let stdout = self.run_gh(&[
+                "api",
+                "--method",
+                "GET",
+                "search/issues",
+                "-f",
+                &query,
+                "-f",
+                "per_page=50",
+                "-f",
+                "sort=updated",
+                "-f",
+                "order=desc",
+            ])?;
+            items.extend(parse_search(&stdout, event)?);
+        }
+        Ok(items)
     }
 
     fn prepare(&self, item: &SourceItem) -> PreparedItem {
@@ -483,17 +791,14 @@ impl WorkItemSource for GithubSource {
                 error: Some(format!("unrecognised pull request id {}", item.external_id)),
             };
         };
+        let event = Event::of(&item.external_id);
         let number_arg = number.to_string();
-        let viewed = self.run_gh(&[
-            "pr",
-            "view",
-            &number_arg,
-            "--repo",
-            repo,
-            "--json",
-            "number,title,body,url,additions,deletions,changedFiles,files,baseRefName,headRefName,headRefOid,author",
-        ]);
-        let detail = match viewed.and_then(|stdout| {
+        let fields = match event {
+            Event::ReviewRequested => DETAIL_FIELDS.to_string(),
+            Event::ChangesRequested => format!("{DETAIL_FIELDS},isCrossRepository,reviews"),
+        };
+        let viewed = self.run_gh(&["pr", "view", &number_arg, "--repo", repo, "--json", &fields]);
+        let mut detail = match viewed.and_then(|stdout| {
             serde_json::from_slice::<GithubDetail>(&stdout)
                 .map_err(|err| format!("unexpected gh pr view output: {err}"))
         }) {
@@ -506,7 +811,14 @@ impl WorkItemSource for GithubSource {
                 }
             }
         };
-        let summary = format!(
+        let mut errors = Vec::new();
+        if event == Event::ChangesRequested {
+            match self.inline_comments(repo, number) {
+                Ok(comments) => detail.inline_comments = comments,
+                Err(error) => errors.push(format!("inline comments unavailable: {error}")),
+            }
+        }
+        let size = format!(
             "+{} −{} across {} {}",
             detail.additions,
             detail.deletions,
@@ -517,49 +829,71 @@ impl WorkItemSource for GithubSource {
                 "files"
             }
         );
-        let error = self
+        let summary = match event {
+            Event::ReviewRequested => size,
+            Event::ChangesRequested => {
+                let requesting = detail
+                    .reviews
+                    .iter()
+                    .filter(|review| review.state == "CHANGES_REQUESTED")
+                    .count();
+                format!(
+                    "{requesting} {} requesting changes · {} inline comments · {size}",
+                    if requesting == 1 { "review" } else { "reviews" },
+                    detail.inline_comments.len(),
+                )
+            }
+        };
+        if let Some(error) = self
             .repo(repo)
             .and_then(|mapped| self.prefetch(mapped, number).err())
-            .map(|detail| format!("prefetch failed: {detail}"));
+        {
+            errors.push(format!("prefetch failed: {error}"));
+        }
         PreparedItem {
             detail: serde_json::to_value(&detail).ok(),
             summary: Some(summary),
-            error,
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
         }
     }
 
     fn choices(&self, item: &WorkItem) -> ItemChoices {
-        let repo = parse_external_id(&item.external_id).map(|(repo, _)| repo);
-        let mapped = repo.and_then(|repo| self.repo(repo)).is_some();
+        let event = Event::of(&item.external_id);
+        let repo = parse_external_id(&item.external_id)
+            .map(|(repo, _)| repo)
+            .unwrap_or(&item.external_id);
+        let mapped = self.repo(repo).is_some();
         let detail = item_detail(item);
-        let mut choices: Vec<WorkItemChoiceInfo> = ReviewMode::ALL
-            .into_iter()
-            .map(|mode| WorkItemChoiceInfo {
+        let mut choices: Vec<WorkItemChoiceInfo> = event
+            .modes()
+            .iter()
+            .map(|&mode| WorkItemChoiceInfo {
                 choice_id: mode.choice_id().into(),
                 label: mode.label().into(),
                 description: Some(mode.description().into()),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
-                disabled_reason: self.mode_unavailable(
-                    mode,
-                    repo.unwrap_or(&item.external_id),
-                    mapped,
-                ),
+                disabled_reason: self.mode_unavailable(mode, event, repo, mapped),
             })
             .collect();
         choices.push(WorkItemChoiceInfo {
             choice_id: GITHUB_CHOICE_ID.into(),
-            label: "Review on GitHub".into(),
+            label: match event {
+                Event::ReviewRequested => "Review on GitHub",
+                Event::ChangesRequested => "Open on GitHub",
+            }
+            .into(),
             description: Some("Open the pull request in the browser".into()),
             action: WorkItemChoiceAction::OpenUrl {
                 url: item.url.clone(),
             },
             disabled_reason: None,
         });
-        let workflow = self.workflow(repo.unwrap_or(&item.external_id));
+        let workflow = self.workflow(repo);
         ItemChoices {
             choices,
             default_choice_id: Some(
                 default_choice(
+                    event,
                     detail.as_ref(),
                     mapped,
                     workflow.config.small_diff_lines,
@@ -576,40 +910,49 @@ impl WorkItemSource for GithubSource {
         choice_id: &str,
         worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String> {
+        let event = Event::of(&item.external_id);
         let mode = ReviewMode::from_choice_id(choice_id)
+            .filter(|mode| event.modes().contains(mode))
             .ok_or_else(|| format!("choice {choice_id} does not provision a workspace"))?;
         let (repo_name, number) = parse_external_id(&item.external_id)
             .ok_or_else(|| format!("unrecognised pull request id {}", item.external_id))?;
         let mapped = self.repo(repo_name);
-        if let Some(reason) = self.mode_unavailable(mode, repo_name, mapped.is_some()) {
+        if let Some(reason) = self.mode_unavailable(mode, event, repo_name, mapped.is_some()) {
             return Err(reason);
         }
         let detail = item_detail(item).ok_or_else(|| {
             "pull request details are not available yet; try again shortly".to_string()
         })?;
-        let workflow = &self.workflow(repo_name).config;
+        let settings = self.settings(event, repo_name);
         let short_name = repo_name.rsplit('/').next().unwrap_or(repo_name);
         let workspace_label = truncate_chars(
             &format!("#{number} {}", item.title),
             MAX_WORKSPACE_LABEL_CHARS,
         );
-        let agent_name_hint = format!("review-{number}");
+        let agent_name_hint = match event {
+            Event::ReviewRequested => format!("review-{number}"),
+            Event::ChangesRequested => format!("pr-{number}"),
+        };
         let brief = brief(repo_name, item, &detail, mode);
         let layout = WorkspaceLayout {
-            agent: workflow.agent.clone(),
-            editor_command: workflow.editor_command.clone(),
-            lazygit_command: workflow.lazygit_command.clone(),
-            diff_command: workflow.diff_command.clone(),
+            agent: settings.agent.to_string(),
+            editor_command: settings.editor_command.to_string(),
+            lazygit_command: settings.lazygit_command.to_string(),
+            diff_command: settings.diff_command.to_string(),
         };
-        let source = match mapped.filter(|_| mode.checks_out()) {
-            Some(repo) => WorkspaceSource::Worktree(WorktreeSpec {
+        let source = match (mapped.filter(|_| mode.checks_out()), event) {
+            (Some(repo), Event::ChangesRequested) => {
+                WorkspaceSource::Worktree(head_branch_spec(repo, &detail)?)
+            }
+            (Some(repo), Event::ReviewRequested) => WorkspaceSource::Worktree(WorktreeSpec {
                 repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
                 remote: repo.remote.clone(),
-                fetch_refspec: format!("+refs/pull/{number}/head:refs/herdr/pull/{number}"),
+                fetch_refspec: pull_refspec(number),
                 base_ref: format!("refs/herdr/pull/{number}"),
                 branch: format!("review/pr-{number}"),
+                reuse_branch: false,
             }),
-            None => WorkspaceSource::Download(DownloadSpec {
+            (None, _) => WorkspaceSource::Download(DownloadSpec {
                 directory: crate::worktree::default_checkout_path(
                     worktree_directory,
                     short_name,
@@ -635,7 +978,7 @@ impl WorkItemSource for GithubSource {
             agent_name_hint,
             brief,
             layout,
-            delete_branch: workflow.delete_branch,
+            delete_branch: settings.delete_branch,
         })
     }
 
@@ -643,14 +986,92 @@ impl WorkItemSource for GithubSource {
         let repo = parse_external_id(&item.external_id)
             .map(|(repo, _)| repo)
             .unwrap_or(&item.external_id);
-        self.workflow(repo).config.on_resolved == OnResolvedConfig::Remove
+        self.settings(Event::of(&item.external_id), repo)
+            .on_resolved
+            == OnResolvedConfig::Remove
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
+        let title = match Event::of(&item.external_id) {
+            Event::ReviewRequested => "Review requested",
+            Event::ChangesRequested => "Changes requested",
+        };
         (
-            "Review requested".into(),
+            title.into(),
             Some(format!("{} · {}", item.context, item.title)),
         )
+    }
+}
+
+const DETAIL_FIELDS: &str = "number,title,body,url,additions,deletions,changedFiles,files,\
+                             baseRefName,headRefName,headRefOid,author";
+
+fn pull_refspec(number: u64) -> String {
+    format!("+refs/pull/{number}/head:refs/herdr/pull/{number}")
+}
+
+/// A remote given by name (not URL) has remote-tracking branches a new branch can track.
+fn is_remote_name(remote: &str) -> bool {
+    !remote.is_empty() && !remote.contains(['/', ':', '\\'])
+}
+
+/// Worktree on the pull request's own head branch, reusing a local branch of that name.
+/// Same-repository heads are fetched into the remote-tracking branch so a new local
+/// branch tracks it and `git push` works; fork heads come from `refs/pull/N/head`.
+fn head_branch_spec(
+    repo: &GithubRepoConfig,
+    detail: &GithubDetail,
+) -> Result<WorktreeSpec, String> {
+    let head = &detail.head_ref_name;
+    if head.is_empty() {
+        return Err("the pull request has no head branch name".into());
+    }
+    let number = detail.number;
+    let (fetch_refspec, base_ref) = if !detail.is_cross_repository && is_remote_name(&repo.remote) {
+        (
+            format!(
+                "+refs/heads/{head}:refs/remotes/{remote}/{head}",
+                remote = repo.remote
+            ),
+            format!("{}/{head}", repo.remote),
+        )
+    } else {
+        (pull_refspec(number), format!("refs/herdr/pull/{number}"))
+    };
+    Ok(WorktreeSpec {
+        repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
+        remote: repo.remote.clone(),
+        fetch_refspec,
+        base_ref,
+        branch: head.clone(),
+        reuse_branch: true,
+    })
+}
+
+impl GithubSource {
+    /// Inline review comments, oldest first.
+    fn inline_comments(&self, repo: &str, number: u64) -> Result<Vec<GithubInlineComment>, String> {
+        let stdout = self.run_gh(&[
+            "api",
+            "--method",
+            "GET",
+            &format!("repos/{repo}/pulls/{number}/comments"),
+            "-f",
+            "per_page=100",
+        ])?;
+        let comments: Vec<RestReviewComment> = serde_json::from_slice(&stdout)
+            .map_err(|err| format!("unexpected gh api output: {err}"))?;
+        Ok(comments
+            .into_iter()
+            .map(|comment| GithubInlineComment {
+                path: comment.path,
+                line: comment.line.or(comment.original_line),
+                author: comment
+                    .user
+                    .map_or_else(|| "unknown".into(), |user| user.login),
+                body: comment.body,
+            })
+            .collect())
     }
 }
 
@@ -678,7 +1099,7 @@ mod tests {
             {"number":3,"title":"WIP","html_url":"https://github.com/x/y/pull/3",
              "updated_at":"2026-01-01T00:00:00Z","draft":true,"user":{"login":"bob"},
              "repository_url":"https://api.github.com/repos/x/y"}]}"#;
-        let items = parse_search(json).expect("parses");
+        let items = parse_search(json, Event::ReviewRequested).expect("parses");
         assert_eq!(
             items,
             vec![
@@ -705,7 +1126,10 @@ mod tests {
     #[test]
     fn search_result_without_repository_is_skipped() {
         let json = br#"{"items":[{"number":1,"title":"t","html_url":"u","updated_at":"x"}]}"#;
-        assert_eq!(parse_search(json).expect("parses"), Vec::new());
+        assert_eq!(
+            parse_search(json, Event::ReviewRequested).expect("parses"),
+            Vec::new()
+        );
     }
 
     #[cfg(unix)]
@@ -746,6 +1170,9 @@ mod tests {
             base_ref_name: "main".into(),
             head_ref_name: "feature".into(),
             head_ref_oid: "0123456789abcdef".into(),
+            is_cross_repository: false,
+            reviews: Vec::new(),
+            inline_comments: Vec::new(),
         }
     }
 
@@ -851,6 +1278,7 @@ mod tests {
                 fetch_refspec: "+refs/pull/5/head:refs/herdr/pull/5".into(),
                 base_ref: "refs/herdr/pull/5".into(),
                 branch: "review/pr-5".into(),
+                reuse_branch: false,
             })
         );
         assert!(plan.delete_branch);
@@ -979,6 +1407,164 @@ mod tests {
         assert!(
             error.starts_with("invalid docs_patterns pattern"),
             "{error}"
+        );
+    }
+
+    fn changes_item(detail: Option<&GithubDetail>) -> WorkItem {
+        WorkItem {
+            key: "github:changes:o/r#5".into(),
+            external_id: "changes:o/r#5".into(),
+            context: "#5 changes · o/r".into(),
+            ..work_item("o/r", detail)
+        }
+    }
+
+    fn feedback_detail() -> GithubDetail {
+        GithubDetail {
+            reviews: vec![
+                GithubReview {
+                    author: Some(GithubLogin {
+                        login: "bob".into(),
+                    }),
+                    state: "CHANGES_REQUESTED".into(),
+                    body: "Please add a test\nfor the empty case.".into(),
+                },
+                GithubReview {
+                    author: Some(GithubLogin {
+                        login: "carol".into(),
+                    }),
+                    state: "COMMENTED".into(),
+                    body: "<details><summary>Nitpicks</summary></details>".into(),
+                },
+            ],
+            inline_comments: vec![GithubInlineComment {
+                path: "src/a.rs".into(),
+                line: Some(12),
+                author: "bob".into(),
+                body: "This can panic.".into(),
+            }],
+            ..detail(&[("src/a.rs", 40, 2)])
+        }
+    }
+
+    #[test]
+    fn changes_requested_results_get_their_own_ids() {
+        let json = br#"{"items":[{"number":12,"title":"Fix it","html_url":"https://github.com/o/r/pull/12",
+            "updated_at":"2026-01-02T00:00:00Z","user":{"login":"me"},
+            "repository_url":"https://api.github.com/repos/o/r"}]}"#;
+        let items = parse_search(json, Event::ChangesRequested).expect("parses");
+        assert_eq!(items[0].external_id, "changes:o/r#12");
+        assert_eq!(items[0].context, "#12 changes · o/r");
+        assert_eq!(parse_external_id(&items[0].external_id), Some(("o/r", 12)));
+    }
+
+    #[test]
+    fn changes_requested_offers_working_on_the_branch_by_default() {
+        let source = mapped_source(repo_config());
+        let choices = source.choices(&changes_item(Some(&feedback_detail())));
+        let ids: Vec<&str> = choices
+            .choices
+            .iter()
+            .map(|choice| choice.choice_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["address", "address_agent", "github"]);
+        assert_eq!(choices.default_choice_id.as_deref(), Some("address"));
+        assert!(source
+            .provision_plan(
+                &changes_item(Some(&feedback_detail())),
+                "local",
+                Path::new("/worktrees")
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn changes_requested_worktree_tracks_the_pull_request_branch() {
+        let source = mapped_source(repo_config());
+        let plan = source
+            .provision_plan(
+                &changes_item(Some(&feedback_detail())),
+                "address_agent",
+                Path::new("/worktrees"),
+            )
+            .expect("plan");
+        assert_eq!(
+            plan.source,
+            WorkspaceSource::Worktree(WorktreeSpec {
+                repo_path: PathBuf::from("/src/r"),
+                remote: "origin".into(),
+                fetch_refspec: "+refs/heads/feature:refs/remotes/origin/feature".into(),
+                base_ref: "origin/feature".into(),
+                branch: "feature".into(),
+                reuse_branch: true,
+            })
+        );
+        assert!(!plan.delete_branch);
+        assert!(plan
+            .brief
+            .contains("- @bob (changes requested): Please add a test for the empty case."));
+        assert!(plan.brief.contains("- src/a.rs:12 @bob: This can panic."));
+        assert!(!plan.brief.contains("@carol"));
+        assert!(plan
+            .brief
+            .contains("Do not commit, push or reply on GitHub"));
+    }
+
+    #[test]
+    fn fork_pull_request_branch_starts_from_the_pull_ref() {
+        let source = mapped_source(repo_config());
+        let fork = GithubDetail {
+            is_cross_repository: true,
+            ..feedback_detail()
+        };
+        let plan = source
+            .provision_plan(&changes_item(Some(&fork)), "address", Path::new("/w"))
+            .expect("plan");
+        let WorkspaceSource::Worktree(spec) = plan.source else {
+            panic!("worktree");
+        };
+        assert_eq!(spec.fetch_refspec, "+refs/pull/5/head:refs/herdr/pull/5");
+        assert_eq!(spec.base_ref, "refs/herdr/pull/5");
+        assert_eq!(spec.branch, "feature");
+        assert!(plan.brief.contains("wait for my instructions"));
+    }
+
+    #[test]
+    fn changes_requested_workflow_is_configured_separately() {
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![repo_config()],
+            changes_requested: vec![ChangesRequestedConfig {
+                agent: String::new(),
+                on_resolved: OnResolvedConfig::Remove,
+                ..ChangesRequestedConfig::default()
+            }],
+            ..GithubWorkItemsConfig::default()
+        });
+        let item = changes_item(Some(&feedback_detail()));
+        let agent_choice = source
+            .choices(&item)
+            .choices
+            .into_iter()
+            .find(|choice| choice.choice_id == "address_agent")
+            .expect("offered");
+        assert_eq!(
+            agent_choice.disabled_reason.as_deref(),
+            Some("No agent configured for o/r changes requested")
+        );
+        assert!(source.remove_on_resolved(&item));
+        assert!(!source.remove_on_resolved(&work_item("o/r", None)));
+        assert_eq!(
+            source
+                .arrival_notice(&SourceItem {
+                    external_id: item.external_id.clone(),
+                    title: item.title.clone(),
+                    context: item.context.clone(),
+                    author: None,
+                    url: item.url.clone(),
+                    updated_at: item.updated_at.clone(),
+                })
+                .0,
+            "Changes requested"
         );
     }
 }

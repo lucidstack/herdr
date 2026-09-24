@@ -2,6 +2,8 @@ use serde::Deserialize;
 
 pub const DEFAULT_GITHUB_REVIEW_REQUESTED_QUERY: &str =
     "is:pr is:open review-requested:@me archived:false";
+pub const DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY: &str =
+    "is:pr is:open author:@me review:changes_requested archived:false";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -25,6 +27,8 @@ pub struct GithubWorkItemsConfig {
     pub repos: Vec<GithubRepoConfig>,
     /// Workflows for review requests; the first block whose repos match applies.
     pub review_requested: Vec<ReviewRequestedConfig>,
+    /// Workflows for your pull requests with changes requested; the first block whose repos match applies.
+    pub changes_requested: Vec<ChangesRequestedConfig>,
 }
 
 impl Default for GithubWorkItemsConfig {
@@ -36,6 +40,7 @@ impl Default for GithubWorkItemsConfig {
             queries: GithubQueriesConfig::default(),
             repos: Vec::new(),
             review_requested: Vec::new(),
+            changes_requested: Vec::new(),
         }
     }
 }
@@ -43,14 +48,17 @@ impl Default for GithubWorkItemsConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct GithubQueriesConfig {
-    /// Search query for pull requests that request your review. Default: "is:pr is:open review-requested:@me archived:false".
+    /// Search query for pull requests that request your review. Empty disables the event. Default: "is:pr is:open review-requested:@me archived:false".
     pub review_requested: String,
+    /// Search query for your pull requests with changes requested. Empty disables the event. Default: "is:pr is:open author:@me review:changes_requested archived:false".
+    pub changes_requested: String,
 }
 
 impl Default for GithubQueriesConfig {
     fn default() -> Self {
         Self {
             review_requested: DEFAULT_GITHUB_REVIEW_REQUESTED_QUERY.into(),
+            changes_requested: DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY.into(),
         }
     }
 }
@@ -125,12 +133,51 @@ impl Default for ReviewRequestedConfig {
 
 impl ReviewRequestedConfig {
     pub fn applies_to(&self, repo: &str) -> bool {
-        self.repos.is_empty()
-            || self
-                .repos
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(repo))
+        repo_matches(&self.repos, repo)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ChangesRequestedConfig {
+    /// Repositories (owner/name) this block applies to. Empty applies to every repository.
+    pub repos: Vec<String>,
+    /// What happens to the workspace once changes are no longer requested. Default: "keep".
+    pub on_resolved: OnResolvedConfig,
+    /// Delete the local branch when a worktree created for it is removed. Default: false.
+    pub delete_branch: bool,
+    /// Agent started in the first tab. Empty disables the agent-led choice. Default: "claude".
+    pub agent: String,
+    /// Command run in the editor tab. Empty disables the tab. Default: "nvim .".
+    pub editor_command: String,
+    /// Command run in the Git tab. Empty disables the tab. Default: "lazygit".
+    pub lazygit_command: String,
+}
+
+impl Default for ChangesRequestedConfig {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            on_resolved: OnResolvedConfig::Keep,
+            delete_branch: false,
+            agent: "claude".into(),
+            editor_command: "nvim .".into(),
+            lazygit_command: "lazygit".into(),
+        }
+    }
+}
+
+impl ChangesRequestedConfig {
+    pub fn applies_to(&self, repo: &str) -> bool {
+        repo_matches(&self.repos, repo)
+    }
+}
+
+fn repo_matches(repos: &[String], repo: &str) -> bool {
+    repos.is_empty()
+        || repos
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(repo))
 }
 
 #[cfg(test)]
@@ -166,6 +213,10 @@ path = "~/src/repo"
         );
         assert_eq!(github.repos[0].remote, "origin");
         assert!(github.review_requested.is_empty());
+        assert_eq!(
+            github.queries.changes_requested,
+            DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY
+        );
     }
 
     #[test]
@@ -193,5 +244,23 @@ agent = ""
         assert!(fallback.applies_to("acme/other"));
         assert_eq!(fallback.on_resolved, OnResolvedConfig::Keep);
         assert_eq!(fallback.agent, "");
+    }
+
+    #[test]
+    fn changes_requested_blocks_keep_branches_by_default() {
+        let github = parse(
+            r#"
+[work_items.github]
+
+[[work_items.github.changes_requested]]
+repos = ["acme/app"]
+"#,
+        );
+        let [block] = github.changes_requested.as_slice() else {
+            panic!("one block");
+        };
+        assert!(block.applies_to("acme/app"));
+        assert!(!block.delete_branch);
+        assert_eq!(block.on_resolved, OnResolvedConfig::Keep);
     }
 }

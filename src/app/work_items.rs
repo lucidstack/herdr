@@ -265,7 +265,7 @@ impl App {
             Err(err) => return self.fail_work_item_workspace(job_id, err),
         };
         match (&plan.source, ready) {
-            (WorkspaceSource::Worktree(spec), SourceReady::NewBranch { branch, base }) => {
+            (WorkspaceSource::Worktree(spec), SourceReady::CreateWorktree { branch, base }) => {
                 // worktree.create runs through Herdr so worktree.created hooks fire.
                 let (tx, rx) = std::sync::mpsc::channel();
                 let request = Request {
@@ -541,10 +541,16 @@ impl App {
             let Some(ws_idx) = self.parse_workspace_id(&workspace_id) else {
                 continue;
             };
-            let linked_worktree = self.state.workspaces[ws_idx]
-                .worktree_space()
-                .is_some_and(|space| space.is_linked_worktree);
-            if !linked_worktree {
+            // Only worktrees created for the item are removed; a reopened worktree (e.g. the
+            // user's own checkout of their pull request branch) just loses its workspace.
+            let owned_worktree =
+                self.state.workspaces[ws_idx]
+                    .worktree_space()
+                    .is_some_and(|space| {
+                        space.is_linked_worktree
+                            && self.work_items.owns_worktree(&space.checkout_path)
+                    });
+            if !owned_worktree {
                 if let Err(err) =
                     self.work_items_api(Method::WorkspaceClose(WorkspaceCloseParams {
                         workspace_id,
@@ -631,6 +637,7 @@ impl App {
                 started: now,
                 next_attempt: now,
                 pending: None,
+                blocked: false,
             });
         }
         self.advance_work_item_agent(job_id, now);
@@ -685,6 +692,7 @@ impl App {
                             started: now,
                             next_attempt: now + AGENT_RETRY_INTERVAL,
                             pending: None,
+                            blocked: false,
                         });
                     }
                     return;
@@ -734,12 +742,27 @@ impl App {
             .is_some_and(|runtime| runtime.bracketed_paste_enabled())
     }
 
+    fn work_item_agent_state(&self, agent_name: &str) -> Option<crate::detect::AgentState> {
+        let target = self.resolve_agent_target(agent_name).ok()?;
+        let workspace = self.state.workspaces.get(target.ws_idx)?;
+        let terminal = self
+            .state
+            .terminals
+            .get(workspace.terminal_id(target.pane_id)?)?;
+        Some(terminal.state)
+    }
+
     fn advance_work_item_brief(&mut self, job_id: u64, now: Instant) {
         enum Next {
             Wait,
-            Send { agent_name: String, text: String },
+            Send {
+                agent_name: String,
+                text: String,
+            },
             Done,
             Fail(String),
+            /// Blocked state changed: `Some(detail)` while it asks, `None` once answered.
+            Blocked(Option<String>),
         }
         let agent_name = self
             .work_items
@@ -748,6 +771,12 @@ impl App {
         let accepts_paste = agent_name
             .as_deref()
             .is_some_and(|name| self.work_item_agent_accepts_paste(name));
+        // A fresh agent may first ask something (Claude Code's folder trust prompt). The brief
+        // waits for the user's answer without a deadline.
+        let blocked = agent_name
+            .as_deref()
+            .and_then(|name| self.work_item_agent_state(name))
+            == Some(crate::detect::AgentState::Blocked);
         let next = {
             let Some(job) = self.work_items.job_mut(job_id) else {
                 return;
@@ -756,49 +785,67 @@ impl App {
             let Some(attempt) = job.brief.as_mut() else {
                 return;
             };
+            if blocked && attempt.pending.is_none() {
+                // Time spent answering does not count against the readiness timeout.
+                attempt.started = now;
+                attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
+            }
             let waiting_for_paste = !accepts_paste
                 && now.saturating_duration_since(attempt.started) < AGENT_READY_TIMEOUT;
-            match attempt.pending.as_ref().map(|pending| pending.try_recv()) {
-                Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {
-                    attempt.next_attempt = now + BRIEF_POLL_INTERVAL;
-                    Next::Wait
-                }
-                Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                    Next::Fail("agent prompt response was lost".into())
-                }
-                Some(Ok(response)) => {
-                    attempt.pending = None;
-                    match parse_response(&response) {
-                        Ok(_) => Next::Done,
-                        Err(err)
-                            if err.code == "agent_not_ready"
-                                && now.saturating_duration_since(attempt.started)
-                                    < AGENT_READY_TIMEOUT =>
-                        {
-                            attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
-                            Next::Wait
-                        }
-                        Err(err) if err.code == "agent_not_ready" => Next::Fail(format!(
-                            "agent did not become ready within {} s",
-                            AGENT_READY_TIMEOUT.as_secs()
-                        )),
-                        Err(err) => Next::Fail(err.message),
+            if blocked != attempt.blocked && attempt.pending.is_none() {
+                attempt.blocked = blocked;
+                Next::Blocked(blocked.then(|| "waiting for your answer in the agent".into()))
+            } else {
+                match attempt.pending.as_ref().map(|pending| pending.try_recv()) {
+                    Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {
+                        attempt.next_attempt = now + BRIEF_POLL_INTERVAL;
+                        Next::Wait
                     }
+                    Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                        Next::Fail("agent prompt response was lost".into())
+                    }
+                    Some(Ok(response)) => {
+                        attempt.pending = None;
+                        match parse_response(&response) {
+                            Ok(_) => Next::Done,
+                            Err(err)
+                                if err.code == "agent_not_ready"
+                                    && now.saturating_duration_since(attempt.started)
+                                        < AGENT_READY_TIMEOUT =>
+                            {
+                                attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
+                                Next::Wait
+                            }
+                            Err(err) if err.code == "agent_not_ready" => Next::Fail(format!(
+                                "agent did not become ready within {} s",
+                                AGENT_READY_TIMEOUT.as_secs()
+                            )),
+                            // The agent started asking between the check and the prompt.
+                            Err(err) if err.code == "agent_blocked" => {
+                                attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
+                                Next::Wait
+                            }
+                            Err(err) => Next::Fail(err.message),
+                        }
+                    }
+                    None if attempt.next_attempt > now => Next::Wait,
+                    // After the timeout the brief is sent anyway, for agents that never enable it.
+                    None if waiting_for_paste => {
+                        attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
+                        Next::Wait
+                    }
+                    None => match agent_name {
+                        Some(agent_name) => Next::Send { agent_name, text },
+                        None => Next::Fail("agent name is unknown".into()),
+                    },
                 }
-                None if attempt.next_attempt > now => Next::Wait,
-                // After the timeout the brief is sent anyway, for agents that never enable it.
-                None if waiting_for_paste => {
-                    attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
-                    Next::Wait
-                }
-                None => match agent_name {
-                    Some(agent_name) => Next::Send { agent_name, text },
-                    None => Next::Fail("agent name is unknown".into()),
-                },
             }
         };
         match next {
             Next::Wait => {}
+            Next::Blocked(detail) => {
+                self.set_work_item_agent_step(job_id, WorkItemStepStatus::Running, detail)
+            }
             Next::Done => {
                 if let Some(job) = self.work_items.job_mut(job_id) {
                     job.brief = None;
@@ -1128,6 +1175,7 @@ mod tests {
                 fetch_refspec: "+refs/pull/1/head:refs/herdr/pull/1".into(),
                 base_ref: "refs/herdr/pull/1".into(),
                 branch: "review/pr-1".into(),
+                reuse_branch: false,
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
@@ -1317,6 +1365,7 @@ mod tests {
                 fetch_refspec: String::new(),
                 base_ref: String::new(),
                 branch: "review/pr-1".into(),
+                reuse_branch: false,
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
@@ -1371,6 +1420,7 @@ mod tests {
             started,
             next_attempt: started,
             pending: None,
+            blocked: false,
         });
 
         app.advance_work_item_brief(job_id, started);
@@ -1392,6 +1442,60 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert_eq!(&sent[..], b"\x1b[200~line one\nline two\x1b[201~");
+    }
+
+    #[tokio::test]
+    async fn brief_waits_for_the_user_to_answer_a_blocked_agent() {
+        use crate::detect::{Agent, AgentState};
+        use crate::work_items::provision::AgentAttempt;
+
+        let Briefing {
+            mut app,
+            job_id,
+            pane_id,
+            terminal_id,
+            mut pty_rx,
+        } = briefing();
+        app.lookup_runtime_sender(0, pane_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[?2004h");
+        let set_state = |app: &mut App, state| {
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), state);
+        };
+        set_state(&mut app, AgentState::Blocked);
+        let started = Instant::now();
+        app.work_items.job_mut(job_id).unwrap().brief = Some(AgentAttempt {
+            started,
+            next_attempt: started,
+            pending: None,
+            blocked: false,
+        });
+
+        // Long after the readiness timeout, a blocked agent still gets its brief later.
+        let late = started + super::AGENT_READY_TIMEOUT * 3;
+        app.advance_work_item_brief(job_id, late);
+        assert_eq!(
+            brief_step(&mut app),
+            (
+                WorkItemStepStatus::Running,
+                Some("waiting for your answer in the agent".into())
+            )
+        );
+        assert!(pty_rx.try_recv().is_err());
+
+        set_state(&mut app, AgentState::Idle);
+        app.advance_work_item_brief(job_id, late + Duration::from_secs(1));
+        assert_eq!(brief_step(&mut app).1, None);
+        app.advance_work_item_brief(job_id, late + Duration::from_secs(2));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pty_rx.try_recv().is_err() {
+            assert!(Instant::now() < deadline, "brief not sent after the answer");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn await_confirmation(app: &mut App, job_id: u64, sent: Instant) {

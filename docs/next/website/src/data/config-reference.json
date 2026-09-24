@@ -1446,7 +1446,7 @@
           "key": "work_items.github.enabled",
           "type": "boolean",
           "default": "true",
-          "description": "Poll GitHub for pull requests; setting the [work_items.github] table enables the source. Map local clones with [[work_items.github.repos]] entries (name, path, remote) to offer worktree reviews; worktrees are created through Herdr's worktree support, so worktree.created and worktree.removed plugin hooks run for them. Configure the review-request workflow with [[work_items.github.review_requested]] blocks: repos (owner/name list; empty applies to every repository, first matching block wins), on_resolved (\"keep\" or \"remove\"), delete_branch (delete the local review branch when its worktree is removed, default true), small_diff_lines, docs_patterns, agent, editor_command, lazygit_command and diff_command ({file} is the downloaded diff)."
+          "description": "Poll GitHub for pull requests; setting the [work_items.github] table enables the source. Map local clones with [[work_items.github.repos]] entries (name, path, remote) to offer worktree reviews; worktrees are created through Herdr's worktree support, so worktree.created and worktree.removed plugin hooks run for them. Configure the review-request workflow with [[work_items.github.review_requested]] blocks: repos (owner/name list; empty applies to every repository, first matching block wins), on_resolved (\"keep\" or \"remove\"), delete_branch (delete the local review branch when its worktree is removed, default true), small_diff_lines, docs_patterns, agent, editor_command, lazygit_command and diff_command ({file} is the downloaded diff). Configure the workflow for your own pull requests with changes requested with [[work_items.github.changes_requested]] blocks: repos, on_resolved, delete_branch (default false), agent, editor_command and lazygit_command. Those worktrees use the pull request's head branch, reopening a worktree that already has it checked out."
         },
         {
           "key": "work_items.github.gh_path",
@@ -1464,7 +1464,13 @@
           "key": "work_items.github.queries.review_requested",
           "type": "string",
           "default": "\"is:pr is:open review-requested:@me archived:false\"",
-          "description": "Search query for pull requests that request your review."
+          "description": "Search query for pull requests that request your review. Empty disables the event."
+        },
+        {
+          "key": "work_items.github.queries.changes_requested",
+          "type": "string",
+          "default": "\"is:pr is:open author:@me review:changes_requested archived:false\"",
+          "description": "Search query for your pull requests with changes requested. Empty disables the event."
         }
       ]
     },

@@ -425,6 +425,14 @@ impl WorkItems {
         Some(owned)
     }
 
+    /// Whether the worktree at `checkout_path` was created for an item (not adopted).
+    pub(crate) fn owns_worktree(&self, checkout_path: &Path) -> bool {
+        let wanted = crate::worktree::canonical_or_original(checkout_path);
+        self.owned_worktrees.iter().any(|owned| {
+            crate::worktree::canonical_or_original(Path::new(&owned.checkout_path)) == wanted
+        })
+    }
+
     pub(crate) fn job(&self, job_id: u64) -> Option<&ProvisionJob> {
         self.jobs.values().find(|job| job.job_id == job_id)
     }
