@@ -7,12 +7,76 @@ pub const DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY: &str =
 pub const DEFAULT_GITHUB_CI_FAILING_QUERY: &str =
     "is:pr is:open author:@me status:failure archived:false";
 pub const DEFAULT_GITHUB_ASSIGNED_QUERY: &str = "is:issue is:open assignee:@me archived:false";
+pub const DEFAULT_JIRA_JQL: &str =
+    "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct WorkItemsConfig {
     /// GitHub pull requests. Unset disables the source.
     pub github: Option<GithubWorkItemsConfig>,
+    /// Jira issues. Unset disables the source.
+    pub jira: Option<JiraWorkItemsConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct JiraWorkItemsConfig {
+    /// Poll this source. Default: true.
+    pub enabled: bool,
+    /// Jira Cloud site, e.g. "example.atlassian.net". Required.
+    pub site: String,
+    /// Atlassian account email used with the API token. Required.
+    pub email: String,
+    /// Environment variable of the Herdr server that holds the API token. Default: "ATLASSIAN_TOKEN".
+    pub token_env: String,
+    /// JQL selecting the issues shown in the inbox. Default: "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC".
+    pub jql: String,
+    /// Seconds between polls, clamped to 30–3600. Default: 120.
+    pub poll_interval_seconds: u64,
+    /// curl binary used for the REST API. Default: "curl".
+    pub curl_path: String,
+    /// Local clones that issues of a project are worked on in.
+    pub projects: Vec<JiraProjectConfig>,
+    /// Workflows for Jira issues; `repos` lists project keys; the first matching block applies.
+    pub issues: Vec<BranchWorkflowConfig>,
+}
+
+impl Default for JiraWorkItemsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            site: String::new(),
+            email: String::new(),
+            token_env: "ATLASSIAN_TOKEN".into(),
+            jql: DEFAULT_JIRA_JQL.into(),
+            poll_interval_seconds: 120,
+            curl_path: "curl".into(),
+            projects: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct JiraProjectConfig {
+    /// Project key, e.g. "TECH".
+    pub key: String,
+    /// Path of an existing local clone.
+    pub path: String,
+    /// Git remote the base branch is fetched from. Default: "origin".
+    #[serde(default = "default_remote")]
+    pub remote: String,
+    /// Branch new work starts from. Default: the remote's HEAD branch.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// Name of the new branch; {key}, {key_lower} and {slug} are replaced. Default: "{key_lower}-{slug}".
+    #[serde(default = "default_branch_template")]
+    pub branch_template: String,
+}
+
+fn default_branch_template() -> String {
+    "{key_lower}-{slug}".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

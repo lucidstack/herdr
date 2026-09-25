@@ -1495,6 +1495,48 @@
           "type": "string",
           "default": "\"\"",
           "description": "Search query for issues and pull requests that mention you, for example \"is:open mentions:@me\". Empty disables the event."
+        },
+        {
+          "key": "work_items.jira.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Poll Jira Cloud for issues; setting the [work_items.jira] table enables the source. The API token is read from the Herdr server's environment (token_env) and passed to curl on stdin; scoped tokens are sent through the api.atlassian.com gateway automatically. Map projects to local clones with [[work_items.jira.projects]] entries (key, path, remote, base_branch, branch_template with {key}, {key_lower} and {slug}); configure the workflow with [[work_items.jira.issues]] blocks whose repos list project keys (on_resolved, delete_branch, agent, editor_command, lazygit_command)."
+        },
+        {
+          "key": "work_items.jira.site",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Jira Cloud site, for example \"example.atlassian.net\". Required."
+        },
+        {
+          "key": "work_items.jira.email",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Atlassian account email the API token belongs to. Required."
+        },
+        {
+          "key": "work_items.jira.token_env",
+          "type": "string",
+          "default": "\"ATLASSIAN_TOKEN\"",
+          "description": "Environment variable of the Herdr server that holds the API token."
+        },
+        {
+          "key": "work_items.jira.jql",
+          "type": "string",
+          "default": "\"assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC\"",
+          "description": "JQL selecting the issues shown in the inbox."
+        },
+        {
+          "key": "work_items.jira.poll_interval_seconds",
+          "type": "integer",
+          "default": "120",
+          "description": "Seconds between polls, clamped to 30–3600."
+        },
+        {
+          "key": "work_items.jira.curl_path",
+          "type": "string",
+          "default": "\"curl\"",
+          "description": "curl binary used for the REST API."
         }
       ]
     },

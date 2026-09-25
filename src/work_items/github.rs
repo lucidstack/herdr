@@ -546,7 +546,7 @@ fn default_choice(
     }
 }
 
-fn truncate_chars(text: &str, max: usize) -> String {
+pub(super) fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -693,7 +693,7 @@ fn changed_files_list(detail: &GithubDetail) -> String {
 }
 
 /// Collapses whitespace and drops HTML tags, which review bots use heavily.
-fn one_line(text: &str) -> String {
+pub(super) fn one_line(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut in_tag = false;
     for character in text.chars() {
@@ -927,8 +927,8 @@ fn thread_brief(repo: &str, item: &WorkItem, detail: &GithubIssueDetail) -> Stri
     )
 }
 
-/// Branch for an issue: `issue/<n>-<words of the title>`.
-fn issue_branch(number: u64, title: &str) -> String {
+/// Lower-case words of `title` joined by `-`, at most about 40 characters.
+pub(super) fn slug(title: &str) -> String {
     let mut slug = String::new();
     for word in title
         .split(|character: char| !character.is_ascii_alphanumeric())
@@ -942,6 +942,12 @@ fn issue_branch(number: u64, title: &str) -> String {
         }
         slug.push_str(&word.to_ascii_lowercase());
     }
+    slug
+}
+
+/// Branch for an issue: `issue/<n>-<words of the title>`.
+fn issue_branch(number: u64, title: &str) -> String {
+    let slug = slug(title);
     if slug.is_empty() {
         format!("issue/{number}")
     } else {

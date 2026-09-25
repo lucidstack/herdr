@@ -6,6 +6,7 @@
 
 pub(crate) mod changes;
 pub(crate) mod github;
+pub(crate) mod jira;
 pub(crate) mod process;
 pub(crate) mod provision;
 pub(crate) mod source;
@@ -119,6 +120,9 @@ fn build_sources(config: &WorkItemsConfig) -> Vec<Arc<dyn WorkItemSource>> {
     let mut sources: Vec<Arc<dyn WorkItemSource>> = Vec::new();
     if let Some(github) = config.github.as_ref().filter(|github| github.enabled) {
         sources.push(Arc::new(github::GithubSource::new(github.clone())));
+    }
+    if let Some(jira) = config.jira.as_ref().filter(|jira| jira.enabled) {
+        sources.push(Arc::new(jira::JiraSource::new(jira.clone())));
     }
     sources
 }

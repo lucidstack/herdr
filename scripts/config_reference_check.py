@@ -38,6 +38,8 @@ SKIPPED_SUBTREES = (
     "work_items.github.ci_failing",
     "work_items.github.assigned",
     "work_items.github.mentioned",
+    "work_items.jira.projects",
+    "work_items.jira.issues",
 )
 
 FIELD_RE = re.compile(r"^\s*pub ([a-z_][a-z0-9_]*):\s*(.+?),?\s*$")

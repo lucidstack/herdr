@@ -9,12 +9,37 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_DETAIL_CHARS: usize = 200;
 
 /// Runs `command` with piped output, killing it after `timeout`.
-pub(crate) fn run_with_timeout(mut command: Command, timeout: Duration) -> io::Result<Output> {
+pub(crate) fn run_with_timeout(command: Command, timeout: Duration) -> io::Result<Output> {
+    run(command, None, timeout)
+}
+
+/// Like [`run_with_timeout`], writing `input` to the child's stdin. Secrets passed this
+/// way stay out of the process list.
+pub(crate) fn run_with_input(
+    command: Command,
+    input: Vec<u8>,
+    timeout: Duration,
+) -> io::Result<Output> {
+    run(command, Some(input), timeout)
+}
+
+fn run(mut command: Command, input: Option<Vec<u8>>, timeout: Duration) -> io::Result<Output> {
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     let mut child = command.spawn()?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        thread::spawn(move || {
+            use io::Write;
+            // Dropping stdin afterwards closes it, which ends the child's input.
+            let _ = stdin.write_all(&input);
+        });
+    }
     let stdout = child.stdout.take().map(read_to_end_thread);
     let stderr = child.stderr.take().map(read_to_end_thread);
     let started = Instant::now();
