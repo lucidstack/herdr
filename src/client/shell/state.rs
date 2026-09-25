@@ -45,6 +45,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) mouse_scroll_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
     pub(super) redraw_on_focus_gained: bool,
+    pub(super) open_links: crate::config::OpenLinksConfig,
+    pub(super) remote_viewer: bool,
     pub(super) switch_ascii_input_source_in_prefix: bool,
     pub(super) local_config_path: std::path::PathBuf,
     pub(super) preferences_path: Option<std::path::PathBuf>,
@@ -114,6 +116,10 @@ pub(super) struct ShellHitMap {
     pub(super) global_launcher: Rect,
     pub(super) notification_toast: Rect,
     pub(super) global_menu_rows: Vec<(Rect, usize)>,
+    pub(super) work_items: Vec<super::work_items::WorkItemHit>,
+    pub(super) inbox: super::work_items::InboxHits,
+    pub(super) overlay_choice_rows: Vec<(Rect, usize)>,
+    pub(super) overlay_area: Rect,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
@@ -291,6 +297,9 @@ pub(super) enum ClientShellOverlayKind {
     ContextMenu,
     GlobalMenu,
     Settings,
+    WorkItem,
+    Inbox,
+    Link,
 }
 
 #[derive(Debug)]
@@ -525,6 +534,15 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    WorkItemChoose,
+    WorkItemProgress,
+    WorkItemFocus,
+    WorkItemOpenUrl,
+    WorkItemSnoozeHour,
+    WorkItemSnoozeDay,
+    WorkItemDismiss,
+    WorkItemUnhide,
+    WorkItemLink,
 }
 
 #[derive(Debug)]
@@ -546,6 +564,16 @@ pub(super) enum ClientContextMenuTarget {
         source_pane_id: Option<String>,
         has_manual_label: bool,
         right_click_passthrough: bool,
+    },
+    WorkItem {
+        item_id: String,
+        /// Workspace that exists in the snapshot.
+        workspace_id: Option<String>,
+        is_linked_worktree: bool,
+        has_progress: bool,
+        hidden: bool,
+        /// The focused workspace, when it could become the item's workspace.
+        link_target: Option<String>,
     },
 }
 
@@ -591,6 +619,9 @@ pub(super) enum ClientShellOverlay {
     ContextMenu(ClientContextMenuOverlay),
     GlobalMenu(ClientGlobalMenuOverlay),
     Settings(ClientSettingsOverlay),
+    WorkItem(Box<super::work_items::ClientWorkItemOverlay>),
+    Inbox(super::work_items::ClientInboxOverlay),
+    Link(super::links::ClientLinkOverlay),
 }
 
 impl ClientShellOverlay {
@@ -609,6 +640,9 @@ impl ClientShellOverlay {
             Self::ContextMenu(_) => ClientShellOverlayKind::ContextMenu,
             Self::GlobalMenu(_) => ClientShellOverlayKind::GlobalMenu,
             Self::Settings(_) => ClientShellOverlayKind::Settings,
+            Self::WorkItem(_) => ClientShellOverlayKind::WorkItem,
+            Self::Inbox(_) => ClientShellOverlayKind::Inbox,
+            Self::Link(_) => ClientShellOverlayKind::Link,
         }
     }
 }
@@ -937,6 +971,7 @@ pub(crate) struct ClientShellState {
     pub(super) endpoint_error: Option<String>,
     pub(super) endpoint_error_deadline: Option<std::time::Instant>,
     pub(super) dismissed_product_announcement: Option<(String, String)>,
+    pub(super) work_items: super::work_items::ClientWorkItems,
 }
 
 pub(super) fn product_announcement_state(
@@ -1099,6 +1134,7 @@ impl ClientShellState {
             host_background: None,
             config_diagnostic: local_config_diagnostic.clone(),
             local_config_diagnostic,
+            work_items: Default::default(),
             endpoint_error: None,
             endpoint_error_deadline: None,
             dismissed_product_announcement: None,

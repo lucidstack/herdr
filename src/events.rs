@@ -198,4 +198,6 @@ pub enum AppEvent {
     WorktreeRemoveFinished(Box<WorktreeRemoveResult>),
     /// Background worktree discovery completed for an API list/open request.
     WorktreeReadFinished(Box<WorktreeReadResult>),
+    /// Background work-item poll, preparation or provisioning step completed.
+    WorkItems(Box<crate::work_items::WorkItemsEvent>),
 }

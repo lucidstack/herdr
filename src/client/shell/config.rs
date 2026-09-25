@@ -151,6 +151,8 @@ impl ClientShellConfig {
             mouse_scroll_lines: config.ui.mouse_scroll_lines(),
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
             redraw_on_focus_gained: config.ui.redraw_on_focus_gained,
+            open_links: config.ui.open_links,
+            remote_viewer: false,
             switch_ascii_input_source_in_prefix: config
                 .experimental
                 .switch_ascii_input_source_in_prefix,
@@ -176,6 +178,22 @@ impl ClientShellConfig {
         self.keybinding_source = source;
         self.keybinds.keybinds.custom_commands.clear();
         self
+    }
+
+    /// Marks this client as viewed from another device (over SSH or mosh), where
+    /// opening a browser on this machine would show the page on the wrong screen.
+    pub(crate) fn with_remote_viewer(mut self, remote_viewer: bool) -> Self {
+        self.remote_viewer = remote_viewer;
+        self
+    }
+
+    /// Whether web links are shown to copy rather than opened on this machine.
+    pub(super) fn shows_links(&self) -> bool {
+        match self.open_links {
+            crate::config::OpenLinksConfig::Auto => self.remote_viewer,
+            crate::config::OpenLinksConfig::Local => false,
+            crate::config::OpenLinksConfig::Show => true,
+        }
     }
 
     pub(crate) fn uses_endpoint_keybindings(&self) -> bool {
@@ -341,6 +359,7 @@ impl ClientShellConfig {
                 self.mouse_scroll_lines = ui.mouse_scroll_lines();
                 self.right_click_passthrough_modifiers = ui.right_click_passthrough_modifiers();
                 self.redraw_on_focus_gained = ui.redraw_on_focus_gained;
+                self.open_links = ui.open_links;
             }
         }
 

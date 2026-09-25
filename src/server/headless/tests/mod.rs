@@ -996,6 +996,91 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
     assert!(cleared_snapshot.agent_view_label.is_none());
 }
 
+fn connect_test_client_shell(
+    server: &mut HeadlessServer,
+    client_id: u64,
+) -> (
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    let (writer, control_rx, render_rx) = test_client_writer();
+    assert!(
+        server.handle_server_event(ServerEvent::ClientShellConnected {
+            surface_reuse: false,
+            surface_delta: false,
+            client_id,
+            surface_cols: 80,
+            surface_rows: 23,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            pixel_mouse: false,
+            direct_graphics: false,
+            endpoint_keybindings: false,
+            mouse_capture: false,
+            surface_active: false,
+            writer,
+        })
+    );
+    (control_rx, render_rx)
+}
+
+/// Next work-item projection on the control lane, skipping other messages.
+/// The test writer forwards on a thread, so absence is only observable within `wait`.
+fn next_work_items_projection(
+    control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    wait: std::time::Duration,
+) -> Option<crate::protocol::work_items::EndpointWorkItemsProjection> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let frame = control_rx.recv_timeout(remaining).ok()?;
+        if let ServerMessage::EndpointControl { kind, data } = read_server_message(frame) {
+            if kind == crate::protocol::work_items::WORK_ITEMS_PROJECTION_KIND {
+                return Some(serde_json::from_str(&data).expect("decode work items projection"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn client_shell_receives_work_items_projection_once_per_change() {
+    use crate::work_items::test_support::{source_item, FakeSource};
+    use crate::work_items::{WorkItems, WorkItemsEvent};
+    const EXPECTED: std::time::Duration = std::time::Duration::from_secs(2);
+    const ABSENT: std::time::Duration = std::time::Duration::from_millis(200);
+
+    let mut server = test_headless_server();
+    let source = FakeSource::with_items(Vec::new());
+    server.app.work_items = WorkItems::for_test(vec![source], std::time::Instant::now());
+    let (control_rx, _render_rx) = connect_test_client_shell(&mut server, 77);
+    let initial = next_work_items_projection(&control_rx, EXPECTED).expect("initial projection");
+    assert!(initial.items.is_empty());
+    assert_eq!(initial.sources[0].source_id, "fake");
+
+    let _ = server.app.handle_work_items_event(WorkItemsEvent::Polled {
+        source_id: "fake".into(),
+        result: Ok(vec![source_item("a")]),
+    });
+    server.render_and_stream();
+    let changed = next_work_items_projection(&control_rx, EXPECTED).expect("changed projection");
+    assert_eq!(changed.items[0].item_id, "fake:a");
+    assert!(changed.revision > initial.revision);
+
+    server.render_and_stream();
+    assert_eq!(next_work_items_projection(&control_rx, ABSENT), None);
+}
+
+#[tokio::test]
+async fn client_shell_without_work_item_sources_never_receives_the_projection() {
+    let mut server = test_headless_server();
+    let (control_rx, _render_rx) = connect_test_client_shell(&mut server, 77);
+    server.render_and_stream();
+    assert_eq!(
+        next_work_items_projection(&control_rx, std::time::Duration::from_millis(200)),
+        None
+    );
+}
+
 #[tokio::test]
 async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
     let mut server = test_headless_server();

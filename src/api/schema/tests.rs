@@ -373,6 +373,41 @@ fn client_window_title_requests_round_trip() {
 }
 
 #[test]
+fn work_item_choose_request_round_trips() {
+    let json = serde_json::json!({
+        "id": "x",
+        "method": "work_item.choose",
+        "params": {"item_id": "github:o/r#1", "choice_id": "github"}
+    });
+    let request: Request = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        request.method,
+        Method::WorkItemChoose(WorkItemChooseParams {
+            item_id: "github:o/r#1".into(),
+            choice_id: "github".into(),
+        })
+    );
+    assert_eq!(serde_json::to_value(request).unwrap(), json);
+}
+
+#[test]
+fn work_item_info_decodes_future_variants_as_unknown() {
+    let info: WorkItemInfo = serde_json::from_value(serde_json::json!({
+        "item_id": "github:o/r#1",
+        "source_id": "github",
+        "context": "o/r #1",
+        "title": "Title",
+        "url": "https://github.com/o/r/pull/1",
+        "phase": "future_phase",
+        "seen": false,
+        "choices": [{"choice_id": "c", "label": "Later", "action": {"type": "future"}}]
+    }))
+    .unwrap();
+    assert_eq!(info.phase, WorkItemPhase::Unknown);
+    assert_eq!(info.choices[0].action, WorkItemChoiceAction::Unknown);
+}
+
+#[test]
 fn agent_view_requests_round_trip() {
     let set_json = serde_json::json!({
         "id": "view-set",

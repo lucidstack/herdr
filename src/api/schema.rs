@@ -11,6 +11,7 @@ pub mod response;
 pub mod server;
 pub mod session;
 pub mod tabs;
+pub mod work_items;
 pub mod workspaces;
 pub mod worktrees;
 
@@ -25,6 +26,7 @@ pub use response::*;
 pub use server::*;
 pub use session::*;
 pub use tabs::*;
+pub use work_items::*;
 pub use workspaces::*;
 pub use worktrees::*;
 
@@ -101,6 +103,18 @@ pub enum Method {
     WorktreeOpen(WorktreeOpenParams),
     #[serde(rename = "worktree.remove")]
     WorktreeRemove(WorktreeRemoveParams),
+    #[serde(rename = "work_item.list")]
+    WorkItemList(EmptyParams),
+    #[serde(rename = "work_item.mark_seen")]
+    WorkItemMarkSeen(WorkItemTarget),
+    #[serde(rename = "work_item.choose")]
+    WorkItemChoose(WorkItemChooseParams),
+    #[serde(rename = "work_item.hide")]
+    WorkItemHide(WorkItemHideParams),
+    #[serde(rename = "work_item.unhide")]
+    WorkItemUnhide(WorkItemTarget),
+    #[serde(rename = "work_item.link")]
+    WorkItemLink(WorkItemLinkParams),
     #[serde(rename = "tab.create")]
     TabCreate(TabCreateParams),
     #[serde(rename = "tab.list")]

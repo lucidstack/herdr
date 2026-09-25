@@ -185,6 +185,16 @@ impl App {
                     context.focused_pane_id = Some(pane_id.clone());
                     context
                 }),
+            // The item's own workspace, when it has one; the payload carries the item.
+            EventData::WorkItemCreated { item }
+            | EventData::WorkItemUpdated { item }
+            | EventData::WorkItemResolved { item } => item
+                .workspace_id
+                .as_deref()
+                .and_then(|workspace_id| {
+                    self.plugin_context_for_workspace_id(workspace_id, correlation_id)
+                })
+                .unwrap_or_else(|| empty_plugin_context(correlation_id)),
         }
     }
 

@@ -18,6 +18,7 @@ use super::plugins::{
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
+use super::work_items::{WorkItemInfo, WorkItemSourceInfo};
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
@@ -276,6 +277,10 @@ pub enum ResponseResult {
     ClientShellSurfaceSet {
         active: bool,
         projection_revision: u64,
+    },
+    WorkItemList {
+        items: Vec<WorkItemInfo>,
+        sources: Vec<WorkItemSourceInfo>,
     },
     Ok {},
 }

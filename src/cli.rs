@@ -38,6 +38,7 @@ mod spec;
 mod status;
 mod tab;
 mod target;
+mod work_item;
 mod workspace;
 mod worktree;
 
@@ -122,6 +123,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "machine" => machine::run_machine_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
+        "work-item" => work_item::run_work_item_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,

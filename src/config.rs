@@ -8,6 +8,7 @@ mod sound;
 mod tab_bar;
 mod theme;
 mod window_title;
+mod work_items;
 mod write;
 
 pub use self::{
@@ -23,10 +24,10 @@ pub use self::{
     },
     model::{
         validated_sidebar_bounds, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, PaneBordersConfig,
-        ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
-        ToastClipboardPosition, ToastConfig, ToastDelivery, ToastHerdrPosition,
-        UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
+        ConfigReloadStatus, HostCursorModeConfig, NewTerminalCwdConfig, OpenLinksConfig,
+        PaneBordersConfig, ShellModeConfig, SidebarCollapsedModeConfig, StatusIndicatorStyle,
+        TabBarPositionConfig, ToastClipboardPosition, ToastConfig, ToastDelivery,
+        ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
         AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarTokenStyle,
@@ -36,6 +37,10 @@ pub use self::{
     tab_bar::TabBarRightEntryConfig,
     theme::{parse_color, CustomThemeColors, ModeThemeColors, ThemeConfig, THEME_NAMES},
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
+    work_items::{
+        BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, JiraProjectConfig,
+        JiraWorkItemsConfig, OnResolvedConfig, ReviewRequestedConfig, WorkItemsConfig,
+    },
 };
 
 pub(crate) use self::keybinds::parse_key_combo;

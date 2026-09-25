@@ -39,6 +39,7 @@ pub(super) fn command() -> Command {
         .subcommand(api_command())
         .subcommand(workspace_command())
         .subcommand(worktree_command())
+        .subcommand(work_item_command())
         .subcommand(tab_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
@@ -264,6 +265,50 @@ fn worktree_command() -> Command {
                 .arg(option("workspace", "ID"))
                 .arg(flag("force"))
                 .arg(flag("trust-repository")),
+        )
+}
+
+fn work_item_command() -> Command {
+    let item = || Arg::new("item_id").value_name("ITEM_ID").required(true);
+    Command::new("work-item")
+        .about("List and act on work items from configured sources")
+        .subcommand(Command::new("list").about("List work items and source errors"))
+        .subcommand(
+            Command::new("choose")
+                .about("Pick one of an item's choices, as the inbox dialog does")
+                .arg(item())
+                .arg(Arg::new("choice_id").value_name("CHOICE_ID").required(true)),
+        )
+        .subcommand(
+            Command::new("mark-seen")
+                .about("Mark an item as seen")
+                .arg(item()),
+        )
+        .subcommand(
+            Command::new("dismiss")
+                .about("Hide an item until its source requests it again")
+                .arg(item()),
+        )
+        .subcommand(
+            Command::new("snooze")
+                .about("Hide an item for a while (default 1h)")
+                .arg(item())
+                .arg(option("for", "DURATION")),
+        )
+        .subcommand(
+            Command::new("unhide")
+                .about("Show a dismissed or snoozed item again")
+                .arg(item()),
+        )
+        .subcommand(
+            Command::new("link")
+                .about("Make an existing workspace the item's workspace")
+                .arg(item())
+                .arg(
+                    Arg::new("workspace_id")
+                        .value_name("WORKSPACE_ID")
+                        .required(true),
+                ),
         )
 }
 

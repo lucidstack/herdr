@@ -695,6 +695,7 @@ impl HeadlessServer {
 
                 true
             }
+            AppEvent::WorkItems(_) => self.handle_work_items_app_event(ev),
             _ => self.app.handle_internal_event_with_render_impact(ev),
         }
     }

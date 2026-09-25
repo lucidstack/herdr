@@ -43,6 +43,11 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.focus",
     "tab.move",
     "tab.rename",
+    "work_item.choose",
+    "work_item.hide",
+    "work_item.link",
+    "work_item.mark_seen",
+    "work_item.unhide",
     "workspace.close",
     "workspace.create",
     "workspace.focus",
@@ -296,6 +301,26 @@ mod tests {
         assert_eq!(
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
+        );
+        assert_eq!(
+            actual.remove("work_item.choose").as_deref(),
+            Some("f17df9c37fc54879cf5012c04aac0de1cf9995970b0b50679135bd4e2df622fe")
+        );
+        assert_eq!(
+            actual.remove("work_item.mark_seen").as_deref(),
+            Some("69251d91a2261d33afceddbcbcb133ff91a49ee7c8e37a515576a5f491886634")
+        );
+        assert_eq!(
+            actual.remove("work_item.hide").as_deref(),
+            Some("dde46d5762445ef1f149d25707f5d5e497f3f5bfd66295a9b43e59071dda3c20")
+        );
+        assert_eq!(
+            actual.remove("work_item.link").as_deref(),
+            Some("8fd885be89116d0cf5831b67386462d00740b8224a79060bddbead7d5892d3e4")
+        );
+        assert_eq!(
+            actual.remove("work_item.unhide").as_deref(),
+            Some("8b5220f5f5b2f3dfb238dc4ca0cbd8f1aac5861985f2a8afe6294ede2b2ab3cb")
         );
 
         assert_eq!(

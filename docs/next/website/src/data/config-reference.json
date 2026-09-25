@@ -542,6 +542,12 @@
           "description": "Open the session navigator."
         },
         {
+          "key": "keys.inbox",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Open the work item inbox."
+        },
+        {
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",
@@ -957,6 +963,17 @@
           "type": "boolean",
           "default": "false",
           "description": "Ask for a workspace name before interactive TUI creation."
+        },
+        {
+          "key": "ui.open_links",
+          "type": "enum",
+          "default": "\"auto\"",
+          "description": "Where web links open, from panes and from work items. auto opens them in this machine's browser, except when the client runs over SSH or mosh: then the browser would open on the wrong screen, so Herdr shows the link to tap or copy to your device instead. local always opens them here; show always shows them.",
+          "values": [
+            "auto",
+            "local",
+            "show"
+          ]
         },
         {
           "key": "ui.pane_borders",
@@ -1447,6 +1464,120 @@
           "type": "string",
           "default": "\"~/.herdr/worktrees\"",
           "description": "Root directory under which Herdr creates <repo>/<branch-slug> checkouts."
+        }
+      ]
+    },
+    {
+      "id": "work_items",
+      "title": "Work items",
+      "keys": [
+        {
+          "key": "work_items.github.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Poll GitHub for pull requests; setting the [work_items.github] table enables the source. Map local clones with [[work_items.github.repos]] entries (name, path, remote) to offer worktree reviews; worktrees are created through Herdr's worktree support, so worktree.created and worktree.removed plugin hooks run for them. Configure the review-request workflow with [[work_items.github.review_requested]] blocks: repos (owner/name list; empty applies to every repository, first matching block wins), on_resolved (\"keep\" or \"remove\"), delete_branch (delete the local review branch when its worktree is removed, default true), small_diff_lines, docs_patterns, agent, agent_args (extra agent arguments, e.g. [\"--model\", \"opus\", \"--effort\", \"high\"] for Claude Code), editor_command, lazygit_command, diff_command ({file} is the downloaded diff) and review_command (the review tab in place of the Git tab; {plugin:ID} is an installed plugin's folder, {base} the pull request's base; default herdr-reviewr, falling back to lazygit_command when the plugin is not installed). Configure the other events with [[work_items.github.changes_requested]], [[work_items.github.ci_failing]], [[work_items.github.assigned]] and [[work_items.github.mentioned]] blocks: repos, on_resolved, delete_branch (default false), agent, agent_args, editor_command, lazygit_command and viewer_command ({file} is a downloaded thread). Pull request worktrees use the pull request's head branch, reopening a worktree that already has it checked out; assigned issues get a new issue/<number>-<title> branch from the default branch; mentions download the thread without a checkout."
+        },
+        {
+          "key": "work_items.github.gh_path",
+          "type": "string",
+          "default": "\"gh\"",
+          "description": "GitHub CLI used for API calls and authentication."
+        },
+        {
+          "key": "work_items.github.poll_interval_seconds",
+          "type": "integer",
+          "default": "60",
+          "description": "Seconds between polls, clamped to 30–3600."
+        },
+        {
+          "key": "work_items.github.max_results",
+          "type": "integer",
+          "default": "200",
+          "description": "Most results kept per search, fetched in pages of 100 (GitHub serves at most 1000)."
+        },
+        {
+          "key": "work_items.github.queries.review_requested",
+          "type": "string",
+          "default": "\"is:pr is:open review-requested:@me archived:false\"",
+          "description": "Search query for pull requests that request your review. Empty disables the event."
+        },
+        {
+          "key": "work_items.github.queries.changes_requested",
+          "type": "string",
+          "default": "\"is:pr is:open author:@me review:changes_requested archived:false\"",
+          "description": "Search query for your pull requests with changes requested. Empty disables the event."
+        },
+        {
+          "key": "work_items.github.queries.ci_failing",
+          "type": "string",
+          "default": "\"is:pr is:open author:@me status:failure archived:false\"",
+          "description": "Search query for your pull requests with failing checks. Empty disables the event."
+        },
+        {
+          "key": "work_items.github.queries.assigned",
+          "type": "string",
+          "default": "\"is:issue is:open assignee:@me archived:false\"",
+          "description": "Search query for issues assigned to you. Empty disables the event."
+        },
+        {
+          "key": "work_items.github.queries.mentioned",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Search query for issues and pull requests that mention you, for example \"is:open mentions:@me\". Empty disables the event."
+        },
+        {
+          "key": "work_items.github.queries.ready_to_merge",
+          "type": "string",
+          "default": "\"is:pr is:open author:@me draft:false archived:false\"",
+          "description": "Search query for your pull requests that may be ready to merge; those approved in their latest reviews are shown, whether or not the repository requires reviews. Empty disables the event."
+        },
+        {
+          "key": "work_items.jira.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Poll Jira Cloud for issues; setting the [work_items.jira] table enables the source. The API token is read from the Herdr server's environment (token_env) and passed to curl on stdin; scoped tokens are sent through the api.atlassian.com gateway automatically. Map projects to local clones with [[work_items.jira.projects]] entries (key, path, remote, base_branch, branch_template with {key}, {key_lower} and {slug}); configure the workflow with [[work_items.jira.issues]] blocks whose repos list project keys (on_resolved, delete_branch, agent, agent_args, editor_command, lazygit_command)."
+        },
+        {
+          "key": "work_items.jira.site",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Jira Cloud site, for example \"example.atlassian.net\". Required."
+        },
+        {
+          "key": "work_items.jira.email",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Atlassian account email the API token belongs to. Required."
+        },
+        {
+          "key": "work_items.jira.token_env",
+          "type": "string",
+          "default": "\"ATLASSIAN_TOKEN\"",
+          "description": "Environment variable of the Herdr server that holds the API token."
+        },
+        {
+          "key": "work_items.jira.jql",
+          "type": "string",
+          "default": "\"assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC\"",
+          "description": "JQL selecting the issues shown in the inbox."
+        },
+        {
+          "key": "work_items.jira.poll_interval_seconds",
+          "type": "integer",
+          "default": "120",
+          "description": "Seconds between polls, clamped to 30–3600."
+        },
+        {
+          "key": "work_items.jira.max_results",
+          "type": "integer",
+          "default": "200",
+          "description": "Most issues kept from the search, fetched in pages of 100."
+        },
+        {
+          "key": "work_items.jira.curl_path",
+          "type": "string",
+          "default": "\"curl\"",
+          "description": "curl binary used for the REST API."
         }
       ]
     },

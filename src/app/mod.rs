@@ -26,6 +26,7 @@ mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
 mod window_title;
+mod work_items;
 mod worktrees;
 
 use std::collections::HashMap;
@@ -158,6 +159,9 @@ pub struct App {
     pub(crate) config_reloaded_from_disk: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
+    pub(crate) work_items: crate::work_items::WorkItems,
+    /// Last state reported through `work_item.*` events.
+    work_item_changes: crate::work_items::ItemChanges,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -566,6 +570,16 @@ impl App {
         let endpoint_commands =
             custom_commands::EndpointCommandRegistry::new(&state.keybinds.custom_commands);
 
+        let work_items = {
+            let existing: std::collections::HashSet<&str> =
+                state.workspaces.iter().map(|ws| ws.id.as_str()).collect();
+            crate::work_items::WorkItems::from_config(
+                &config.work_items,
+                work_items::store_policy(policy),
+                &existing,
+                Instant::now(),
+            )
+        };
         let mut app = Self {
             config_diagnostic_deadline: None,
             toast_deadline: None,
@@ -625,6 +639,8 @@ impl App {
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,
             endpoint_commands,
+            work_items,
+            work_item_changes: crate::work_items::ItemChanges::default(),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
@@ -683,6 +699,16 @@ impl App {
                 .get(idx)
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
+        app.work_items = crate::work_items::WorkItems::from_config(
+            &config.work_items,
+            work_items::store_policy(AppPolicy::PRODUCTION),
+            &app.state
+                .workspaces
+                .iter()
+                .map(|ws| ws.id.as_str())
+                .collect(),
+            Instant::now(),
+        );
         Ok(app)
     }
 
@@ -945,6 +971,10 @@ impl App {
         if !invalid_section("worktrees") {
             self.state.worktree_directory =
                 crate::worktree::expand_tilde_absolute_path(&config.worktrees.directory);
+        }
+
+        if !invalid_section("work_items") {
+            self.apply_work_items_config(&config.work_items);
         }
 
         if !invalid_section("theme") {

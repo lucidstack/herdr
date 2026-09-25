@@ -331,6 +331,56 @@
               "type": "object"
             },
             {
+              "description": "A source reported a new item, or requested a resolved one again.",
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/event/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/event/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The source no longer reports the item. `item` is its last state; it stays listed\nwhile a workspace hangs off it.",
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/event/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_resolved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "tab": {
                   "$ref": "#/schemas/event/$defs/TabInfo"
@@ -739,6 +789,9 @@
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
+            "work_item_created",
+            "work_item_updated",
+            "work_item_resolved",
             "tab_created",
             "tab_closed",
             "tab_renamed",
@@ -1073,6 +1126,297 @@
             "agent_status"
           ],
           "type": "object"
+        },
+        "WorkItemChoiceAction": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "open_url",
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "url"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "provision_workspace",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The source does it on the server, e.g. merging a pull request.",
+              "properties": {
+                "type": {
+                  "const": "perform",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "WorkItemChoiceInfo": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/event/$defs/WorkItemChoiceAction"
+            },
+            "choice_id": {
+              "type": "string"
+            },
+            "confirm": {
+              "description": "Shown before a choice that cannot be undone runs; the user confirms it a second time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": {
+              "description": "One line explaining what the choice does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "disabled_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "choice_id",
+            "label",
+            "action"
+          ],
+          "type": "object"
+        },
+        "WorkItemInfo": {
+          "properties": {
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "choices": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/event/$defs/WorkItemChoiceInfo"
+              },
+              "type": "array"
+            },
+            "context": {
+              "type": "string"
+            },
+            "default_choice_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dismissed": {
+              "default": false,
+              "description": "Hidden until the source requests the item again.",
+              "type": "boolean"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "notice": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "phase": {
+              "$ref": "#/schemas/event/$defs/WorkItemPhase"
+            },
+            "provisioning": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkItemProvisioningInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolved": {
+              "default": false,
+              "type": "boolean"
+            },
+            "seen": {
+              "type": "boolean"
+            },
+            "snoozed_until": {
+              "description": "Hidden until this Unix time in seconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "item_id",
+            "source_id",
+            "context",
+            "title",
+            "url",
+            "phase",
+            "seen"
+          ],
+          "type": "object"
+        },
+        "WorkItemPhase": {
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "pending",
+              "description": "No choice has been made yet.",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_external",
+              "description": "The user chose an action outside Herdr and the source still reports the item.",
+              "type": "string"
+            },
+            {
+              "const": "local",
+              "description": "A local workspace is provisioned or being provisioned.",
+              "type": "string"
+            }
+          ]
+        },
+        "WorkItemProvisioningInfo": {
+          "properties": {
+            "finished": {
+              "type": "boolean"
+            },
+            "steps": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/WorkItemStepInfo"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps",
+            "finished"
+          ],
+          "type": "object"
+        },
+        "WorkItemStep": {
+          "oneOf": [
+            {
+              "enum": [
+                "agent_brief",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "checkout",
+              "description": "The worktree or scratch directory is ready.",
+              "type": "string"
+            }
+          ]
+        },
+        "WorkItemStepInfo": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/event/$defs/WorkItemStepStatus"
+            },
+            "step": {
+              "$ref": "#/schemas/event/$defs/WorkItemStep"
+            }
+          },
+          "required": [
+            "step",
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "WorkItemStepStatus": {
+          "enum": [
+            "pending",
+            "running",
+            "done",
+            "skipped",
+            "failed",
+            "unknown"
+          ],
+          "type": "string"
         },
         "WorkspaceInfo": {
           "properties": {
@@ -4017,6 +4361,42 @@
             {
               "properties": {
                 "type": {
+                  "const": "work_item.created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "work_item.updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "work_item.resolved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "tab.created",
                   "type": "string"
                 }
@@ -4345,6 +4725,68 @@
             "bottom-right"
           ],
           "type": "string"
+        },
+        "WorkItemChooseParams": {
+          "properties": {
+            "choice_id": {
+              "type": "string"
+            },
+            "item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id",
+            "choice_id"
+          ],
+          "type": "object"
+        },
+        "WorkItemHideParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "snooze_seconds": {
+              "description": "Hide for this many seconds. Absent dismisses the item until it is requested again.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "item_id"
+          ],
+          "type": "object"
+        },
+        "WorkItemLinkParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "Existing workspace that becomes the item's workspace.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        },
+        "WorkItemTarget": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id"
+          ],
+          "type": "object"
         },
         "WorkspaceCloseParams": {
           "properties": {
@@ -5101,6 +5543,102 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorktreeRemoveParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.mark_seen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.choose",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemChooseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.hide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemHideParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.unhide",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.link",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemLinkParams"
             }
           },
           "required": [
@@ -7024,6 +7562,56 @@
               "type": "object"
             },
             {
+              "description": "A source reported a new item, or requested a resolved one again.",
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_created",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The source no longer reports the item. `item` is its last state; it stays listed\nwhile a workspace hangs off it.",
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_resolved",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "tab": {
                   "$ref": "#/schemas/success_response/$defs/TabInfo"
@@ -7447,6 +8035,9 @@
             "worktree_created",
             "worktree_opened",
             "worktree_removed",
+            "work_item_created",
+            "work_item_updated",
+            "work_item_resolved",
             "tab_created",
             "tab_closed",
             "tab_renamed",
@@ -10386,6 +10977,32 @@
             },
             {
               "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
+                  },
+                  "type": "array"
+                },
+                "sources": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkItemSourceInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "work_item_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items",
+                "sources"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "ok",
                   "type": "string"
@@ -10552,6 +11169,318 @@
             "agent_status"
           ],
           "type": "object"
+        },
+        "WorkItemChoiceAction": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": {
+                  "const": "open_url",
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "url"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "provision_workspace",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The source does it on the server, e.g. merging a pull request.",
+              "properties": {
+                "type": {
+                  "const": "perform",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "unknown",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "WorkItemChoiceInfo": {
+          "properties": {
+            "action": {
+              "$ref": "#/schemas/success_response/$defs/WorkItemChoiceAction"
+            },
+            "choice_id": {
+              "type": "string"
+            },
+            "confirm": {
+              "description": "Shown before a choice that cannot be undone runs; the user confirms it a second time.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": {
+              "description": "One line explaining what the choice does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "disabled_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "choice_id",
+            "label",
+            "action"
+          ],
+          "type": "object"
+        },
+        "WorkItemInfo": {
+          "properties": {
+            "author": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "choices": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkItemChoiceInfo"
+              },
+              "type": "array"
+            },
+            "context": {
+              "type": "string"
+            },
+            "default_choice_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dismissed": {
+              "default": false,
+              "description": "Hidden until the source requests the item again.",
+              "type": "boolean"
+            },
+            "item_id": {
+              "type": "string"
+            },
+            "notice": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "phase": {
+              "$ref": "#/schemas/success_response/$defs/WorkItemPhase"
+            },
+            "provisioning": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemProvisioningInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolved": {
+              "default": false,
+              "type": "boolean"
+            },
+            "seen": {
+              "type": "boolean"
+            },
+            "snoozed_until": {
+              "description": "Hidden until this Unix time in seconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "item_id",
+            "source_id",
+            "context",
+            "title",
+            "url",
+            "phase",
+            "seen"
+          ],
+          "type": "object"
+        },
+        "WorkItemPhase": {
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "pending",
+              "description": "No choice has been made yet.",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_external",
+              "description": "The user chose an action outside Herdr and the source still reports the item.",
+              "type": "string"
+            },
+            {
+              "const": "local",
+              "description": "A local workspace is provisioned or being provisioned.",
+              "type": "string"
+            }
+          ]
+        },
+        "WorkItemProvisioningInfo": {
+          "properties": {
+            "finished": {
+              "type": "boolean"
+            },
+            "steps": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkItemStepInfo"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps",
+            "finished"
+          ],
+          "type": "object"
+        },
+        "WorkItemSourceInfo": {
+          "properties": {
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "label"
+          ],
+          "type": "object"
+        },
+        "WorkItemStep": {
+          "oneOf": [
+            {
+              "enum": [
+                "agent_brief",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "checkout",
+              "description": "The worktree or scratch directory is ready.",
+              "type": "string"
+            }
+          ]
+        },
+        "WorkItemStepInfo": {
+          "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/WorkItemStepStatus"
+            },
+            "step": {
+              "$ref": "#/schemas/success_response/$defs/WorkItemStep"
+            }
+          },
+          "required": [
+            "step",
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "WorkItemStepStatus": {
+          "enum": [
+            "pending",
+            "running",
+            "done",
+            "skipped",
+            "failed",
+            "unknown"
+          ],
+          "type": "string"
         },
         "WorkspaceInfo": {
           "properties": {

@@ -6,7 +6,7 @@ use crate::api::schema::{
     WorktreeCreateParams, WorktreeListParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 
-fn print_method_response(id: &'static str, method: Method) -> std::io::Result<i32> {
+pub(super) fn print_method_response(id: &'static str, method: Method) -> std::io::Result<i32> {
     super::print_response(&super::send_request(&Request {
         id: id.into(),
         method,

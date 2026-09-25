@@ -77,6 +77,7 @@ impl ClientShellState {
             reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
             dragged_workspace_id: None,
             workspace_drop_indicator_row: None,
+            work_items: &self.work_items,
         };
         if let Some(snapshot) = local_snapshot {
             render::render_sidebar(
@@ -233,6 +234,7 @@ impl ClientShellState {
                 reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
+                work_items: &self.work_items,
             },
         );
         self.hits.panes = surface
@@ -672,7 +674,9 @@ impl ClientShellState {
                     &self.config.palette,
                 )?;
                 occlusion.cover(rendered.area);
+                self.hits.overlay_area = rendered.area;
                 self.hits.overlay_primary = rendered.primary;
+                self.hits.overlay_choice_rows = rendered.menu_rows;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
                 self.hits.navigator_popup = rendered.navigator_popup;

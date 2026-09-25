@@ -5,8 +5,8 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 use super::{
     ActionKeybinds, BindingConfig, CommandKeybindConfig, IndexedKeybind, Keybinds, SidebarConfig,
-    SoundConfig, TabBarRightEntryConfig, ThemeConfig, DEFAULT_MOBILE_WIDTH_THRESHOLD,
-    DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
+    SoundConfig, TabBarRightEntryConfig, ThemeConfig, WorkItemsConfig,
+    DEFAULT_MOBILE_WIDTH_THRESHOLD, DEFAULT_MOUSE_SCROLL_LINES, DEFAULT_SCROLLBACK_LIMIT_BYTES,
 };
 
 pub const MAX_TOAST_DELAY_SECONDS: u64 = 3600;
@@ -66,6 +66,19 @@ pub enum ToastDelivery {
     Herdr,
     Terminal,
     System,
+}
+
+/// Where a client opens web links: pane links, and work items' "Open on GitHub".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenLinksConfig {
+    /// Show the link when the client runs over SSH or mosh, else open it here.
+    #[default]
+    Auto,
+    /// Always open links in this machine's browser.
+    Local,
+    /// Always show the link to copy or tap instead of opening it.
+    Show,
 }
 
 #[derive(
@@ -323,6 +336,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub work_items: WorkItemsConfig,
 }
 
 #[derive(Debug)]
@@ -356,6 +370,8 @@ pub struct KeysConfig {
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
+    /// Open the work item inbox. Default: "prefix+i"
+    pub inbox: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,
     /// Move workspace selection down in navigate mode. Default: "down".
@@ -488,6 +504,8 @@ pub(crate) struct KeysConfigOverlay {
     workspace_picker: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     goto: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbox: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     navigate_workspace_up: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -625,6 +643,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(close_workspace);
         apply_field!(workspace_picker);
         apply_field!(goto);
+        apply_field!(inbox);
         apply_field!(navigate_workspace_up);
         apply_field!(navigate_workspace_down);
         apply_field!(navigate_pane_left);
@@ -730,6 +749,7 @@ impl KeysConfig {
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
+        copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
         copy_effective_action_field!(navigate_workspace_down, keybinds.navigate.workspace_down);
         copy_effective_action_field!(navigate_pane_left, keybinds.navigate.pane_left);
@@ -937,6 +957,10 @@ pub struct UiConfig {
     pub prompt_new_tab_name: bool,
     /// Ask for a workspace name before interactive creation. Default: false.
     pub prompt_new_workspace_name: bool,
+    /// Where links open. auto shows them to copy when this client runs over
+    /// SSH or mosh, since a browser here would open on the wrong screen;
+    /// local always opens them here; show always shows them. Default: auto.
+    pub open_links: OpenLinksConfig,
     /// Draw borders around split panes. auto draws them only for split panes,
     /// always also frames a lone pane (only while pane_outer_borders is
     /// enabled, since every edge of a lone pane is an outer edge), off
@@ -1099,6 +1123,7 @@ impl Default for KeysConfig {
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
+            inbox: BindingConfig::one("prefix+i"),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),
             navigate_pane_left: BindingConfig::one("h"),
@@ -1177,6 +1202,7 @@ impl Default for UiConfig {
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
+            open_links: OpenLinksConfig::Auto,
             mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,

@@ -59,6 +59,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod work_items;
 mod workspace;
 mod worktree;
 
@@ -149,6 +150,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # open_notification_target = "prefix+o"
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
+# inbox = "prefix+i"
 # new_workspace = "prefix+shift+n"
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default

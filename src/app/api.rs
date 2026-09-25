@@ -10,6 +10,7 @@ pub(crate) mod plugins;
 pub(super) mod responses;
 mod session;
 mod tabs;
+mod work_items;
 mod workspaces;
 mod worktrees;
 
@@ -46,6 +47,7 @@ impl App {
                 self.handle_api_worktree_read_finished(*result);
                 changes_workspace
             }
+            AppEvent::WorkItems(event) => self.handle_work_items_event(*event).0,
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -171,6 +173,10 @@ impl App {
 
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_api_worktree_add_finished(*result);
+            return Vec::new();
+        }
+        if let AppEvent::WorkItems(event) = ev {
+            let _ = self.handle_work_items_event(*event);
             return Vec::new();
         }
 
@@ -758,6 +764,15 @@ impl App {
     }
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
+        match &event.data {
+            crate::api::schema::EventData::WorkspaceClosed { workspace_id, .. } => {
+                self.work_items_workspace_closed(workspace_id);
+            }
+            crate::api::schema::EventData::WorktreeRemoved { worktree, .. } => {
+                self.work_items_worktree_removed(&worktree.path);
+            }
+            _ => {}
+        }
         self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);
     }
@@ -1069,6 +1084,32 @@ impl App {
                     "invalid_request",
                     "worktree.remove is handled asynchronously by the app runtime",
                 );
+            }
+            Method::WorkItemList(_) => return self.handle_work_item_list(request.id),
+            Method::WorkItemMarkSeen(params) => {
+                let response = self.handle_work_item_mark_seen(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
+            Method::WorkItemChoose(params) => {
+                let response = self.handle_work_item_choose(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
+            Method::WorkItemHide(params) => {
+                let response = self.handle_work_item_hide(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
+            Method::WorkItemUnhide(params) => {
+                let response = self.handle_work_item_unhide(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
+            Method::WorkItemLink(params) => {
+                let response = self.handle_work_item_link(request.id, params);
+                self.sync_work_item_events();
+                return response;
             }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),

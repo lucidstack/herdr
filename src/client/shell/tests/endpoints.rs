@@ -604,6 +604,55 @@ fn sidebar_renders_local_and_saved_ssh_endpoints_with_status() {
 }
 
 #[test]
+fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
+    use crate::api::schema::{WorkItemInfo, WorkItemPhase, WorkItemSourceInfo};
+    use crate::protocol::work_items::EndpointWorkItemsProjection;
+
+    let item = |id: &str| WorkItemInfo {
+        item_id: format!("github:o/r#{id}"),
+        source_id: "github".into(),
+        context: format!("#{id} o/r"),
+        title: format!("Pull request {id}"),
+        author: None,
+        url: String::new(),
+        summary: None,
+        notice: None,
+        phase: WorkItemPhase::Pending,
+        seen: false,
+        resolved: false,
+        workspace_id: None,
+        dismissed: false,
+        snoozed_until: None,
+        choices: Vec::new(),
+        default_choice_id: None,
+        provisioning: None,
+    };
+    let projection = |boot: &str, items| EndpointWorkItemsProjection {
+        boot_id: boot.into(),
+        revision: 1,
+        sources: vec![WorkItemSourceInfo {
+            source_id: "github".into(),
+            label: "GitHub".into(),
+            error: None,
+        }],
+        items,
+    };
+    let (mut state, remote) = state_with_remote();
+    let local_boot = snapshot().boot_id;
+    state.set_endpoint_work_items(
+        &ClientEndpointId::Local,
+        projection(&local_boot, vec![item("1")]),
+    );
+    state.set_endpoint_work_items(&remote, projection("remote-boot", vec![item("2")]));
+    let frame = state.compose(100, 28).expect("frame");
+    let text = frame_rows(&frame).join("\n");
+    assert!(text.contains("inbox"), "{text}");
+    assert!(text.contains("#1 o/r"), "{text}");
+    assert!(!text.contains("#2 o/r"), "{text}");
+    assert!(text.contains("Build"), "{text}");
+}
+
+#[test]
 fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
     fn add_worktree_group(snapshot: &mut ClientShellSnapshot, parent_id: &str, child_id: &str) {
         snapshot.workspaces[0].workspace_id = parent_id.into();

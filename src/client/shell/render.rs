@@ -248,6 +248,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
+    pub(super) work_items: &'a super::work_items::ClientWorkItems,
 }
 
 pub(super) fn render_shell(
@@ -296,6 +297,11 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                super::work_items::active_projection(
+                    state.work_items,
+                    state.active_endpoint_id,
+                    snapshot,
+                ),
                 &mut hits,
             );
         } else {

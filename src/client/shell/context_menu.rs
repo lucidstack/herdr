@@ -75,6 +75,45 @@ impl ClientContextMenuOverlay {
                 ]);
                 items
             }
+            ClientContextMenuTarget::WorkItem {
+                workspace_id,
+                is_linked_worktree,
+                has_progress,
+                hidden,
+                link_target,
+                ..
+            } => {
+                let mut items = Vec::new();
+                if workspace_id.is_some() {
+                    items.push(item("Go to workspace", Action::WorkItemFocus));
+                } else {
+                    items.push(item("Choose what to do...", Action::WorkItemChoose));
+                }
+                if *has_progress {
+                    items.push(item("Show progress", Action::WorkItemProgress));
+                }
+                items.push(item("Open in browser", Action::WorkItemOpenUrl));
+                if *hidden {
+                    items.push(item("Show in inbox again", Action::WorkItemUnhide));
+                } else {
+                    items.extend([
+                        item("Snooze for 1 hour", Action::WorkItemSnoozeHour),
+                        item("Snooze for 1 day", Action::WorkItemSnoozeDay),
+                        item("Dismiss", Action::WorkItemDismiss),
+                    ]);
+                }
+                if link_target.is_some() {
+                    items.push(item("Link to current workspace", Action::WorkItemLink));
+                }
+                if workspace_id.is_some() {
+                    items.push(if *is_linked_worktree {
+                        item("Delete worktree checkout...", Action::RemoveWorktree)
+                    } else {
+                        item("Close workspace", Action::Close)
+                    });
+                }
+                items
+            }
         }
     }
 }
@@ -213,11 +252,23 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::WorkItem {
+                item_id,
+                workspace_id,
+                link_target,
+                ..
+            } => self.activate_work_item_context_action(
+                item_id,
+                workspace_id,
+                link_target,
+                action,
+                outcome,
+            ),
         }
         outcome.repaint = true;
     }
 
-    fn activate_workspace_context_action(
+    pub(super) fn activate_workspace_context_action(
         &mut self,
         workspace_id: String,
         action: ClientContextMenuAction,
