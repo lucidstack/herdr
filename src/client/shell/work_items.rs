@@ -61,10 +61,49 @@ pub(super) struct InboxHits {
     pub(super) header: Rect,
     pub(super) more_above: Rect,
     pub(super) more_below: Rect,
+    /// The collapsed sidebar's one-row inbox badge; opens the inbox list.
+    pub(super) badge: Rect,
     /// Items drawn in the last frame.
     pub(super) shown: usize,
     /// Items not hidden by dismissing or snoozing.
     pub(super) visible: usize,
+}
+
+/// One-row inbox summary for the collapsed sidebar: `●N` with new items, else `·N`.
+/// Returns whether it drew, so the caller can give the row up otherwise.
+pub(super) fn render_inbox_badge(
+    buffer: &mut Buffer,
+    rect: Rect,
+    projection: &EndpointWorkItemsProjection,
+    palette: &Palette,
+    hits: &mut ShellHitMap,
+) -> bool {
+    if rect.is_empty() {
+        return false;
+    }
+    let visible = projection.items.iter().filter(|item| !is_hidden(item));
+    let (count, unseen) = visible.fold((0, 0), |(count, unseen), item| {
+        (count + 1, unseen + usize::from(!item.seen))
+    });
+    let failing = projection
+        .sources
+        .iter()
+        .any(|source| source.error.is_some());
+    let (text, style) = if unseen > 0 {
+        (
+            format!("●{unseen}"),
+            Style::default()
+                .fg(palette.teal)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if failing {
+        ("!".to_string(), Style::default().fg(palette.peach))
+    } else {
+        (format!("·{count}"), Style::default().fg(palette.overlay0))
+    };
+    put_text(buffer, rect.x, rect.y, rect.width, &text, style);
+    hits.inbox.badge = rect;
+    true
 }
 
 /// Dismissed and snoozed items stay out of the sidebar.
@@ -91,17 +130,17 @@ impl ClientWorkItemOverlay {
     }
 }
 
-/// The Local projection belonging to the current snapshot, when a source is configured.
-pub(super) fn local_projection<'a>(
+/// The projection of the active endpoint belonging to its current snapshot, when a source is
+/// configured there. The inbox follows the active machine, so requests made from it go to
+/// the machine that owns the items.
+pub(super) fn active_projection<'a>(
     items: &'a ClientWorkItems,
+    endpoint_id: &ClientEndpointId,
     snapshot: &ClientShellSnapshot,
 ) -> Option<&'a EndpointWorkItemsProjection> {
-    items
-        .by_endpoint
-        .get(&ClientEndpointId::Local)
-        .filter(|projection| {
-            projection.boot_id == snapshot.boot_id && !projection.sources.is_empty()
-        })
+    items.by_endpoint.get(endpoint_id).filter(|projection| {
+        projection.boot_id == snapshot.boot_id && !projection.sources.is_empty()
+    })
 }
 
 fn provisioning_running(item: &WorkItemInfo) -> bool {
@@ -134,6 +173,7 @@ pub(super) fn render_items_section<'a>(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     view: &ClientWorkItems,
+    endpoint_id: &ClientEndpointId,
     hits: &mut ShellHitMap,
 ) -> (u16, Vec<&'a str>) {
     let mut nested_workspace_ids = Vec::new();
@@ -303,7 +343,7 @@ pub(super) fn render_items_section<'a>(
             );
             hits.workspaces.push(WorkspaceHit {
                 rect,
-                endpoint_id: ClientEndpointId::Local,
+                endpoint_id: endpoint_id.clone(),
                 workspace_id: workspace.workspace_id.clone(),
                 indented: true,
                 group_toggle: None,
@@ -434,7 +474,7 @@ impl ClientShellState {
         if !self.work_items.store(endpoint_id, projection) {
             return false;
         }
-        if endpoint_id.is_local() {
+        if *endpoint_id == self.active_endpoint_id {
             self.refresh_work_item_overlay();
             self.refresh_inbox_overlay();
         }
@@ -443,7 +483,7 @@ impl ClientShellState {
 
     fn local_items_in_inbox_order(&self) -> Option<Vec<WorkItemInfo>> {
         let snapshot = self.snapshot.as_deref()?;
-        local_projection(&self.work_items, snapshot).map(inbox_order)
+        active_projection(&self.work_items, &self.active_endpoint_id, snapshot).map(inbox_order)
     }
 
     pub(super) fn open_inbox_overlay(&mut self) {
@@ -589,7 +629,7 @@ impl ClientShellState {
 
     fn local_work_item(&self, item_id: &str) -> Option<&WorkItemInfo> {
         let snapshot = self.snapshot.as_deref()?;
-        local_projection(&self.work_items, snapshot)?
+        active_projection(&self.work_items, &self.active_endpoint_id, snapshot)?
             .items
             .iter()
             .find(|item| item.item_id == item_id)
@@ -620,7 +660,9 @@ impl ClientShellState {
         let sidebar_animates = self
             .snapshot
             .as_deref()
-            .and_then(|snapshot| local_projection(&self.work_items, snapshot))
+            .and_then(|snapshot| {
+                active_projection(&self.work_items, &self.active_endpoint_id, snapshot)
+            })
             .is_some_and(|projection| projection.items.iter().any(item_animates));
         let overlay_animates = match self.overlay.as_ref() {
             Some(ClientShellOverlay::WorkItem(overlay)) => {
@@ -771,6 +813,11 @@ impl ClientShellState {
         point: (u16, u16),
         outcome: &mut ClientShellInput,
     ) -> bool {
+        if super::contains(self.hits.inbox.badge, point) {
+            self.open_inbox_overlay();
+            outcome.repaint = true;
+            return true;
+        }
         let inbox = &self.hits.inbox;
         let page = inbox.shown.max(1);
         let last = inbox.visible.saturating_sub(1);

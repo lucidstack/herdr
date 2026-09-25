@@ -296,6 +296,11 @@ pub(super) fn render_shell(
                 state
                     .selected_workspace_id
                     .map(|target| target.workspace_id.as_str()),
+                super::work_items::active_projection(
+                    state.work_items,
+                    state.active_endpoint_id,
+                    snapshot,
+                ),
                 &mut hits,
             );
         } else {

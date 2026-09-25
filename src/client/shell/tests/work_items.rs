@@ -440,3 +440,27 @@ fn inbox_keybinding_lists_items_for_the_keyboard() {
         Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#7"
     ));
 }
+
+#[test]
+fn collapsed_sidebar_badge_counts_new_items_and_opens_the_inbox() {
+    let mut seen = item("8");
+    seen.seen = true;
+    let mut state = shell_with(vec![item("7"), seen]);
+    state.sidebar_collapsed = true;
+    state.compose(106, 30).expect("frame");
+    let badge = state.hits.inbox.badge;
+    assert!(!badge.is_empty());
+    assert!(screen_text(&mut state)
+        .lines()
+        .any(|line| line.starts_with("●1")));
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        badge.x,
+        badge.y,
+    );
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::Inbox(inbox)) if inbox.items.len() == 2
+    ));
+}

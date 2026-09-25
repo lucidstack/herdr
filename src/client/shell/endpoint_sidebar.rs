@@ -21,7 +21,29 @@ pub(super) fn render_collapsed(
 ) {
     let palette = &config.palette;
     super::render::render_sidebar_background(buffer, area, palette);
-    let (workspace_area, divider_y, detail_area) = super::sidebar::collapsed_sidebar_sections(area);
+    let (mut workspace_area, divider_y, detail_area) =
+        super::sidebar::collapsed_sidebar_sections(area);
+    // The active machine's inbox badge takes the first row.
+    let active_inbox = state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+        .and_then(|endpoint| endpoint.snapshot.as_deref())
+        .and_then(|snapshot| {
+            super::work_items::active_projection(
+                state.work_items,
+                state.active_endpoint_id,
+                snapshot,
+            )
+        });
+    if let Some(projection) = active_inbox {
+        let badge = Rect::new(workspace_area.x, workspace_area.y, workspace_area.width, 1)
+            .intersection(workspace_area);
+        if super::work_items::render_inbox_badge(buffer, badge, projection, palette, hits) {
+            workspace_area.y += 1;
+            workspace_area.height -= 1;
+        }
+    }
     let mut total_rows = 0usize;
     let mut selected_row = None;
     let reveal = std::mem::take(state.reveal_navigation_workspace);
@@ -229,10 +251,30 @@ pub(super) fn render_expanded(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
+    let (mut workspace_area, detail_area) =
         crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    // The active machine's inbox, above the machine list.
+    let mut nested_workspace_ids: Vec<String> = Vec::new();
+    if let Some((snapshot, projection)) = active_snapshot.and_then(|snapshot| {
+        super::work_items::active_projection(state.work_items, state.active_endpoint_id, snapshot)
+            .map(|projection| (snapshot, projection))
+    }) {
+        let (used, nested) = super::work_items::render_items_section(
+            buffer,
+            workspace_area,
+            projection,
+            snapshot,
+            config,
+            state.work_items,
+            state.active_endpoint_id,
+            hits,
+        );
+        workspace_area.y += used;
+        workspace_area.height -= used;
+        nested_workspace_ids = nested.into_iter().map(str::to_owned).collect();
+    }
     put_text(
         buffer,
         workspace_area.x,
@@ -262,9 +304,16 @@ pub(super) fn render_expanded(
         if let Some(snapshot) = endpoint.snapshot.as_deref() {
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
+            let active = endpoint.endpoint_id == *state.active_endpoint_id;
             rows.extend(
                 super::sidebar::workspace_entries(snapshot, collapsed_groups)
                     .into_iter()
+                    // Workspaces drawn under their inbox items are not listed twice.
+                    .filter(|entry| {
+                        !active
+                            || !nested_workspace_ids
+                                .contains(&snapshot.workspaces[entry.index].workspace_id)
+                    })
                     .map(|entry| Row::Workspace {
                         endpoint: endpoint_index,
                         entry,

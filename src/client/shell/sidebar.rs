@@ -30,11 +30,20 @@ pub(crate) fn render_collapsed_sidebar(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     selected_workspace_id: Option<&str>,
+    inbox: Option<&crate::protocol::work_items::EndpointWorkItemsProjection>,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
     render_sidebar_background(buffer, area, palette);
-    let (workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    let (mut workspace_area, divider_y, detail_area) = collapsed_sidebar_sections(area);
+    if let Some(projection) = inbox {
+        let badge = Rect::new(workspace_area.x, workspace_area.y, workspace_area.width, 1)
+            .intersection(workspace_area);
+        if super::super::work_items::render_inbox_badge(buffer, badge, projection, palette, hits) {
+            workspace_area.y += 1;
+            workspace_area.height -= 1;
+        }
+    }
     for (index, workspace) in snapshot
         .workspaces
         .iter()
@@ -200,8 +209,11 @@ pub(crate) fn render_sidebar(
     hits.sidebar_section_divider =
         crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
     let mut nested_workspace_ids = Vec::new();
-    if let Some(projection) = super::super::work_items::local_projection(state.work_items, snapshot)
-    {
+    if let Some(projection) = super::super::work_items::active_projection(
+        state.work_items,
+        state.active_endpoint_id,
+        snapshot,
+    ) {
         let (used, nested) = super::super::work_items::render_items_section(
             buffer,
             workspace_area,
@@ -209,6 +221,7 @@ pub(crate) fn render_sidebar(
             snapshot,
             config,
             state.work_items,
+            state.active_endpoint_id,
             hits,
         );
         workspace_area.y += used;
