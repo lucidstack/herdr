@@ -27,6 +27,9 @@ const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const MIN_POLL_SECONDS: u64 = 30;
 const MAX_POLL_SECONDS: u64 = 3600;
+/// GitHub's search page size and per-query result limits.
+const SEARCH_PAGE_SIZE: usize = 100;
+const MAX_SEARCH_RESULTS: usize = 1000;
 const GITHUB_CHOICE_ID: &str = "github";
 const MAX_WORKSPACE_LABEL_CHARS: usize = 40;
 const MAX_BRIEF_BODY_CHARS: usize = 4000;
@@ -1103,22 +1106,7 @@ impl WorkItemSource for GithubSource {
             if query.trim().is_empty() {
                 continue;
             }
-            let query = format!("q={query}");
-            let stdout = self.run_gh(&[
-                "api",
-                "--method",
-                "GET",
-                "search/issues",
-                "-f",
-                &query,
-                "-f",
-                "per_page=50",
-                "-f",
-                "sort=updated",
-                "-f",
-                "order=desc",
-            ])?;
-            items.extend(parse_search(&stdout, event)?);
+            items.extend(self.search(event, query)?);
         }
         Ok(items)
     }
@@ -1464,6 +1452,43 @@ fn issue_branch_spec(
 }
 
 impl GithubSource {
+    /// Results of one event's search, newest first, up to `max_results` (GitHub serves at
+    /// most 1000 per query).
+    fn search(&self, event: Event, query: &str) -> Result<Vec<SourceItem>, String> {
+        let limit = self.config.max_results.clamp(1, MAX_SEARCH_RESULTS);
+        let per_page = limit.min(SEARCH_PAGE_SIZE);
+        let query = format!("q={query}");
+        let per_page_arg = format!("per_page={per_page}");
+        let mut items = Vec::new();
+        for page in 1.. {
+            let page_arg = format!("page={page}");
+            let stdout = self.run_gh(&[
+                "api",
+                "--method",
+                "GET",
+                "search/issues",
+                "-f",
+                &query,
+                "-f",
+                &per_page_arg,
+                "-f",
+                &page_arg,
+                "-f",
+                "sort=updated",
+                "-f",
+                "order=desc",
+            ])?;
+            let found = parse_search(&stdout, event)?;
+            let full_page = found.len() == per_page;
+            items.extend(found);
+            if !full_page || items.len() >= limit {
+                break;
+            }
+        }
+        items.truncate(limit);
+        Ok(items)
+    }
+
     /// Issue or mention details through the REST API, which serves pull requests too.
     fn prepare_issue(&self, event: Event, repo: &str, number: u64) -> PreparedItem {
         let issue = self
@@ -2232,5 +2257,70 @@ mod tests {
             .brief
             .contains("mentioned in GitHub pull request o/r#5"));
         assert!(plan.brief.contains("Do not post anything"));
+    }
+
+    /// A `gh` stand-in answering `search/issues` with `total` results in pages.
+    #[cfg(unix)]
+    fn fake_gh(name: &str, total: usize) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-fake-gh-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("gh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+page=1; per=30
+for arg in "$@"; do
+  case "$arg" in page=*) page=${{arg#page=}};; per_page=*) per=${{arg#per_page=}};; esac
+done
+echo "$page" >> "{log}"
+start=$(( (page - 1) * per + 1 )); end=$(( page * per )); [ $end -gt {total} ] && end={total}
+printf '{{"items":['
+n=$start; sep=
+while [ $n -le $end ]; do
+  printf '%s{{"number":%d,"title":"t","html_url":"u","updated_at":"x","repository_url":"https://api.github.com/repos/o/r"}}' "$sep" $n
+  sep=,; n=$((n + 1))
+done
+printf ']}}'
+"#,
+                log = dir.join("pages").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_pages_until_the_results_run_out_or_reach_the_limit() {
+        let only_reviews = crate::config::GithubQueriesConfig {
+            changes_requested: String::new(),
+            ci_failing: String::new(),
+            assigned: String::new(),
+            ..crate::config::GithubQueriesConfig::default()
+        };
+        let gh = fake_gh("paging", 250);
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            gh_path: gh.display().to_string(),
+            max_results: 1000,
+            queries: only_reviews.clone(),
+            ..GithubWorkItemsConfig::default()
+        });
+        assert_eq!(source.poll().expect("poll").len(), 250);
+        let pages = std::fs::read_to_string(gh.with_file_name("pages")).unwrap();
+        assert_eq!(pages.lines().collect::<Vec<_>>(), vec!["1", "2", "3"]);
+
+        let limited = GithubSource::new(GithubWorkItemsConfig {
+            gh_path: gh.display().to_string(),
+            max_results: 120,
+            queries: only_reviews,
+            ..GithubWorkItemsConfig::default()
+        });
+        let items = limited.poll().expect("poll");
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        assert_eq!(items.len(), 120);
+        assert_eq!(items[119].external_id, "o/r#120");
     }
 }

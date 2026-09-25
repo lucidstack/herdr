@@ -185,7 +185,6 @@ mod tests {
         let loaded = load(&path);
         let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
         let expected = WorkItem {
-            prepared_for: None,
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,

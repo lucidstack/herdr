@@ -34,6 +34,8 @@ pub struct JiraWorkItemsConfig {
     pub jql: String,
     /// Seconds between polls, clamped to 30–3600. Default: 120.
     pub poll_interval_seconds: u64,
+    /// Most issues kept from the search, fetched in pages of 100. Default: 200.
+    pub max_results: usize,
     /// curl binary used for the REST API. Default: "curl".
     pub curl_path: String,
     /// Local clones that issues of a project are worked on in.
@@ -51,6 +53,7 @@ impl Default for JiraWorkItemsConfig {
             token_env: "ATLASSIAN_TOKEN".into(),
             jql: DEFAULT_JIRA_JQL.into(),
             poll_interval_seconds: 120,
+            max_results: 200,
             curl_path: "curl".into(),
             projects: Vec::new(),
             issues: Vec::new(),
@@ -88,6 +91,8 @@ pub struct GithubWorkItemsConfig {
     pub gh_path: String,
     /// Seconds between polls, clamped to 30–3600. Default: 60.
     pub poll_interval_seconds: u64,
+    /// Most results kept per search, fetched in pages of 100 (at most 1000). Default: 200.
+    pub max_results: usize,
     /// GitHub search queries, one per event.
     pub queries: GithubQueriesConfig,
     /// Local clones of repositories that can be reviewed in a worktree.
@@ -110,6 +115,7 @@ impl Default for GithubWorkItemsConfig {
             enabled: true,
             gh_path: "gh".into(),
             poll_interval_seconds: 60,
+            max_results: 200,
             queries: GithubQueriesConfig::default(),
             repos: Vec::new(),
             review_requested: Vec::new(),

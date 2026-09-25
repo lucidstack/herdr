@@ -28,7 +28,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const MIN_POLL_SECONDS: u64 = 30;
 const MAX_POLL_SECONDS: u64 = 3600;
-const MAX_RESULTS: usize = 50;
+const PAGE_SIZE: usize = 100;
 const MAX_BODY_CHARS: usize = 4000;
 const MAX_COMMENTS: usize = 30;
 const MAX_LABEL_CHARS: usize = 40;
@@ -48,6 +48,8 @@ pub(crate) struct JiraSource {
 struct SearchResponse {
     #[serde(default)]
     issues: Vec<SearchIssue>,
+    #[serde(rename = "nextPageToken", default)]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -443,14 +445,16 @@ fn http_error(status: u16, body: &[u8]) -> String {
     }
 }
 
-/// Search results as items; `browse_url` turns an issue key into its web page.
+/// One page of search results as items, and the token of the next page.
+/// `browse_url` turns an issue key into its web page.
 fn parse_search(
     bytes: &[u8],
     browse_url: impl Fn(&str) -> String,
-) -> Result<Vec<SourceItem>, String> {
+) -> Result<(Vec<SourceItem>, Option<String>), String> {
     let response: SearchResponse =
         serde_json::from_slice(bytes).map_err(|err| format!("unexpected Jira response: {err}"))?;
-    Ok(response
+    let next = response.next_page_token;
+    let items = response
         .issues
         .into_iter()
         .map(|issue| {
@@ -476,7 +480,8 @@ fn parse_search(
                 updated_at: issue.fields.updated,
             }
         })
-        .collect())
+        .collect();
+    Ok((items, next))
 }
 
 fn brief(item: &WorkItem, detail: &JiraDetail, agent_starts: bool, branch: &str) -> String {
@@ -556,14 +561,29 @@ impl WorkItemSource for JiraSource {
         if let Some(error) = &self.build_error {
             return Err(error.clone());
         }
-        let body = serde_json::json!({
-            "jql": self.config.jql,
-            "maxResults": MAX_RESULTS,
-            "fields": ["summary", "status", "updated", "reporter"],
-        })
-        .to_string();
-        let response = self.api("POST", "search/jql", Some(&body))?;
-        parse_search(&response, |key| self.browse_url(key))
+        let limit = self.config.max_results.max(1);
+        let mut items = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut body = serde_json::json!({
+                "jql": self.config.jql,
+                "maxResults": (limit - items.len()).min(PAGE_SIZE),
+                "fields": ["summary", "status", "updated", "reporter"],
+            });
+            if let Some(token) = page_token.take() {
+                body["nextPageToken"] = serde_json::Value::String(token);
+            }
+            let response = self.api("POST", "search/jql", Some(&body.to_string()))?;
+            let (found, next) = parse_search(&response, |key| self.browse_url(key))?;
+            let empty = found.is_empty();
+            items.extend(found);
+            match next {
+                Some(token) if !empty && items.len() < limit => page_token = Some(token),
+                _ => break,
+            }
+        }
+        items.truncate(limit);
+        Ok(items)
     }
 
     fn prepare(&self, item: &SourceItem) -> PreparedItem {
@@ -848,14 +868,17 @@ mod tests {
             "reporter":{"displayName":"Tony"}}}]}"#;
         assert_eq!(
             parse_search(json, |key| format!("https://x/browse/{key}")).unwrap(),
-            vec![SourceItem {
-                external_id: "TECH-7".into(),
-                title: "Fix it".into(),
-                context: "TECH-7 · To Do".into(),
-                author: Some("Tony".into()),
-                url: "https://x/browse/TECH-7".into(),
-                updated_at: "2026-09-24T10:00:00.000+0100".into(),
-            }]
+            (
+                vec![SourceItem {
+                    external_id: "TECH-7".into(),
+                    title: "Fix it".into(),
+                    context: "TECH-7 · To Do".into(),
+                    author: Some("Tony".into()),
+                    url: "https://x/browse/TECH-7".into(),
+                    updated_at: "2026-09-24T10:00:00.000+0100".into(),
+                }],
+                None
+            )
         );
     }
 

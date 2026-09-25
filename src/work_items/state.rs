@@ -36,8 +36,9 @@ pub(crate) struct WorkItem {
     /// Hidden until this Unix time (seconds); cleared once it passes.
     #[serde(default)]
     pub snoozed_until: Option<u64>,
-    /// `updated_at` the prepared detail belongs to.
-    #[serde(skip)]
+    /// `updated_at` the prepared detail belongs to. Stored, so a restart does not prepare
+    /// unchanged items again.
+    #[serde(default)]
     pub prepared_for: Option<String>,
     #[serde(skip)]
     pub prepare_in_flight: bool,
@@ -134,7 +135,13 @@ pub(crate) struct WorkItemsState {
 }
 
 impl WorkItemsState {
-    pub(crate) fn from_items(items: Vec<WorkItem>) -> Self {
+    pub(crate) fn from_items(mut items: Vec<WorkItem>) -> Self {
+        for item in &mut items {
+            // Failed or partial preparations are retried after a restart.
+            if item.detail.is_none() || item.prepare_error.is_some() {
+                item.prepared_for = None;
+            }
+        }
         Self {
             items,
             source_errors: HashMap::new(),
@@ -512,6 +519,32 @@ mod tests {
         assert_eq!(state.unhide("gh:a"), Ok(true));
         assert!(!state.get("gh:a").expect("item").dismissed);
         assert_eq!(state.unhide("gh:missing"), Err(NotFound));
+    }
+
+    #[test]
+    fn restored_items_are_prepared_again_only_when_preparation_failed() {
+        let mut state = state_with("gh", &["ok", "failed"]);
+        state.needs_prepare("gh");
+        let prepared = |error: Option<&str>| PreparedItem {
+            detail: Some(serde_json::json!({})),
+            summary: None,
+            error: error.map(str::to_string),
+        };
+        state.apply_prepared("gh:ok", "2026-01-01T00:00:00Z", prepared(None));
+        state.apply_prepared(
+            "gh:failed",
+            "2026-01-01T00:00:00Z",
+            prepared(Some("offline")),
+        );
+        assert!(state.needs_prepare("gh").is_empty());
+
+        let mut restored = WorkItemsState::from_items(state.items().to_vec());
+        let again: Vec<String> = restored
+            .needs_prepare("gh")
+            .into_iter()
+            .map(|item| item.external_id)
+            .collect();
+        assert_eq!(again, vec!["failed".to_string()]);
     }
 
     #[test]

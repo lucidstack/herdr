@@ -1467,6 +1467,12 @@
           "description": "Seconds between polls, clamped to 30–3600."
         },
         {
+          "key": "work_items.github.max_results",
+          "type": "integer",
+          "default": "200",
+          "description": "Most results kept per search, fetched in pages of 100 (GitHub serves at most 1000)."
+        },
+        {
           "key": "work_items.github.queries.review_requested",
           "type": "string",
           "default": "\"is:pr is:open review-requested:@me archived:false\"",
@@ -1531,6 +1537,12 @@
           "type": "integer",
           "default": "120",
           "description": "Seconds between polls, clamped to 30–3600."
+        },
+        {
+          "key": "work_items.jira.max_results",
+          "type": "integer",
+          "default": "200",
+          "description": "Most issues kept from the search, fetched in pages of 100."
         },
         {
           "key": "work_items.jira.curl_path",
