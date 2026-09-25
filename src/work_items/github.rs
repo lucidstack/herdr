@@ -2295,12 +2295,10 @@ printf ']}}'
     #[cfg(unix)]
     #[test]
     fn search_pages_until_the_results_run_out_or_reach_the_limit() {
-        let only_reviews = crate::config::GithubQueriesConfig {
-            changes_requested: String::new(),
-            ci_failing: String::new(),
-            assigned: String::new(),
-            ..crate::config::GithubQueriesConfig::default()
-        };
+        let mut only_reviews = GithubWorkItemsConfig::default().queries;
+        only_reviews.changes_requested.clear();
+        only_reviews.ci_failing.clear();
+        only_reviews.assigned.clear();
         let gh = fake_gh("paging", 250);
         let source = GithubSource::new(GithubWorkItemsConfig {
             gh_path: gh.display().to_string(),

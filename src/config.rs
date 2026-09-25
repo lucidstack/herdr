@@ -38,9 +38,8 @@ pub use self::{
     theme::{parse_color, CustomThemeColors, ModeThemeColors, ThemeConfig, THEME_NAMES},
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
     work_items::{
-        BranchWorkflowConfig, GithubQueriesConfig, GithubRepoConfig, GithubWorkItemsConfig,
-        JiraProjectConfig, JiraWorkItemsConfig, OnResolvedConfig, ReviewRequestedConfig,
-        WorkItemsConfig,
+        BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, JiraProjectConfig,
+        JiraWorkItemsConfig, OnResolvedConfig, ReviewRequestedConfig, WorkItemsConfig,
     },
 };
 
