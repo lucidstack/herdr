@@ -689,7 +689,7 @@ impl WorkItemSource for JiraSource {
             },
             WorkItemChoiceInfo {
                 choice_id: AGENT_CHOICE_ID.into(),
-                label: "Agent implements it".into(),
+                label: "Ask agent to implement it".into(),
                 description: Some(
                     "Worktree on a new branch; the agent implements it, no commit or push".into(),
                 ),
@@ -755,15 +755,18 @@ impl WorkItemSource for JiraSource {
                 base_ref: format!("refs/herdr/base/{base}"),
                 branch: branch.clone(),
                 reuse_branch: true,
+                extra_fetch_refspecs: Vec::new(),
             }),
             workspace_label: truncate_chars(&format!("{key} {}", item.title), MAX_LABEL_CHARS),
             agent_name_hint: key.to_ascii_lowercase(),
             brief: brief(item, &detail, agent_starts, &branch),
             layout: WorkspaceLayout {
                 agent: workflow.agent.clone(),
+                agent_args: workflow.agent_args.clone(),
                 editor_command: workflow.editor_command.clone(),
                 lazygit_command: workflow.lazygit_command.clone(),
                 diff_command: String::new(),
+                review_command: String::new(),
             },
             delete_branch: workflow.delete_branch,
         })
@@ -902,6 +905,7 @@ mod tests {
                 base_ref: "refs/herdr/base/master".into(),
                 branch: "ar/TECH-2031-add-manual-vehicle-entry-form".into(),
                 reuse_branch: true,
+                extra_fetch_refspecs: Vec::new(),
             })
         );
         assert!(plan

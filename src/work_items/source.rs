@@ -39,6 +39,8 @@ pub(crate) struct WorktreeSpec {
     /// Remote name or URL that serves `fetch_refspec`.
     pub remote: String,
     pub fetch_refspec: String,
+    /// More refspecs fetched with `fetch_refspec`, e.g. the pull request's base branch.
+    pub extra_fetch_refspecs: Vec<String>,
     /// Fetched ref a new branch starts from.
     pub base_ref: String,
     /// Local branch the worktree is on.
@@ -73,10 +75,14 @@ pub(crate) enum WorkspaceSource {
 pub(crate) struct WorkspaceLayout {
     /// Agent kind started in the first tab; empty starts none.
     pub agent: String,
+    /// Extra arguments the agent is started with.
+    pub agent_args: Vec<String>,
     pub editor_command: String,
     pub lazygit_command: String,
     /// Diff viewer for download workspaces; `{file}` is the downloaded file.
     pub diff_command: String,
+    /// Replaces the Git tab of a worktree when `{plugin:ID}` resolves; `{base}` is already filled in.
+    pub review_command: String,
 }
 
 /// Everything needed to provision a local workspace for an item.

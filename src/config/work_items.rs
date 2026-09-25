@@ -7,6 +7,9 @@ pub const DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY: &str =
 pub const DEFAULT_GITHUB_CI_FAILING_QUERY: &str =
     "is:pr is:open author:@me status:failure archived:false";
 pub const DEFAULT_GITHUB_ASSIGNED_QUERY: &str = "is:issue is:open assignee:@me archived:false";
+/// herdr-reviewr, showing the pull request against its base.
+pub const DEFAULT_REVIEW_COMMAND: &str =
+    "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}";
 pub const DEFAULT_JIRA_JQL: &str =
     "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
 
@@ -195,12 +198,16 @@ pub struct ReviewRequestedConfig {
     pub docs_patterns: Vec<String>,
     /// Agent started in the first tab. Empty disables the agent-led choices. Default: "claude".
     pub agent: String,
+    /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
+    pub agent_args: Vec<String>,
     /// Command run in the editor tab of a worktree review. Empty disables the tab. Default: "nvim .".
     pub editor_command: String,
     /// Command run in the Git tab of a worktree review. Empty disables the tab. Default: "lazygit".
     pub lazygit_command: String,
     /// Command run in the diff tab of an agent review without checkout; {file} is the downloaded diff. Empty disables the tab. Default: "nvim -R {file}".
     pub diff_command: String,
+    /// Command run in the review tab of a worktree review, in place of the Git tab; {plugin:ID} is an installed plugin's folder and {base} the pull request's base branch. The Git tab is used when it is empty or its plugin is not installed. Default: "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}".
+    pub review_command: String,
 }
 
 impl Default for ReviewRequestedConfig {
@@ -215,9 +222,11 @@ impl Default for ReviewRequestedConfig {
                 r"^docs/".into(),
             ],
             agent: "claude".into(),
+            agent_args: Vec::new(),
             editor_command: "nvim .".into(),
             lazygit_command: "lazygit".into(),
             diff_command: "nvim -R {file}".into(),
+            review_command: DEFAULT_REVIEW_COMMAND.into(),
         }
     }
 }
@@ -239,6 +248,8 @@ pub struct BranchWorkflowConfig {
     pub delete_branch: bool,
     /// Agent started in the first tab. Empty disables the agent-led choices. Default: "claude".
     pub agent: String,
+    /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
+    pub agent_args: Vec<String>,
     /// Command run in the editor tab. Empty disables the tab. Default: "nvim .".
     pub editor_command: String,
     /// Command run in the Git tab. Empty disables the tab. Default: "lazygit".
@@ -254,6 +265,7 @@ impl Default for BranchWorkflowConfig {
             on_resolved: OnResolvedConfig::Keep,
             delete_branch: false,
             agent: "claude".into(),
+            agent_args: Vec::new(),
             editor_command: "nvim .".into(),
             lazygit_command: "lazygit".into(),
             viewer_command: "nvim -R {file}".into(),

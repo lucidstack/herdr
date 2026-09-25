@@ -185,7 +185,7 @@ fn dialog_lists_choices_and_arrow_keys_skip_disabled_ones() {
         1,
         WorkItemChoiceInfo {
             choice_id: "agent_post".into(),
-            label: "Agent review, post on GitHub".into(),
+            label: "Ask agent to review and comment on GitHub".into(),
             description: None,
             action: WorkItemChoiceAction::ProvisionWorkspace,
             disabled_reason: Some("No agent configured".into()),
@@ -197,7 +197,10 @@ fn dialog_lists_choices_and_arrow_keys_skip_disabled_ones() {
     click_item(&mut state, 0);
     let text = screen_text(&mut state);
     assert!(text.contains("Review locally"), "{text}");
-    assert!(text.contains("Agent review, post on GitHub"), "{text}");
+    assert!(
+        text.contains("Ask agent to review and comment on GitHub"),
+        "{text}"
+    );
     assert!(text.contains("Review on GitHub"), "{text}");
     state.handle_input_bytes(b"\x1b[B");
     let Some(ClientShellOverlay::WorkItem(overlay)) = state.overlay.as_ref() else {

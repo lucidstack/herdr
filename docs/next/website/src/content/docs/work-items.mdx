@@ -67,7 +67,9 @@ agent = "codex"
 editor_command = "hx ."
 ```
 
-`agent` is the coding agent started in the first tab; leave it empty to disable the agent-led choices. `editor_command` and `lazygit_command` fill the other tabs. See the [configuration reference](/docs/config-reference/) for every key.
+`agent` is the coding agent started in the first tab; leave it empty to disable the agent-led choices. `agent_args` are passed to it, for example `agent_args = ["--model", "opus", "--effort", "high"]` for Claude Code. `editor_command` and `lazygit_command` fill the other tabs.
+
+Review requests open [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) in a **review** tab instead of lazygit, with the pull request's base branch fetched and passed as `--base`, so its branch scope shows exactly the pull request's changes. Without the `persiyanov.reviewr` plugin installed, the tab falls back to `lazygit_command`. Change it with `review_command`, where `{plugin:ID}` is an installed plugin's folder and `{base}` the base branch, or set it to `""` to keep lazygit. See the [configuration reference](/docs/config-reference/) for every key.
 
 ## Jira
 

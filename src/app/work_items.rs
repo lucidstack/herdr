@@ -533,7 +533,10 @@ impl App {
         let tools: Vec<(&str, String)> = match &plan.source {
             WorkspaceSource::Worktree(_) => vec![
                 ("editor", layout.editor_command.clone()),
-                ("lazygit", layout.lazygit_command.clone()),
+                match self.resolve_plugin_command(&layout.review_command) {
+                    Some(review) => ("review", review),
+                    None => ("lazygit", layout.lazygit_command.clone()),
+                },
             ],
             WorkspaceSource::Download(download) => vec![(
                 "diff",
@@ -552,6 +555,30 @@ impl App {
             }))?;
         }
         Ok(())
+    }
+
+    /// Expands `{plugin:ID}` to the folder of an installed, enabled plugin. `None` when the
+    /// command is empty or names a plugin that is not installed, so the caller can fall back.
+    fn resolve_plugin_command(&self, command: &str) -> Option<String> {
+        if command.trim().is_empty() {
+            return None;
+        }
+        let mut resolved = String::with_capacity(command.len());
+        let mut rest = command;
+        while let Some(start) = rest.find("{plugin:") {
+            let end = start + rest[start..].find('}')?;
+            let plugin_id = &rest[start + "{plugin:".len()..end];
+            let plugin = self
+                .state
+                .installed_plugins
+                .get(plugin_id)
+                .filter(|plugin| plugin.enabled)?;
+            resolved.push_str(&rest[..start]);
+            resolved.push_str(&shell_quote(&plugin.plugin_root));
+            rest = &rest[end + 1..];
+        }
+        resolved.push_str(rest);
+        Some(resolved)
     }
 
     fn create_work_item_tab(
@@ -715,6 +742,7 @@ impl App {
         };
         let hint = job.plan.agent_name_hint.clone();
         let kind = job.plan.layout.agent.clone();
+        let args = job.plan.layout.agent_args.clone();
         for suffix in 1..=MAX_AGENT_NAME_SUFFIX {
             let name = if suffix == 1 {
                 hint.clone()
@@ -725,7 +753,7 @@ impl App {
                 name: name.clone(),
                 kind: kind.clone(),
                 pane_id: pane_id.clone(),
-                args: Vec::new(),
+                args: args.clone(),
                 timeout_ms: None,
             })) {
                 Ok(_) => {
@@ -987,6 +1015,11 @@ impl App {
             }
         }
     }
+}
+
+/// Single-quotes `value` for a POSIX shell.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn unexpected_response(method: &str) -> ErrorBody {
@@ -1272,15 +1305,18 @@ mod tests {
                 base_ref: "refs/herdr/pull/1".into(),
                 branch: "review/pr-1".into(),
                 reuse_branch: false,
+                extra_fetch_refspecs: Vec::new(),
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
             layout: WorkspaceLayout {
                 agent: String::new(),
+                agent_args: Vec::new(),
                 editor_command: "true".into(),
                 lazygit_command: "true".into(),
                 diff_command: String::new(),
+                review_command: String::new(),
             },
             delete_branch: true,
         });
@@ -1462,15 +1498,18 @@ mod tests {
                 base_ref: String::new(),
                 branch: "review/pr-1".into(),
                 reuse_branch: false,
+                extra_fetch_refspecs: Vec::new(),
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
             brief: "line one\nline two".into(),
             layout: WorkspaceLayout {
                 agent: "claude".into(),
+                agent_args: Vec::new(),
                 editor_command: String::new(),
                 lazygit_command: String::new(),
                 diff_command: String::new(),
+                review_command: String::new(),
             },
             delete_branch: true,
         };
@@ -1641,5 +1680,44 @@ mod tests {
         let (status, detail) = brief_step(&mut app);
         assert_eq!(status, WorkItemStepStatus::Failed);
         assert!(detail.is_some_and(|detail| detail.contains("still idle")));
+    }
+
+    #[test]
+    fn review_tab_command_resolves_installed_plugins_only() {
+        let mut app = test_app();
+        let command = "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base origin/main";
+        assert_eq!(app.resolve_plugin_command(command), None);
+        let mut plugin = crate::api::schema::InstalledPluginInfo {
+            plugin_id: "persiyanov.reviewr".into(),
+            name: "reviewr".into(),
+            version: "0.39.0".into(),
+            min_herdr_version: String::new(),
+            description: None,
+            manifest_path: "/p/it's here/herdr-plugin.toml".into(),
+            plugin_root: "/p/it's here".into(),
+            enabled: true,
+            platforms: None,
+            build: Vec::new(),
+            startup: Vec::new(),
+            actions: Vec::new(),
+            events: Vec::new(),
+            panes: Vec::new(),
+            link_handlers: Vec::new(),
+            source: Default::default(),
+            warnings: Vec::new(),
+        };
+        app.state
+            .installed_plugins
+            .insert(plugin.plugin_id.clone(), plugin.clone());
+        assert_eq!(
+            app.resolve_plugin_command(command).as_deref(),
+            Some("'/p/it'\\''s here'/bin/herdr-reviewr --base origin/main")
+        );
+        plugin.enabled = false;
+        app.state
+            .installed_plugins
+            .insert(plugin.plugin_id.clone(), plugin);
+        assert_eq!(app.resolve_plugin_command(command), None);
+        assert_eq!(app.resolve_plugin_command(""), None);
     }
 }

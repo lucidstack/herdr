@@ -263,18 +263,10 @@ fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, Str
 
 /// Fetches the change and decides how Herdr should create or reopen its worktree.
 fn prepare_worktree(spec: &WorktreeSpec) -> Result<SourceReady, String> {
-    git(
-        &spec.repo_path,
-        &[
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            &spec.remote,
-            &spec.fetch_refspec,
-        ],
-        FETCH_TIMEOUT,
-    )
-    .map_err(|err| format!("fetch: {err}"))?;
+    let mut fetch = vec!["fetch", "--no-tags", "--quiet", spec.remote.as_str()];
+    fetch.push(&spec.fetch_refspec);
+    fetch.extend(spec.extra_fetch_refspecs.iter().map(String::as_str));
+    git(&spec.repo_path, &fetch, FETCH_TIMEOUT).map_err(|err| format!("fetch: {err}"))?;
     if !branch_exists(&spec.repo_path, &spec.branch)? {
         return Ok(SourceReady::CreateWorktree {
             branch: spec.branch.clone(),
@@ -354,15 +346,18 @@ mod tests {
                 base_ref: "refs/herdr/pull/1".into(),
                 branch: "review/pr-1".into(),
                 reuse_branch: false,
+                extra_fetch_refspecs: Vec::new(),
             }),
             workspace_label: "#1 Title".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
             layout: WorkspaceLayout {
                 agent: agent.into(),
+                agent_args: Vec::new(),
                 editor_command: String::new(),
                 lazygit_command: String::new(),
                 diff_command: String::new(),
+                review_command: String::new(),
             },
             delete_branch: true,
         }
@@ -486,7 +481,24 @@ mod tests {
             base_ref: "refs/herdr/pull/1".into(),
             branch: "review/pr-1".into(),
             reuse_branch: false,
+            extra_fetch_refspecs: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extra_refspecs_are_fetched_with_the_review_ref() {
+        let repo = test_repo("extra");
+        prepare_worktree(&WorktreeSpec {
+            extra_fetch_refspecs: vec!["+HEAD:refs/herdr/base/main".into()],
+            ..spec(&repo)
+        })
+        .expect("prepared");
+        let base = git_output(&repo, &["rev-parse", "refs/herdr/base/main"], GIT_TIMEOUT).unwrap();
+        let head = git_output(&repo, &["rev-parse", "HEAD"], GIT_TIMEOUT).unwrap();
+        let _ = std::fs::remove_dir_all(&repo);
+        assert!(base.status.success());
+        assert_eq!(base.stdout, head.stdout);
     }
 
     #[cfg(unix)]
@@ -528,6 +540,7 @@ mod tests {
         let ready = prepare_worktree(&WorktreeSpec {
             branch: "feature".into(),
             reuse_branch: true,
+            extra_fetch_refspecs: Vec::new(),
             ..spec(&repo)
         });
         let _ = std::fs::remove_dir_all(&repo);

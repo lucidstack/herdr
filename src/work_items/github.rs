@@ -160,6 +160,7 @@ struct Workflow {
 /// The workflow settings that apply to one item.
 struct Settings<'a> {
     agent: &'a str,
+    agent_args: &'a [String],
     editor_command: &'a str,
     lazygit_command: &'a str,
     /// Viewer of the downloaded file when there is no checkout; `{file}` is the file.
@@ -410,6 +411,7 @@ impl GithubSource {
             let config = &self.workflow(repo).config;
             return Settings {
                 agent: &config.agent,
+                agent_args: &config.agent_args,
                 editor_command: &config.editor_command,
                 lazygit_command: &config.lazygit_command,
                 diff_command: &config.diff_command,
@@ -420,6 +422,7 @@ impl GithubSource {
         let config = self.branch_workflow(event, repo);
         Settings {
             agent: &config.agent,
+            agent_args: &config.agent_args,
             editor_command: &config.editor_command,
             lazygit_command: &config.lazygit_command,
             diff_command: &config.viewer_command,
@@ -625,14 +628,14 @@ impl ReviewMode {
     fn label(self) -> &'static str {
         match self {
             Self::Local => "Review locally",
-            Self::LocalAgentReview => "Review locally, agent reviews first",
-            Self::AgentReport => "Agent review, report back to me",
-            Self::AgentPost => "Agent review, post on GitHub",
+            Self::LocalAgentReview => "Review locally, ask agent to review first",
+            Self::AgentReport => "Ask agent to review and report back",
+            Self::AgentPost => "Ask agent to review and comment on GitHub",
             Self::Address | Self::FixChecks | Self::StartIssue => "Work on it locally",
-            Self::AddressAgent => "Agent addresses the feedback",
-            Self::FixChecksAgent => "Agent fixes the checks",
-            Self::StartIssueAgent => "Agent implements it",
-            Self::ThreadAgent => "Agent reads the thread and drafts a reply",
+            Self::AddressAgent => "Ask agent to address the feedback",
+            Self::FixChecksAgent => "Ask agent to fix the checks",
+            Self::StartIssueAgent => "Ask agent to implement it",
+            Self::ThreadAgent => "Ask agent to draft a reply",
         }
     }
 
@@ -1278,24 +1281,35 @@ impl WorkItemSource for GithubSource {
             Event::Assigned | Event::Mentioned => format!("issue-{number}"),
             Event::ChangesRequested | Event::CiFailing => format!("pr-{number}"),
         };
-        let layout = WorkspaceLayout {
+        let mut layout = WorkspaceLayout {
             agent: settings.agent.to_string(),
+            agent_args: settings.agent_args.to_vec(),
             editor_command: settings.editor_command.to_string(),
             lazygit_command: settings.lazygit_command.to_string(),
             diff_command: settings.diff_command.to_string(),
+            review_command: String::new(),
         };
         let checkout = mapped.filter(|_| mode.checks_out());
         let (source, brief) = if event.is_pull_request_event() {
             let detail = item_detail::<GithubDetail>(item).ok_or_else(not_ready)?;
             let source = match (checkout, event) {
-                (Some(repo), Event::ReviewRequested) => WorkspaceSource::Worktree(WorktreeSpec {
-                    repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
-                    remote: repo.remote.clone(),
-                    fetch_refspec: pull_refspec(number),
-                    base_ref: format!("refs/herdr/pull/{number}"),
-                    branch: format!("review/pr-{number}"),
-                    reuse_branch: false,
-                }),
+                (Some(repo), Event::ReviewRequested) => {
+                    let (base_refspec, base) = review_base(repo, &detail.base_ref_name);
+                    layout.review_command = self
+                        .workflow(repo_name)
+                        .config
+                        .review_command
+                        .replace("{base}", &base);
+                    WorkspaceSource::Worktree(WorktreeSpec {
+                        repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
+                        remote: repo.remote.clone(),
+                        fetch_refspec: pull_refspec(number),
+                        base_ref: format!("refs/herdr/pull/{number}"),
+                        branch: format!("review/pr-{number}"),
+                        reuse_branch: false,
+                        extra_fetch_refspecs: base_refspec.into_iter().collect(),
+                    })
+                }
                 (Some(repo), _) => WorkspaceSource::Worktree(head_branch_spec(repo, &detail)?),
                 (None, _) => WorkspaceSource::Download(DownloadSpec {
                     directory: crate::worktree::default_checkout_path(
@@ -1385,6 +1399,29 @@ impl WorkItemSource for GithubSource {
 const DETAIL_FIELDS: &str = "number,title,body,url,additions,deletions,changedFiles,files,\
                              baseRefName,headRefName,headRefOid,author";
 
+/// The pull request's base as a ref reviewers can diff against, and the refspec that
+/// fetches it. A named remote updates its remote-tracking branch, so the ref reads the way
+/// people type it (`origin/main`); a URL remote gets a private ref.
+fn review_base(repo: &GithubRepoConfig, base: &str) -> (Option<String>, String) {
+    if base.is_empty() {
+        return (None, "HEAD".into());
+    }
+    if is_remote_name(&repo.remote) {
+        (
+            Some(format!(
+                "+refs/heads/{base}:refs/remotes/{remote}/{base}",
+                remote = repo.remote
+            )),
+            format!("{}/{base}", repo.remote),
+        )
+    } else {
+        (
+            Some(format!("+refs/heads/{base}:refs/herdr/base/{base}")),
+            format!("refs/herdr/base/{base}"),
+        )
+    }
+}
+
 fn pull_refspec(number: u64) -> String {
     format!("+refs/pull/{number}/head:refs/herdr/pull/{number}")
 }
@@ -1424,6 +1461,7 @@ fn head_branch_spec(
         base_ref,
         branch: head.clone(),
         reuse_branch: true,
+        extra_fetch_refspecs: Vec::new(),
     })
 }
 
@@ -1448,6 +1486,7 @@ fn issue_branch_spec(
         base_ref,
         branch: issue_branch(detail.number, title),
         reuse_branch: true,
+        extra_fetch_refspecs: Vec::new(),
     })
 }
 
@@ -1835,7 +1874,12 @@ mod tests {
                 base_ref: "refs/herdr/pull/5".into(),
                 branch: "review/pr-5".into(),
                 reuse_branch: false,
+                extra_fetch_refspecs: vec!["+refs/heads/main:refs/remotes/origin/main".into()],
             })
+        );
+        assert_eq!(
+            plan.layout.review_command,
+            "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base origin/main"
         );
         assert!(plan.delete_branch);
         assert!(plan.brief.contains("Add the thing"));
@@ -1858,6 +1902,7 @@ mod tests {
                     delete_branch: false,
                     on_resolved: OnResolvedConfig::Remove,
                     editor_command: "hx .".into(),
+                    agent_args: vec!["--model".into(), "opus".into()],
                     ..ReviewRequestedConfig::default()
                 },
             ],
@@ -1870,6 +1915,7 @@ mod tests {
         assert!(!plan.delete_branch);
         assert_eq!(plan.layout.editor_command, "hx .");
         assert_eq!(plan.layout.agent, "claude");
+        assert_eq!(plan.layout.agent_args, ["--model", "opus"]);
         assert!(source.remove_on_resolved(&item));
         assert!(!source.remove_on_resolved(&work_item("x/y", None)));
     }
@@ -2053,6 +2099,7 @@ mod tests {
                 base_ref: "origin/feature".into(),
                 branch: "feature".into(),
                 reuse_branch: true,
+                extra_fetch_refspecs: Vec::new(),
             })
         );
         assert!(!plan.delete_branch);
@@ -2217,6 +2264,7 @@ mod tests {
                 base_ref: "refs/herdr/base/main".into(),
                 branch: "issue/5-crash-when-saving-empty-name".into(),
                 reuse_branch: true,
+                extra_fetch_refspecs: Vec::new(),
             })
         );
         assert!(plan.brief.contains("Saving with an empty name panics."));
