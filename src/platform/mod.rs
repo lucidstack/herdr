@@ -561,9 +561,171 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
 }
 
+/// How long a desktop-notification helper may run before it is abandoned.
+///
+/// Notification helpers normally finish in well under a second. A helper that
+/// has not exited by this point is wedged, and no notification is worth
+/// blocking the caller on.
+#[cfg(unix)]
+pub(crate) const NOTIFICATION_COMMAND_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// How often a pending notification helper is re-checked while waiting.
+#[cfg(unix)]
+const NOTIFICATION_COMMAND_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(25);
+
+/// Runs a desktop-notification helper, giving up if it does not exit in time.
+///
+/// Notification helpers are resolved from `PATH` and are not under our control:
+/// a stale or broken one can enter its own event loop and never exit. Waiting
+/// on it unbounded blocks the caller, and because the client dispatches these
+/// from its event loop, that stops input and rendering for as long as the
+/// helper lives.
+///
+/// A helper that overruns is killed and reaped so it cannot hold the caller or
+/// accumulate behind later notifications, and reports as not-shown so callers
+/// can fall back to another mechanism.
+#[cfg(unix)]
+pub(crate) fn run_notification_command_with_timeout(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    let mut child = match command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.success());
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(NOTIFICATION_COMMAND_POLL_INTERVAL.min(deadline - now));
+    }
+
+    let kill_result = child.kill().and_then(|()| child.wait().map(|_| ()));
+    match kill_result {
+        Ok(()) => tracing::warn!(
+            timeout_ms = timeout.as_millis(),
+            "notification helper did not exit in time; terminated it"
+        ),
+        Err(err) => tracing::warn!(
+            err = %err,
+            timeout_ms = timeout.as_millis(),
+            "notification helper did not exit in time and could not be terminated"
+        ),
+    }
+
+    Ok(false)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_command_returns_success_for_fast_helper() {
+        let mut command = std::process::Command::new("true");
+        assert!(run_notification_command_with_timeout(
+            &mut command,
+            std::time::Duration::from_secs(5)
+        )
+        .expect("run fast helper"));
+    }
+
+    #[test]
+    fn notification_command_reports_failure_exit_status() {
+        let mut command = std::process::Command::new("false");
+        assert!(!run_notification_command_with_timeout(
+            &mut command,
+            std::time::Duration::from_secs(5)
+        )
+        .expect("run failing helper"));
+    }
+
+    #[test]
+    fn notification_command_reports_missing_helper_without_error() {
+        let mut command =
+            std::process::Command::new("herdr-notification-helper-that-does-not-exist");
+        assert!(!run_notification_command_with_timeout(
+            &mut command,
+            std::time::Duration::from_secs(5)
+        )
+        .expect("missing helper is not an error"));
+    }
+
+    /// End-to-end shape of the reported failure: the helper is resolved from
+    /// `PATH` by bare name, and the binary `PATH` resolves to never exits.
+    #[test]
+    fn notification_command_bounds_path_resolved_wedged_helper() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-wedged-notifier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create helper dir");
+
+        let helper = dir.join("terminal-notifier");
+        std::fs::write(&helper, "#!/bin/sh\nsleep 600\n").expect("write helper");
+        std::fs::set_permissions(
+            &helper,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("mark helper executable");
+
+        let path = match std::env::var("PATH") {
+            Ok(existing) => format!("{}:{existing}", dir.display()),
+            Err(_) => dir.display().to_string(),
+        };
+
+        let mut command = std::process::Command::new("terminal-notifier");
+        command.env("PATH", path).arg("-title").arg("t");
+
+        let timeout = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let shown = run_notification_command_with_timeout(&mut command, timeout)
+            .expect("wedged PATH helper is not an error");
+        let elapsed = started.elapsed();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!shown, "a helper that never exits must report not-shown");
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "caller was held for {elapsed:?} despite a {timeout:?} timeout"
+        );
+    }
+
+    /// A wedged helper must not hold the caller: this is the regression guard
+    /// for a notification helper that enters its own event loop and never exits.
+    #[test]
+    fn notification_command_gives_up_on_wedged_helper() {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("60");
+
+        let timeout = std::time::Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let shown = run_notification_command_with_timeout(&mut command, timeout)
+            .expect("wedged helper is not an error");
+        let elapsed = started.elapsed();
+
+        assert!(!shown, "a helper that never exits must report not-shown");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "caller was held for {elapsed:?}, far beyond the {timeout:?} timeout"
+        );
+    }
 
     #[test]
     fn terminal_resize_signal_is_recorded_once_per_delivery() {

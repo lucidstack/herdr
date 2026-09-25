@@ -866,18 +866,7 @@ fn terminal_bundle_identifier_from_env(
 }
 
 fn run_notification_command(mut command: Command) -> std::io::Result<bool> {
-    let status = match command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) => status,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err),
-    };
-
-    Ok(status.success())
+    super::run_notification_command_with_timeout(&mut command, super::NOTIFICATION_COMMAND_TIMEOUT)
 }
 
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
