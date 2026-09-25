@@ -88,8 +88,8 @@ impl ProvisionJob {
 pub(crate) enum SourceReady {
     /// Create a worktree on `branch`; a branch that does not exist yet starts at `base`.
     CreateWorktree { branch: String, base: String },
-    /// The branch is already checked out here; reopen that worktree.
-    ExistingWorktree(PathBuf),
+    /// `branch` is already checked out at `path`; reopen that worktree.
+    ExistingWorktree { path: PathBuf, branch: String },
     /// The download workspace's file is in place.
     Downloaded,
 }
@@ -242,23 +242,137 @@ fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
-/// Path of the worktree that has `branch` checked out, if any.
-fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+/// Worktrees of `repo` as (path, branch) pairs; detached ones have no branch.
+fn worktrees(repo: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> {
     let output = git_output(repo, &["worktree", "list", "--porcelain"], GIT_TIMEOUT)?;
     if !output.status.success() {
         return Err(failure_detail(&output));
     }
-    let wanted = format!("branch refs/heads/{branch}");
     let listing = String::from_utf8_lossy(&output.stdout);
-    let mut path = None;
+    let mut worktrees = Vec::new();
     for line in listing.lines() {
-        if let Some(worktree) = line.strip_prefix("worktree ") {
-            path = Some(PathBuf::from(worktree));
-        } else if line == wanted {
-            return Ok(path);
+        if let Some(path) = line.strip_prefix("worktree ") {
+            worktrees.push((PathBuf::from(path), None));
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            if let Some(last) = worktrees.last_mut() {
+                last.1 = Some(branch.to_string());
+            }
         }
     }
-    Ok(None)
+    Ok(worktrees)
+}
+
+/// Path of the worktree that has `branch` checked out, if any.
+fn worktree_for_branch(repo: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+    Ok(worktrees(repo)?
+        .into_iter()
+        .find(|(_, checked_out)| checked_out.as_deref() == Some(branch))
+        .map(|(path, _)| path))
+}
+
+/// Whether `branch` names the issue `key`: the key appears, case-insensitively, neither
+/// inside a longer word nor followed by more digits (`tech-20` does not match `tech-2096`).
+pub(crate) fn branch_matches_key(branch: &str, key: &str) -> bool {
+    let branch = branch.to_ascii_lowercase();
+    let key = key.to_ascii_lowercase();
+    if key.is_empty() {
+        return false;
+    }
+    branch.match_indices(&key).any(|(start, _)| {
+        let before = branch[..start].chars().next_back();
+        let after = branch[start + key.len()..].chars().next();
+        before.is_none_or(|character| !character.is_ascii_alphanumeric())
+            && after.is_none_or(|character| !character.is_ascii_digit())
+    })
+}
+
+/// Existing work for an issue in `repo`, most specific first: a worktree whose branch names
+/// `key`; a local branch that does; else a branch holding the newest commit whose message
+/// mentions `key` and is not on `base_rev` (branches named after the change rather than the
+/// issue), other than `base_branch`. Returns the branch and, when checked out, its worktree.
+pub(crate) fn find_existing_work(
+    repo: &Path,
+    key: &str,
+    base_branch: &str,
+    base_rev: &str,
+) -> Result<Option<(String, Option<PathBuf>)>, String> {
+    let worktrees = worktrees(repo)?;
+    let checkout = |branch: &str| {
+        worktrees
+            .iter()
+            .find(|(_, checked_out)| checked_out.as_deref() == Some(branch))
+            .map(|(path, _)| path.clone())
+    };
+    for (path, branch) in &worktrees {
+        if let Some(branch) = branch
+            .as_ref()
+            .filter(|branch| branch_matches_key(branch, key))
+        {
+            return Ok(Some((branch.clone(), Some(path.clone()))));
+        }
+    }
+    let lines = |args: &[&str]| -> Result<Vec<String>, String> {
+        let output = git_output(repo, args, GIT_TIMEOUT)?;
+        if !output.status.success() {
+            return Err(failure_detail(&output));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    };
+    let branches = lines(&["for-each-ref", "--format=%(refname:short)", "refs/heads"])?;
+    if let Some(branch) = branches
+        .iter()
+        .find(|branch| branch_matches_key(branch, key))
+    {
+        return Ok(Some((branch.clone(), checkout(branch))));
+    }
+    let grep = format!("--grep={key}");
+    let mut log = vec![
+        "log",
+        "--branches",
+        "--fixed-strings",
+        "--regexp-ignore-case",
+        grep.as_str(),
+        "--max-count=1",
+        "--format=%H",
+    ];
+    // Commits that reached the base are in every branch started since; only unmerged work
+    // says which branch the issue is on.
+    let base_known = !base_rev.is_empty()
+        && git_output(
+            repo,
+            &["rev-parse", "--verify", "--quiet", base_rev],
+            GIT_TIMEOUT,
+        )?
+        .status
+        .success();
+    if base_known {
+        log.extend(["--not", base_rev]);
+    }
+    let Some(commit) = lines(&log)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let containing: Vec<String> =
+        lines(&["branch", "--contains", &commit, "--format=%(refname:short)"])?
+            .into_iter()
+            .filter(|branch| branch != base_branch)
+            .collect();
+    // Several branches can hold the commit (a branch started from another); the one that is
+    // checked out is the one being worked on.
+    let branch = containing
+        .iter()
+        .find(|branch| checkout(branch).is_some())
+        .or(containing.first());
+    Ok(branch.map(|branch| (branch.clone(), checkout(branch))))
+}
+
+/// Branch name of a `refs/herdr/base/<branch>` base, for excluding it from adoption.
+fn base_branch_name(base_ref: &str) -> &str {
+    base_ref
+        .strip_prefix("refs/herdr/base/")
+        .unwrap_or(base_ref)
 }
 
 /// Fetches the change and decides how Herdr should create or reopen its worktree.
@@ -267,6 +381,27 @@ fn prepare_worktree(spec: &WorktreeSpec) -> Result<SourceReady, String> {
     fetch.push(&spec.fetch_refspec);
     fetch.extend(spec.extra_fetch_refspecs.iter().map(String::as_str));
     git(&spec.repo_path, &fetch, FETCH_TIMEOUT).map_err(|err| format!("fetch: {err}"))?;
+    // Work already started elsewhere (another tool, another Herdr) is continued, not
+    // duplicated on a second branch.
+    if let Some(key) = &spec.adopt_branch_for {
+        match find_existing_work(
+            &spec.repo_path,
+            key,
+            base_branch_name(&spec.base_ref),
+            &spec.base_ref,
+        )? {
+            Some((branch, Some(path))) => {
+                return Ok(SourceReady::ExistingWorktree { path, branch })
+            }
+            Some((branch, None)) => {
+                return Ok(SourceReady::CreateWorktree {
+                    branch,
+                    base: spec.base_ref.clone(),
+                })
+            }
+            None => {}
+        }
+    }
     if !branch_exists(&spec.repo_path, &spec.branch)? {
         return Ok(SourceReady::CreateWorktree {
             branch: spec.branch.clone(),
@@ -274,7 +409,10 @@ fn prepare_worktree(spec: &WorktreeSpec) -> Result<SourceReady, String> {
         });
     }
     if let Some(path) = worktree_for_branch(&spec.repo_path, &spec.branch)? {
-        return Ok(SourceReady::ExistingWorktree(path));
+        return Ok(SourceReady::ExistingWorktree {
+            path,
+            branch: spec.branch.clone(),
+        });
     }
     if spec.reuse_branch {
         // Local commits on the branch stay; the fetched remote state is only the base
@@ -347,6 +485,7 @@ mod tests {
                 branch: "review/pr-1".into(),
                 reuse_branch: false,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: None,
             }),
             workspace_label: "#1 Title".into(),
             agent_name_hint: "review-1".into(),
@@ -482,6 +621,7 @@ mod tests {
             branch: "review/pr-1".into(),
             reuse_branch: false,
             extra_fetch_refspecs: Vec::new(),
+            adopt_branch_for: None,
         }
     }
 
@@ -491,6 +631,7 @@ mod tests {
         let repo = test_repo("extra");
         prepare_worktree(&WorktreeSpec {
             extra_fetch_refspecs: vec!["+HEAD:refs/herdr/base/main".into()],
+            adopt_branch_for: None,
             ..spec(&repo)
         })
         .expect("prepared");
@@ -541,6 +682,7 @@ mod tests {
             branch: "feature".into(),
             reuse_branch: true,
             extra_fetch_refspecs: Vec::new(),
+            adopt_branch_for: None,
             ..spec(&repo)
         });
         let _ = std::fs::remove_dir_all(&repo);
@@ -576,7 +718,7 @@ mod tests {
         let ready = prepare_worktree(&spec(&repo));
         let expected = crate::worktree::canonical_or_original(&checkout);
         let found = match &ready {
-            Ok(SourceReady::ExistingWorktree(path)) => {
+            Ok(SourceReady::ExistingWorktree { path, .. }) => {
                 Some(crate::worktree::canonical_or_original(path))
             }
             _ => None,
@@ -584,5 +726,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&checkout);
         assert_eq!(found, Some(expected), "{ready:?}");
+    }
+
+    #[test]
+    fn issue_keys_match_whole_keys_only() {
+        assert!(branch_matches_key(
+            "ar/tech-2096-show-full-pricing",
+            "TECH-2096"
+        ));
+        assert!(branch_matches_key("TECH-2096", "tech-2096"));
+        assert!(!branch_matches_key("ar/tech-20960-other", "TECH-2096"));
+        assert!(!branch_matches_key("ar/hightech-2096", "TECH-2096"));
+        assert!(!branch_matches_key("main", ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_work_for_the_key_is_continued() {
+        let repo = test_repo("adopt");
+        let adopt = |repo: &Path| {
+            prepare_worktree(&WorktreeSpec {
+                branch: "tech-7-new".into(),
+                adopt_branch_for: Some("TECH-7".into()),
+                reuse_branch: true,
+                ..spec(repo)
+            })
+        };
+        git(&repo, &["branch", "ar/tech-7-started", "HEAD"], GIT_TIMEOUT).unwrap();
+        let branch_only = adopt(&repo);
+        let checkout = repo.with_extension("adopt-checkout");
+        let checkout_arg = checkout.display().to_string();
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                &checkout_arg,
+                "ar/tech-7-started",
+            ],
+            GIT_TIMEOUT,
+        )
+        .unwrap();
+        let checked_out = adopt(&repo);
+        let expected_path = crate::worktree::canonical_or_original(&checkout);
+        let found_path = match &checked_out {
+            Ok(SourceReady::ExistingWorktree { path, .. }) => {
+                Some(crate::worktree::canonical_or_original(path))
+            }
+            _ => None,
+        };
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&checkout);
+        assert_eq!(
+            branch_only,
+            Ok(SourceReady::CreateWorktree {
+                branch: "ar/tech-7-started".into(),
+                base: "refs/herdr/pull/1".into(),
+            })
+        );
+        let Ok(SourceReady::ExistingWorktree { branch, .. }) = &checked_out else {
+            panic!("{checked_out:?}");
+        };
+        assert_eq!(branch, "ar/tech-7-started");
+        assert_eq!(found_path, Some(expected_path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unmerged_commits_naming_the_key_find_its_branch() {
+        let repo = test_repo("commits");
+        let commit = |message: &str| {
+            git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=h",
+                    "-c",
+                    "user.email=h@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+                GIT_TIMEOUT,
+            )
+            .unwrap()
+        };
+        let base = String::from_utf8(
+            git_output(&repo, &["rev-parse", "--abbrev-ref", "HEAD"], GIT_TIMEOUT)
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        // TECH-8 already landed on the base; a later branch contains it but is not its work.
+        commit("[TECH-8] merged earlier");
+        git(&repo, &["branch", "ar/unrelated"], GIT_TIMEOUT).unwrap();
+        git(
+            &repo,
+            &["checkout", "--quiet", "-b", "ar/full-pricing"],
+            GIT_TIMEOUT,
+        )
+        .unwrap();
+        commit("[TECH-9] Show full pricing");
+        git(&repo, &["checkout", "--quiet", &base], GIT_TIMEOUT).unwrap();
+
+        let found = find_existing_work(&repo, "tech-9", &base, &base);
+        let merged = find_existing_work(&repo, "TECH-8", &base, &base);
+        let _ = std::fs::remove_dir_all(&repo);
+        assert_eq!(found, Ok(Some(("ar/full-pricing".to_string(), None))));
+        assert_eq!(merged, Ok(None));
     }
 }

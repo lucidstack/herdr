@@ -300,6 +300,16 @@ fn work_item_command() -> Command {
                 .about("Show a dismissed or snoozed item again")
                 .arg(item()),
         )
+        .subcommand(
+            Command::new("link")
+                .about("Make an existing workspace the item's workspace")
+                .arg(item())
+                .arg(
+                    Arg::new("workspace_id")
+                        .value_name("WORKSPACE_ID")
+                        .required(true),
+                ),
+        )
 }
 
 fn tab_command() -> Command {

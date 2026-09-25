@@ -4827,6 +4827,22 @@
           ],
           "type": "object"
         },
+        "WorkItemLinkParams": {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "Existing workspace that becomes the item's workspace.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkItemTarget": {
           "properties": {
             "item_id": {
@@ -5657,6 +5673,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.link",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemLinkParams"
             }
           },
           "required": [

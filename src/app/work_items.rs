@@ -336,7 +336,7 @@ impl App {
                     self.fail_work_item_workspace(job_id, "worktree.create is unavailable".into());
                 }
             }
-            (WorkspaceSource::Worktree(spec), SourceReady::ExistingWorktree(path)) => {
+            (WorkspaceSource::Worktree(spec), SourceReady::ExistingWorktree { path, branch }) => {
                 let opened = self.work_items_api(Method::WorktreeOpen(WorktreeOpenParams {
                     workspace_id: None,
                     cwd: Some(spec.repo_path.display().to_string()),
@@ -347,6 +347,33 @@ impl App {
                     trust_repository: false,
                 }));
                 match opened {
+                    // Already a workspace here: it is someone's live work, so link it
+                    // without adding tabs or typing an agent into its shell.
+                    Ok(ResponseResult::WorktreeOpened {
+                        workspace,
+                        already_open: true,
+                        ..
+                    }) => {
+                        if let Some(job) = self.work_items.job_mut(job_id) {
+                            job.branch = Some(branch.clone());
+                        }
+                        self.work_items
+                            .link_workspace(job_id, &workspace.workspace_id);
+                        self.work_items.update_progress(job_id, |progress| {
+                            provision::set_step(
+                                progress,
+                                WorkItemStep::Checkout,
+                                WorkItemStepStatus::Done,
+                                Some(format!("linked to the open workspace on {branch}")),
+                            );
+                            provision::end_unfinished(
+                                progress,
+                                WorkItemStepStatus::Skipped,
+                                "the workspace was already open",
+                            );
+                        });
+                        self.work_items.finish_job_if_done(job_id);
+                    }
                     Ok(ResponseResult::WorktreeOpened {
                         workspace,
                         tab,
@@ -355,7 +382,7 @@ impl App {
                         ..
                     }) => {
                         if let Some(job) = self.work_items.job_mut(job_id) {
-                            job.branch = Some(spec.branch.clone());
+                            job.branch = Some(branch.clone());
                         }
                         self.work_item_workspace_ready(
                             job_id,
@@ -363,7 +390,7 @@ impl App {
                             tab,
                             root_pane,
                             &worktree.path,
-                            Some(format!("reopened {}", spec.branch)),
+                            Some(format!("reopened {branch}")),
                             now,
                         );
                     }
@@ -1112,6 +1139,36 @@ mod tests {
     }
 
     #[test]
+    fn linking_attaches_an_open_workspace_to_an_item() {
+        use crate::api::schema::WorkItemLinkParams;
+
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("started")];
+        let source = FakeSource::with_items(vec![source_item("a")]);
+        app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        let link = |app: &mut App, workspace_id: &str| {
+            app.handle_api_request(request(Method::WorkItemLink(WorkItemLinkParams {
+                item_id: "fake:a".into(),
+                workspace_id: workspace_id.into(),
+            })))
+        };
+        let missing: ErrorResponse =
+            serde_json::from_str(&link(&mut app, "w-nope")).expect("error response");
+        assert_eq!(missing.error.code, "workspace_not_found");
+
+        let workspace_id = app.public_workspace_id(0);
+        let linked = link(&mut app, &workspace_id);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&linked).is_ok(),
+            "{linked}"
+        );
+        let item = &list(&mut app)[0];
+        assert_eq!(item.workspace_id.as_deref(), Some(workspace_id.as_str()));
+        assert_eq!(item.phase, WorkItemPhase::Local);
+    }
+
+    #[test]
     fn external_choice_awaits_until_the_source_drops_the_item() {
         let mut app = test_app();
         let source = FakeSource::with_items(vec![source_item("a")]);
@@ -1306,6 +1363,7 @@ mod tests {
                 branch: "review/pr-1".into(),
                 reuse_branch: false,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: None,
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
@@ -1499,6 +1557,7 @@ mod tests {
                 branch: "review/pr-1".into(),
                 reuse_branch: false,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: None,
             }),
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),

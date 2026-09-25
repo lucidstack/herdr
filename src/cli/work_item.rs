@@ -1,5 +1,6 @@
 use crate::api::schema::{
-    EmptyParams, Method, WorkItemChooseParams, WorkItemHideParams, WorkItemTarget,
+    EmptyParams, Method, WorkItemChooseParams, WorkItemHideParams, WorkItemLinkParams,
+    WorkItemTarget,
 };
 
 // Output is the JSON API response, like the other socket commands.
@@ -61,6 +62,16 @@ pub(super) fn run_work_item_command(args: &[String]) -> std::io::Result<i32> {
                 }),
             )
         }
+        "link" => match rest {
+            [item_id, workspace_id] => send(
+                "cli:work-item:link",
+                Method::WorkItemLink(WorkItemLinkParams {
+                    item_id: item_id.clone(),
+                    workspace_id: super::normalize_workspace_id(workspace_id),
+                }),
+            ),
+            _ => usage("herdr work-item link ITEM_ID WORKSPACE_ID"),
+        },
         "unhide" => match rest {
             [item_id] => send(
                 "cli:work-item:unhide",
@@ -115,6 +126,7 @@ fn print_work_item_help() {
     eprintln!("  herdr work-item dismiss ITEM_ID");
     eprintln!("  herdr work-item snooze ITEM_ID [--for DURATION]   (default 1h; e.g. 30m, 2h, 1d)");
     eprintln!("  herdr work-item unhide ITEM_ID");
+    eprintln!("  herdr work-item link ITEM_ID WORKSPACE_ID");
 }
 
 #[cfg(test)]

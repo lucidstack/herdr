@@ -594,6 +594,7 @@ pub(super) enum ClientContextMenuAction {
     WorkItemSnoozeDay,
     WorkItemDismiss,
     WorkItemUnhide,
+    WorkItemLink,
 }
 
 #[derive(Debug)]
@@ -623,6 +624,8 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_progress: bool,
         hidden: bool,
+        /// The focused workspace, when it could become the item's workspace.
+        link_target: Option<String>,
     },
 }
 

@@ -44,6 +44,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.rename",
     "work_item.choose",
     "work_item.hide",
+    "work_item.link",
     "work_item.mark_seen",
     "work_item.unhide",
     "workspace.close",
@@ -307,6 +308,10 @@ mod tests {
         assert_eq!(
             actual.remove("work_item.hide").as_deref(),
             Some("dde46d5762445ef1f149d25707f5d5e497f3f5bfd66295a9b43e59071dda3c20")
+        );
+        assert_eq!(
+            actual.remove("work_item.link").as_deref(),
+            Some("8fd885be89116d0cf5831b67386462d00740b8224a79060bddbead7d5892d3e4")
         );
         assert_eq!(
             actual.remove("work_item.unhide").as_deref(),

@@ -17,6 +17,7 @@ use crate::config::{
 
 use super::github::{one_line, slug, truncate_chars};
 use super::process::{failure_detail, run_with_input, run_with_timeout};
+use super::provision::find_existing_work;
 use super::source::{
     ItemChoices, PreparedItem, ProvisionPlan, SourceItem, WorkItemSource, WorkspaceLayout,
     WorkspaceSource, WorktreeSpec,
@@ -141,6 +142,11 @@ pub(crate) struct JiraDetail {
     /// Branch new work starts from, when the project is mapped.
     #[serde(default)]
     pub base_branch: String,
+    /// A local branch (with its worktree, when checked out) that already names the issue.
+    #[serde(default)]
+    pub existing_branch: Option<String>,
+    #[serde(default)]
+    pub existing_worktree: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,7 +527,8 @@ fn brief(item: &WorkItem, detail: &JiraDetail, agent_starts: bool, branch: &str)
         "You are working on Jira issue {key}: {title}\n\
          {url}\n\
          {kind} · {priority} · {status}{labels}\n\
-         This directory is a worktree on the new branch {branch} (from {base}).\n\
+         This directory is a worktree on the branch {branch} (work starts from {base}; a branch \
+         you already had keeps its commits).\n\
          \n\
          Description:\n\
          {description}\n\
@@ -609,13 +616,26 @@ impl WorkItemSource for JiraSource {
             }
         };
         let mut error = None;
-        let base_branch = match self.project(project_key(&item.external_id)) {
+        let project = self.project(project_key(&item.external_id));
+        let base_branch = match project {
             Some(project) => self.base_branch(project).unwrap_or_else(|err| {
                 error = Some(err);
                 String::new()
             }),
             None => String::new(),
         };
+        // Shown in the dialog; the worktree worker looks again when a choice is made.
+        let (existing_branch, existing_worktree) = project
+            .and_then(|project| {
+                let path = crate::worktree::expand_tilde_absolute_path(&project.path);
+                let base_rev = format!("{}/{base_branch}", project.remote);
+                find_existing_work(&path, &item.external_id, &base_branch, &base_rev)
+                    .ok()
+                    .flatten()
+            })
+            .map_or((None, None), |(branch, path)| {
+                (Some(branch), path.map(|path| path.display().to_string()))
+            });
         let name = |named: Option<Named>| named.map(|named| named.name).unwrap_or_default();
         let detail = JiraDetail {
             description: fields
@@ -641,6 +661,8 @@ impl WorkItemSource for JiraSource {
                 })
                 .collect(),
             base_branch,
+            existing_branch,
+            existing_worktree,
         };
         let summary = [
             detail.issue_type.clone(),
@@ -677,22 +699,39 @@ impl WorkItemSource for JiraSource {
             .agent
             .is_empty()
             .then(|| format!("No agent configured for Jira project {project}"));
+        let existing = item_detail(item).and_then(|detail| {
+            detail
+                .existing_branch
+                .map(|branch| (branch, detail.existing_worktree))
+        });
+        let (local_label, where_) = match &existing {
+            Some((branch, Some(_))) => (
+                format!("Continue on {branch}"),
+                "Reopens your worktree".to_string(),
+            ),
+            Some((branch, None)) => (
+                format!("Continue on {branch}"),
+                "Worktree on your existing branch".to_string(),
+            ),
+            None => (
+                "Work on it locally".to_string(),
+                "Worktree on a new branch".to_string(),
+            ),
+        };
         let choices = vec![
             WorkItemChoiceInfo {
                 choice_id: LOCAL_CHOICE_ID.into(),
-                label: "Work on it locally".into(),
-                description: Some(
-                    "Worktree on a new branch; the agent proposes a plan and waits".into(),
-                ),
+                label: local_label,
+                description: Some(format!("{where_}; the agent proposes a plan and waits")),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone(),
             },
             WorkItemChoiceInfo {
                 choice_id: AGENT_CHOICE_ID.into(),
                 label: "Ask agent to implement it".into(),
-                description: Some(
-                    "Worktree on a new branch; the agent implements it, no commit or push".into(),
-                ),
+                description: Some(format!(
+                    "{where_}; the agent implements it, no commit or push"
+                )),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone().or(no_agent),
             },
@@ -744,7 +783,10 @@ impl WorkItemSource for JiraSource {
         let detail = item_detail(item)
             .filter(|detail| !detail.base_branch.is_empty())
             .ok_or("issue details are not available yet; try again shortly")?;
-        let branch = branch_name(&project.branch_template, key, &item.title);
+        let branch = detail
+            .existing_branch
+            .clone()
+            .unwrap_or_else(|| branch_name(&project.branch_template, key, &item.title));
         let base = &detail.base_branch;
         Ok(ProvisionPlan {
             source: WorkspaceSource::Worktree(WorktreeSpec {
@@ -756,6 +798,7 @@ impl WorkItemSource for JiraSource {
                 branch: branch.clone(),
                 reuse_branch: true,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: Some(key.clone()),
             }),
             workspace_label: truncate_chars(&format!("{key} {}", item.title), MAX_LABEL_CHARS),
             agent_name_hint: key.to_ascii_lowercase(),
@@ -842,6 +885,8 @@ mod tests {
                 body: "Design is in Figma.".into(),
             }],
             base_branch: "master".into(),
+            existing_branch: None,
+            existing_worktree: None,
         }
     }
 
@@ -906,6 +951,7 @@ mod tests {
                 branch: "ar/TECH-2031-add-manual-vehicle-entry-form".into(),
                 reuse_branch: true,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: Some("TECH-2031".into()),
             })
         );
         assert!(plan
@@ -913,6 +959,31 @@ mod tests {
             .contains("Jira issue TECH-2031: Add manual vehicle entry form"));
         assert!(plan.brief.contains("- Tony: Design is in Figma."));
         assert!(plan.brief.contains("Do not commit"));
+    }
+
+    #[test]
+    fn existing_work_on_the_issue_is_offered_and_continued() {
+        let source = source();
+        let started = JiraDetail {
+            existing_branch: Some("ar/tech-2031-started".into()),
+            existing_worktree: Some("/w/app/ar-tech-2031-started".into()),
+            ..detail()
+        };
+        let item = item("TECH-2031", Some(&started));
+        let choices = source.choices(&item);
+        assert_eq!(choices.choices[0].label, "Continue on ar/tech-2031-started");
+        assert!(choices.choices[0]
+            .description
+            .as_deref()
+            .is_some_and(|description| description.starts_with("Reopens your worktree")));
+        let plan = source
+            .provision_plan(&item, "local", Path::new("/w"))
+            .expect("plan");
+        let WorkspaceSource::Worktree(spec) = &plan.source else {
+            panic!("worktree");
+        };
+        assert_eq!(spec.branch, "ar/tech-2031-started");
+        assert!(plan.brief.contains("on the branch ar/tech-2031-started"));
     }
 
     #[test]

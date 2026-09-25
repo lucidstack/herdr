@@ -48,6 +48,9 @@ pub(crate) struct WorktreeSpec {
     /// Work on `branch` when it already exists locally (the pull request's own branch).
     /// Otherwise an existing `branch` is kept and a suffixed branch continues from it.
     pub reuse_branch: bool,
+    /// Continue an existing worktree or local branch whose name contains this issue key
+    /// instead of creating `branch`.
+    pub adopt_branch_for: Option<String>,
 }
 
 /// A scratch directory holding one file produced by a command, e.g. a diff.

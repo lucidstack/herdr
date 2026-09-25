@@ -12,6 +12,13 @@ pub struct WorkItemChooseParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemLinkParams {
+    pub item_id: String,
+    /// Existing workspace that becomes the item's workspace.
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItemHideParams {
     pub item_id: String,
     /// Hide for this many seconds. Absent dismisses the item until it is requested again.

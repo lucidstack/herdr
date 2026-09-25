@@ -1,5 +1,6 @@
 use crate::api::schema::{
-    ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemTarget,
+    ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams,
+    WorkItemLinkParams, WorkItemTarget,
 };
 use crate::app::App;
 
@@ -104,6 +105,29 @@ impl App {
             .snooze_seconds
             .map(|seconds| crate::work_items::unix_now().saturating_add(seconds.max(1)));
         match self.work_items.hide(&params.item_id, until) {
+            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Err(_) => not_found(id, &params.item_id),
+        }
+    }
+
+    pub(super) fn handle_work_item_link(
+        &mut self,
+        id: String,
+        params: WorkItemLinkParams,
+    ) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        let Some(ws_idx) = self.parse_workspace_id(&params.workspace_id) else {
+            return encode_error(
+                id,
+                "workspace_not_found",
+                format!("unknown workspace {}", params.workspace_id),
+            );
+        };
+        // Stored as the stable public id, whatever form the caller used.
+        let workspace_id = self.public_workspace_id(ws_idx);
+        match self.work_items.link(&params.item_id, &workspace_id) {
             Ok(()) => encode_success(id, ResponseResult::Ok {}),
             Err(_) => not_found(id, &params.item_id),
         }

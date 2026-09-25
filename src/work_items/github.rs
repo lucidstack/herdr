@@ -1308,6 +1308,7 @@ impl WorkItemSource for GithubSource {
                         branch: format!("review/pr-{number}"),
                         reuse_branch: false,
                         extra_fetch_refspecs: base_refspec.into_iter().collect(),
+                        adopt_branch_for: None,
                     })
                 }
                 (Some(repo), _) => WorkspaceSource::Worktree(head_branch_spec(repo, &detail)?),
@@ -1462,6 +1463,7 @@ fn head_branch_spec(
         branch: head.clone(),
         reuse_branch: true,
         extra_fetch_refspecs: Vec::new(),
+        adopt_branch_for: None,
     })
 }
 
@@ -1487,6 +1489,7 @@ fn issue_branch_spec(
         branch: issue_branch(detail.number, title),
         reuse_branch: true,
         extra_fetch_refspecs: Vec::new(),
+        adopt_branch_for: None,
     })
 }
 
@@ -1875,6 +1878,7 @@ mod tests {
                 branch: "review/pr-5".into(),
                 reuse_branch: false,
                 extra_fetch_refspecs: vec!["+refs/heads/main:refs/remotes/origin/main".into()],
+                adopt_branch_for: None,
             })
         );
         assert_eq!(
@@ -2100,6 +2104,7 @@ mod tests {
                 branch: "feature".into(),
                 reuse_branch: true,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: None,
             })
         );
         assert!(!plan.delete_branch);
@@ -2265,6 +2270,7 @@ mod tests {
                 branch: "issue/5-crash-when-saving-empty-name".into(),
                 reuse_branch: true,
                 extra_fetch_refspecs: Vec::new(),
+                adopt_branch_for: None,
             })
         );
         assert!(plan.brief.contains("Saving with an empty name panics."));

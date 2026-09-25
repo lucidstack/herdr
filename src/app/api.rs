@@ -1082,6 +1082,11 @@ impl App {
                 self.sync_work_item_events();
                 return response;
             }
+            Method::WorkItemLink(params) => {
+                let response = self.handle_work_item_link(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),

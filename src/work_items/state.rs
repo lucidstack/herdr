@@ -307,6 +307,30 @@ impl WorkItemsState {
         Ok(changed)
     }
 
+    /// Makes `workspace_id` the item's workspace, taking it from any other item: work the
+    /// user already started elsewhere is attached instead of provisioned.
+    pub(crate) fn link(&mut self, key: &str, workspace_id: &str) -> Result<bool, NotFound> {
+        if self.get(key).is_none() {
+            return Err(NotFound);
+        }
+        let mut changed = false;
+        for other in &mut self.items {
+            if other.key != key && other.workspace_id.as_deref() == Some(workspace_id) {
+                other.unlink_workspace();
+                changed = true;
+            }
+        }
+        let item = self.get_mut(key).ok_or(NotFound)?;
+        let before = item.clone();
+        item.workspace_id = Some(workspace_id.to_string());
+        item.phase = WorkItemPhase::Local;
+        item.seen = true;
+        item.provisioning = None;
+        item.dismissed = false;
+        item.snoozed_until = None;
+        Ok(changed || *item != before)
+    }
+
     /// Ends snoozes that passed `now` (Unix seconds); woken items count as new again.
     pub(crate) fn expire_snoozes(&mut self, now: u64) -> bool {
         let mut changed = false;
@@ -519,6 +543,23 @@ mod tests {
         assert_eq!(state.unhide("gh:a"), Ok(true));
         assert!(!state.get("gh:a").expect("item").dismissed);
         assert_eq!(state.unhide("gh:missing"), Err(NotFound));
+    }
+
+    #[test]
+    fn linking_moves_a_workspace_to_the_item_and_closing_it_unlinks() {
+        let mut state = state_with("gh", &["a", "b"]);
+        assert_eq!(state.link("gh:a", "w1"), Ok(true));
+        assert_eq!(state.link("gh:b", "w1"), Ok(true));
+        let a = state.get("gh:a").expect("a");
+        assert_eq!(a.workspace_id, None);
+        assert_eq!(a.phase, WorkItemPhase::Pending);
+        let b = state.get("gh:b").expect("b");
+        assert_eq!(b.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(b.phase, WorkItemPhase::Local);
+        assert!(b.seen);
+        assert!(state.workspace_closed("w1"));
+        assert_eq!(state.get("gh:b").expect("b").workspace_id, None);
+        assert_eq!(state.link("gh:missing", "w1"), Err(NotFound));
     }
 
     #[test]

@@ -87,14 +87,14 @@ path = "~/src/app"
 branch_template = "{key_lower}-{slug}"   # {key}, {key_lower} and {slug} are replaced
 ```
 
-Issues of a mapped project can be worked on locally on a new branch from `base_branch`, or from the remote's default branch when unset. The agent brief carries the description, type, priority, status, labels and comments. Issues of unmapped projects can only be opened in Jira.
+Issues of a mapped project can be worked on locally on a new branch from `base_branch`, or from the remote's default branch when unset. When the clone already has a worktree or local branch whose name contains the issue key (from Orca, `git worktree add` or another Herdr), the choice reads **Continue on <branch>** and reopens that work instead of starting a new branch. A worktree that is already open as a workspace in this Herdr is linked as it is, without new tabs or agent. The agent brief carries the description, type, priority, status, labels and comments. Issues of unmapped projects can only be opened in Jira.
 
 ## Using the inbox
 
 - **●** marks a new item, **·** one you have seen, and **✓** one that no longer needs you but still has a workspace. A spinner means Herdr is waiting: for you to finish on GitHub, or for a workspace to be prepared.
 - **Click** an item to choose what to do. The dialog highlights a sensible default; use the arrow keys and Enter, or click a choice. Once an item has a workspace, clicking the item goes to it, and the workspace is listed under its item rather than in the spaces list.
 - While a workspace is being prepared, the dialog shows each step: the worktree, then the agent brief. The brief counts as delivered only once the agent starts working. If the agent first asks you something, such as whether to trust the folder, the brief waits for your answer.
-- **Right-click** an item for more: open it in the browser, show progress, snooze it for an hour or a day, dismiss it, show it again, or remove its worktree.
+- **Right-click** an item for more: open it in the browser, show progress, snooze it for an hour or a day, dismiss it, show it again, remove its worktree, or **link it to the current workspace** when you already started the work somewhere Herdr did not detect. Closing a linked workspace unlinks the item again.
 - A dismissed item stays hidden until it is requested again. A snoozed item comes back as new when the snooze ends, even across restarts.
 - Click the **inbox** header to give the inbox most of the sidebar. The **↓ N more** and **↑ N more** rows page through long lists, and the mouse wheel scrolls one item at a time.
 - `prefix+i` opens a keyboard list of every item, hidden ones last: `j`/`k` or the arrow keys select, Enter acts like a click, `m` opens the item's menu, `d` dismisses, `s` snoozes for an hour and `u` shows a hidden item again. Change the key with `keys.inbox`.
@@ -115,6 +115,7 @@ herdr work-item choose 'github:acme/app#42' local
 herdr work-item snooze 'github:acme/app#42' --for 2h
 herdr work-item dismiss 'jira:APP-7'
 herdr work-item unhide 'jira:APP-7'
+herdr work-item link 'jira:APP-7' w3
 ```
 
 Item state lives in `work-items.json` in the session directory. Remove a review worktree through its right-click menu, or with `herdr worktree remove`, so the hooks run and the review branch is cleaned up.

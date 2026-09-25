@@ -80,6 +80,7 @@ impl ClientContextMenuOverlay {
                 is_linked_worktree,
                 has_progress,
                 hidden,
+                link_target,
                 ..
             } => {
                 let mut items = Vec::new();
@@ -100,6 +101,9 @@ impl ClientContextMenuOverlay {
                         item("Snooze for 1 day", Action::WorkItemSnoozeDay),
                         item("Dismiss", Action::WorkItemDismiss),
                     ]);
+                }
+                if link_target.is_some() {
+                    items.push(item("Link to current workspace", Action::WorkItemLink));
                 }
                 if workspace_id.is_some() {
                     items.push(if *is_linked_worktree {
@@ -251,8 +255,15 @@ impl ClientShellState {
             ClientContextMenuTarget::WorkItem {
                 item_id,
                 workspace_id,
+                link_target,
                 ..
-            } => self.activate_work_item_context_action(item_id, workspace_id, action, outcome),
+            } => self.activate_work_item_context_action(
+                item_id,
+                workspace_id,
+                link_target,
+                action,
+                outcome,
+            ),
         }
         outcome.repaint = true;
     }

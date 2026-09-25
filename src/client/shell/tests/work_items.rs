@@ -467,3 +467,37 @@ fn collapsed_sidebar_badge_counts_new_items_and_opens_the_inbox() {
         Some(ClientShellOverlay::Inbox(inbox)) if inbox.items.len() == 2
     ));
 }
+
+#[test]
+fn item_menu_links_the_focused_workspace() {
+    let mut state = shell_with(vec![item("7")]);
+    state.compose(106, 30).expect("frame");
+    let rect = state.hits.work_items[0].rect;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        rect.x + 2,
+        rect.y,
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    let link = menu
+        .items()
+        .iter()
+        .position(|entry| entry.label == "Link to current workspace")
+        .expect("link offered");
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[link];
+    let input = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(matches!(
+        endpoint_methods(&input)[..],
+        [Method::WorkItemLink(params)]
+            if params.item_id == "github:o/r#7" && params.workspace_id == "ws_1"
+    ));
+}

@@ -384,6 +384,16 @@ impl WorkItems {
         Ok(())
     }
 
+    /// Attaches an existing workspace to an item; a running provisioning job is dropped
+    /// (its late results are ignored by job id).
+    pub(crate) fn link(&mut self, key: &str, workspace_id: &str) -> Result<(), NotFound> {
+        if self.state.link(key, workspace_id)? {
+            self.jobs.remove(key);
+            self.changed();
+        }
+        Ok(())
+    }
+
     pub(crate) fn workspace_closed(&mut self, workspace_id: &str) {
         // Late worker results for a dropped job are ignored by job id.
         self.jobs

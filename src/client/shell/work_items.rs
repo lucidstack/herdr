@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::api::schema::{
     Method, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemInfo,
-    WorkItemPhase, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
+    WorkItemLinkParams, WorkItemPhase, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
 };
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -892,6 +892,11 @@ impl ClientShellState {
                 .is_some_and(|worktree| worktree.is_linked_worktree),
             has_progress: item.provisioning.is_some(),
             hidden: is_hidden(item),
+            link_target: self
+                .snapshot
+                .as_deref()
+                .and_then(|snapshot| snapshot.focused_workspace_id.clone())
+                .filter(|focused| item.workspace_id.as_deref() != Some(focused.as_str())),
         };
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target,
@@ -906,6 +911,7 @@ impl ClientShellState {
         &mut self,
         item_id: String,
         workspace_id: Option<String>,
+        link_target: Option<String>,
         action: ClientContextMenuAction,
         outcome: &mut ClientShellInput,
     ) {
@@ -948,6 +954,17 @@ impl ClientShellState {
             }
             ClientContextMenuAction::WorkItemDismiss => {
                 self.push_endpoint_method(hide(None), outcome)
+            }
+            ClientContextMenuAction::WorkItemLink => {
+                if let Some(workspace_id) = link_target {
+                    self.push_endpoint_method(
+                        Method::WorkItemLink(WorkItemLinkParams {
+                            item_id: item_id.clone(),
+                            workspace_id,
+                        }),
+                        outcome,
+                    );
+                }
             }
             ClientContextMenuAction::WorkItemUnhide => self
                 .push_endpoint_method(Method::WorkItemUnhide(WorkItemTarget { item_id }), outcome),
