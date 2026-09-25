@@ -4,6 +4,9 @@ pub const DEFAULT_GITHUB_REVIEW_REQUESTED_QUERY: &str =
     "is:pr is:open review-requested:@me archived:false";
 pub const DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY: &str =
     "is:pr is:open author:@me review:changes_requested archived:false";
+pub const DEFAULT_GITHUB_CI_FAILING_QUERY: &str =
+    "is:pr is:open author:@me status:failure archived:false";
+pub const DEFAULT_GITHUB_ASSIGNED_QUERY: &str = "is:issue is:open assignee:@me archived:false";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
@@ -28,7 +31,13 @@ pub struct GithubWorkItemsConfig {
     /// Workflows for review requests; the first block whose repos match applies.
     pub review_requested: Vec<ReviewRequestedConfig>,
     /// Workflows for your pull requests with changes requested; the first block whose repos match applies.
-    pub changes_requested: Vec<ChangesRequestedConfig>,
+    pub changes_requested: Vec<BranchWorkflowConfig>,
+    /// Workflows for your pull requests with failing checks; the first block whose repos match applies.
+    pub ci_failing: Vec<BranchWorkflowConfig>,
+    /// Workflows for issues assigned to you; the first block whose repos match applies.
+    pub assigned: Vec<BranchWorkflowConfig>,
+    /// Workflows for issues and pull requests that mention you; the first block whose repos match applies.
+    pub mentioned: Vec<BranchWorkflowConfig>,
 }
 
 impl Default for GithubWorkItemsConfig {
@@ -41,6 +50,9 @@ impl Default for GithubWorkItemsConfig {
             repos: Vec::new(),
             review_requested: Vec::new(),
             changes_requested: Vec::new(),
+            ci_failing: Vec::new(),
+            assigned: Vec::new(),
+            mentioned: Vec::new(),
         }
     }
 }
@@ -52,6 +64,12 @@ pub struct GithubQueriesConfig {
     pub review_requested: String,
     /// Search query for your pull requests with changes requested. Empty disables the event. Default: "is:pr is:open author:@me review:changes_requested archived:false".
     pub changes_requested: String,
+    /// Search query for your pull requests with failing checks. Empty disables the event. Default: "is:pr is:open author:@me status:failure archived:false".
+    pub ci_failing: String,
+    /// Search query for issues assigned to you. Empty disables the event. Default: "is:issue is:open assignee:@me archived:false".
+    pub assigned: String,
+    /// Search query for issues and pull requests that mention you, e.g. "is:open mentions:@me". Empty disables the event. Default: "".
+    pub mentioned: String,
 }
 
 impl Default for GithubQueriesConfig {
@@ -59,6 +77,9 @@ impl Default for GithubQueriesConfig {
         Self {
             review_requested: DEFAULT_GITHUB_REVIEW_REQUESTED_QUERY.into(),
             changes_requested: DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY.into(),
+            ci_failing: DEFAULT_GITHUB_CI_FAILING_QUERY.into(),
+            assigned: DEFAULT_GITHUB_ASSIGNED_QUERY.into(),
+            mentioned: String::new(),
         }
     }
 }
@@ -139,22 +160,24 @@ impl ReviewRequestedConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
-pub struct ChangesRequestedConfig {
+pub struct BranchWorkflowConfig {
     /// Repositories (owner/name) this block applies to. Empty applies to every repository.
     pub repos: Vec<String>,
-    /// What happens to the workspace once changes are no longer requested. Default: "keep".
+    /// What happens to the workspace once the event no longer applies. Default: "keep".
     pub on_resolved: OnResolvedConfig,
     /// Delete the local branch when a worktree created for it is removed. Default: false.
     pub delete_branch: bool,
-    /// Agent started in the first tab. Empty disables the agent-led choice. Default: "claude".
+    /// Agent started in the first tab. Empty disables the agent-led choices. Default: "claude".
     pub agent: String,
     /// Command run in the editor tab. Empty disables the tab. Default: "nvim .".
     pub editor_command: String,
     /// Command run in the Git tab. Empty disables the tab. Default: "lazygit".
     pub lazygit_command: String,
+    /// Command showing a downloaded thread when there is no checkout; {file} is the file. Empty disables the tab. Default: "nvim -R {file}".
+    pub viewer_command: String,
 }
 
-impl Default for ChangesRequestedConfig {
+impl Default for BranchWorkflowConfig {
     fn default() -> Self {
         Self {
             repos: Vec::new(),
@@ -163,11 +186,12 @@ impl Default for ChangesRequestedConfig {
             agent: "claude".into(),
             editor_command: "nvim .".into(),
             lazygit_command: "lazygit".into(),
+            viewer_command: "nvim -R {file}".into(),
         }
     }
 }
 
-impl ChangesRequestedConfig {
+impl BranchWorkflowConfig {
     pub fn applies_to(&self, repo: &str) -> bool {
         repo_matches(&self.repos, repo)
     }

@@ -38,7 +38,7 @@ pub use self::{
     theme::{parse_color, CustomThemeColors, ModeThemeColors, ThemeConfig, THEME_NAMES},
     window_title::{WindowTitlePart, WindowTitleTemplate, WindowTitleToken},
     work_items::{
-        ChangesRequestedConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
+        BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
         ReviewRequestedConfig, WorkItemsConfig,
     },
 };
