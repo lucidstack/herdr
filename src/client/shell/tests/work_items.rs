@@ -29,6 +29,7 @@ fn item(id: &str) -> WorkItemInfo {
                 description: None,
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: None,
+                confirm: None,
             },
             WorkItemChoiceInfo {
                 choice_id: "github".into(),
@@ -38,6 +39,7 @@ fn item(id: &str) -> WorkItemInfo {
                     url: format!("https://github.com/o/r/pull/{id}"),
                 },
                 disabled_reason: None,
+                confirm: None,
             },
         ],
         default_choice_id: Some("github".into()),
@@ -189,6 +191,7 @@ fn dialog_lists_choices_and_arrow_keys_skip_disabled_ones() {
             description: None,
             action: WorkItemChoiceAction::ProvisionWorkspace,
             disabled_reason: Some("No agent configured".into()),
+            confirm: None,
         },
     );
     blocked.default_choice_id = Some("local".into());
@@ -500,4 +503,40 @@ fn item_menu_links_the_focused_workspace() {
         [Method::WorkItemLink(params)]
             if params.item_id == "github:o/r#7" && params.workspace_id == "ws_1"
     ));
+}
+
+#[test]
+fn irreversible_choice_runs_only_after_a_second_confirm() {
+    let mut ready = item("7");
+    ready.seen = true;
+    ready.choices.insert(
+        0,
+        WorkItemChoiceInfo {
+            choice_id: "merge_squash".into(),
+            label: "Squash and merge".into(),
+            description: None,
+            action: WorkItemChoiceAction::Perform,
+            disabled_reason: None,
+            confirm: Some("Merge #7 into main? This cannot be undone.".into()),
+        },
+    );
+    ready.default_choice_id = Some("merge_squash".into());
+    let mut state = shell_with(vec![ready]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
+
+    let first = state.handle_input_bytes(b"\r");
+    assert!(endpoint_methods(&first).is_empty());
+    assert!(screen_text(&mut state).contains("This cannot be undone"));
+    // Moving away cancels the pending confirmation.
+    state.handle_input_bytes(b"j");
+    state.handle_input_bytes(b"k");
+    assert!(endpoint_methods(&state.handle_input_bytes(b"\r")).is_empty());
+
+    let second = state.handle_input_bytes(b"\r");
+    assert!(matches!(
+        endpoint_methods(&second)[..],
+        [Method::WorkItemChoose(params)] if params.choice_id == "merge_squash"
+    ));
+    assert!(state.overlay.is_none());
 }

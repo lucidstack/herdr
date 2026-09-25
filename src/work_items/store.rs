@@ -156,6 +156,8 @@ mod tests {
                 finished: false,
             }),
             resolve_error: Some("dirty".into()),
+            action_in_flight: false,
+            action_error: None,
         }
     }
 
@@ -188,6 +190,8 @@ mod tests {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
+            action_in_flight: false,
+            action_error: None,
             ..original
         };
         assert_eq!(

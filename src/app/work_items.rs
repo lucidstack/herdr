@@ -233,6 +233,32 @@ impl App {
         });
     }
 
+    /// Starts a `Perform` choice (e.g. a merge) on a background thread.
+    pub(super) fn start_work_item_action(
+        &mut self,
+        key: &str,
+        choice_id: &str,
+    ) -> Result<(), (&'static str, String)> {
+        let Some(item) = self.work_items.get(key).cloned() else {
+            return Err(("work_item_not_found", format!("unknown work item {key}")));
+        };
+        let Some(source) = self.work_items.source(&item.source_id).cloned() else {
+            return Err(("work_item_not_found", format!("unknown work item {key}")));
+        };
+        self.work_items
+            .begin_action(key)
+            .map_err(|code| (code, format!("{key} is already being handled")))?;
+        let event_tx = self.event_tx.clone();
+        let key = key.to_string();
+        let choice_id = choice_id.to_string();
+        std::thread::spawn(move || {
+            let result = source.perform(&item, &choice_id);
+            send_event(&event_tx, WorkItemsEvent::Performed { key, result });
+        });
+        self.request_work_items_render();
+        Ok(())
+    }
+
     /// Validates and starts local provisioning for `key`. Errors are `(code, message)`.
     pub(super) fn start_work_item_provisioning(
         &mut self,
@@ -1136,6 +1162,32 @@ mod tests {
         assert!(!items[0].seen);
         assert_eq!(items[0].phase, WorkItemPhase::Pending);
         assert_eq!(source.prepare_calls(), 1);
+    }
+
+    #[test]
+    fn performed_choice_leaves_on_success_and_comes_back_with_the_reason_on_failure() {
+        let mut app = test_app();
+        let source = FakeSource::with_items(vec![source_item("a")]);
+        *source.perform_error.lock().unwrap() = Some("merge refused".into());
+        app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        let choose = |app: &mut App| {
+            app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:a".into(),
+                choice_id: "do".into(),
+            })))
+        };
+
+        assert!(serde_json::from_str::<SuccessResponse>(&choose(&mut app)).is_ok());
+        assert_eq!(list(&mut app)[0].phase, WorkItemPhase::AwaitingExternal);
+        run_until(&mut app, |app| list(app)[0].phase == WorkItemPhase::Pending);
+        assert_eq!(list(&mut app)[0].notice.as_deref(), Some("merge refused"));
+
+        // Success polls at once; the item goes as soon as the source stops listing it.
+        *source.perform_error.lock().unwrap() = None;
+        source.set_items(Vec::new());
+        assert!(serde_json::from_str::<SuccessResponse>(&choose(&mut app)).is_ok());
+        run_until(&mut app, |app| list(app).is_empty());
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub enum WorkItemChoiceAction {
         url: String,
     },
     ProvisionWorkspace,
+    /// The source does it on the server, e.g. merging a pull request.
+    Perform,
     #[serde(other)]
     Unknown,
 }
@@ -60,6 +62,9 @@ pub struct WorkItemChoiceInfo {
     pub action: WorkItemChoiceAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
+    /// Shown before a choice that cannot be undone runs; the user confirms it a second time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

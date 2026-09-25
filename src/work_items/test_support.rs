@@ -18,6 +18,8 @@ pub(crate) struct FakeSource {
     pub plan: Mutex<Option<ProvisionPlan>>,
     /// Whether resolved items have their workspace removed.
     pub remove_on_resolved: std::sync::atomic::AtomicBool,
+    /// Result of the "do" choice; `None` makes it succeed.
+    pub perform_error: Mutex<Option<String>>,
 }
 
 impl FakeSource {
@@ -27,6 +29,7 @@ impl FakeSource {
             prepare_calls: AtomicUsize::new(0),
             plan: Mutex::new(None),
             remove_on_resolved: std::sync::atomic::AtomicBool::new(false),
+            perform_error: Mutex::new(None),
         })
     }
 
@@ -85,6 +88,7 @@ impl WorkItemSource for FakeSource {
                     description: None,
                     action: WorkItemChoiceAction::ProvisionWorkspace,
                     disabled_reason: None,
+                    confirm: None,
                 },
                 WorkItemChoiceInfo {
                     choice_id: "web".into(),
@@ -94,6 +98,15 @@ impl WorkItemSource for FakeSource {
                         url: item.url.clone(),
                     },
                     disabled_reason: None,
+                    confirm: None,
+                },
+                WorkItemChoiceInfo {
+                    choice_id: "do".into(),
+                    label: "Do it".into(),
+                    description: None,
+                    action: WorkItemChoiceAction::Perform,
+                    disabled_reason: None,
+                    confirm: Some("Sure?".into()),
                 },
             ],
             default_choice_id: Some("web".into()),
@@ -115,6 +128,13 @@ impl WorkItemSource for FakeSource {
 
     fn remove_on_resolved(&self, _item: &WorkItem) -> bool {
         self.remove_on_resolved.load(Ordering::SeqCst)
+    }
+
+    fn perform(&self, _item: &WorkItem, _choice_id: &str) -> Result<String, String> {
+        match self.perform_error.lock().expect("fake source lock").clone() {
+            Some(error) => Err(error),
+            None => Ok("Done".into()),
+        }
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {

@@ -42,6 +42,7 @@ const CHANGES_PREFIX: &str = "changes:";
 const CI_PREFIX: &str = "ci:";
 const ASSIGNED_PREFIX: &str = "assigned:";
 const MENTION_PREFIX: &str = "mention:";
+const MERGE_PREFIX: &str = "merge:";
 
 /// What a GitHub item asks of you.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,15 +57,18 @@ enum Event {
     Assigned,
     /// An issue or pull request mentions you.
     Mentioned,
+    /// Your pull request is approved and waits for you to merge it.
+    ReadyToMerge,
 }
 
 impl Event {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::ReviewRequested,
         Self::ChangesRequested,
         Self::CiFailing,
         Self::Assigned,
         Self::Mentioned,
+        Self::ReadyToMerge,
     ];
 
     fn of(external_id: &str) -> Self {
@@ -83,6 +87,7 @@ impl Event {
             Self::CiFailing => CI_PREFIX,
             Self::Assigned => ASSIGNED_PREFIX,
             Self::Mentioned => MENTION_PREFIX,
+            Self::ReadyToMerge => MERGE_PREFIX,
         }
     }
 
@@ -93,6 +98,7 @@ impl Event {
             Self::CiFailing => "failing checks",
             Self::Assigned => "assigned issues",
             Self::Mentioned => "mentions",
+            Self::ReadyToMerge => "ready to merge",
         }
     }
 
@@ -104,6 +110,7 @@ impl Event {
             Self::CiFailing => "ci failing",
             Self::Assigned => "assigned",
             Self::Mentioned => "mention",
+            Self::ReadyToMerge => "ready to merge",
         }
     }
 
@@ -114,6 +121,7 @@ impl Event {
             Self::CiFailing => "Checks failing",
             Self::Assigned => "Issue assigned",
             Self::Mentioned => "You were mentioned",
+            Self::ReadyToMerge => "Ready to merge",
         }
     }
 
@@ -121,7 +129,7 @@ impl Event {
     fn is_pull_request_event(self) -> bool {
         matches!(
             self,
-            Self::ReviewRequested | Self::ChangesRequested | Self::CiFailing
+            Self::ReviewRequested | Self::ChangesRequested | Self::CiFailing | Self::ReadyToMerge
         )
     }
 
@@ -137,6 +145,8 @@ impl Event {
             Self::CiFailing => &[ReviewMode::FixChecks, ReviewMode::FixChecksAgent],
             Self::Assigned => &[ReviewMode::StartIssue, ReviewMode::StartIssueAgent],
             Self::Mentioned => &[ReviewMode::ThreadAgent],
+            // Merging is carried out by the source, not in a workspace.
+            Self::ReadyToMerge => &[],
         }
     }
 }
@@ -226,6 +236,15 @@ pub(crate) struct GithubDetail {
     /// Failing checks; only fetched for failing-checks items.
     #[serde(default)]
     pub failing_checks: Vec<GithubCheck>,
+    /// GitHub's merge readiness (CLEAN, BEHIND, DIRTY, BLOCKED…); ready-to-merge items only.
+    #[serde(default)]
+    pub merge_state_status: String,
+    /// Each reviewer's latest review; ready-to-merge items only.
+    #[serde(default)]
+    pub latest_reviews: Vec<GithubReview>,
+    /// Merge methods the repository allows (MERGE, SQUASH, REBASE), your default first.
+    #[serde(default)]
+    pub merge_methods: Vec<String>,
 }
 
 /// One entry of `gh pr checks --json name,state,bucket,link,workflow`.
@@ -398,7 +417,7 @@ impl GithubSource {
             Event::CiFailing => &self.config.ci_failing,
             Event::Assigned => &self.config.assigned,
             Event::Mentioned => &self.config.mentioned,
-            Event::ReviewRequested => return &self.branch_fallback,
+            Event::ReviewRequested | Event::ReadyToMerge => return &self.branch_fallback,
         };
         blocks
             .iter()
@@ -439,6 +458,7 @@ impl GithubSource {
             Event::CiFailing => &queries.ci_failing,
             Event::Assigned => &queries.assigned,
             Event::Mentioned => &queries.mentioned,
+            Event::ReadyToMerge => &queries.ready_to_merge,
         }
     }
 
@@ -530,7 +550,8 @@ fn default_choice(
     docs: &[Regex],
 ) -> &'static str {
     match event {
-        Event::Mentioned => return GITHUB_CHOICE_ID,
+        // Ready-to-merge defaults are decided by `merge_choices`.
+        Event::Mentioned | Event::ReadyToMerge => return GITHUB_CHOICE_ID,
         _ if !mapped => return GITHUB_CHOICE_ID,
         Event::ChangesRequested => return ReviewMode::Address.choice_id(),
         Event::CiFailing => return ReviewMode::FixChecks.choice_id(),
@@ -1043,6 +1064,102 @@ fn gh_error(output: &Output) -> String {
     format!("gh api failed: {}", failure_detail(output))
 }
 
+/// Your open pull requests with each reviewer's latest review, in one call.
+const READY_TO_MERGE_GRAPHQL: &str = "query($q: String!) { search(query: $q, type: ISSUE, \
+    first: 100) { nodes { ... on PullRequest { number title url updatedAt isDraft \
+    author { login } repository { nameWithOwner } reviewDecision \
+    latestReviews(first: 50) { nodes { state author { login } } } } } } }";
+
+#[derive(Deserialize)]
+struct GraphqlResponse {
+    data: GraphqlData,
+}
+
+#[derive(Deserialize)]
+struct GraphqlData {
+    search: GraphqlSearch,
+}
+
+#[derive(Deserialize)]
+struct GraphqlSearch {
+    nodes: Vec<Option<GraphqlPullRequest>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphqlPullRequest {
+    number: u64,
+    title: String,
+    url: String,
+    updated_at: String,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    author: Option<SearchUser>,
+    repository: GraphqlRepository,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    latest_reviews: Option<GraphqlReviews>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphqlRepository {
+    name_with_owner: String,
+}
+
+#[derive(Deserialize)]
+struct GraphqlReviews {
+    nodes: Vec<Option<GithubReview>>,
+}
+
+/// Whether reviews leave nothing to do but merge. GitHub only computes a review decision
+/// when the repository requires reviews, so without one the latest reviews decide: at least
+/// one approval and nobody still asking for changes.
+fn is_approved(decision: Option<&str>, reviews: &[GithubReview]) -> bool {
+    match decision.filter(|decision| !decision.is_empty()) {
+        Some(decision) => decision == "APPROVED",
+        None => {
+            reviews.iter().any(|review| review.state == "APPROVED")
+                && !reviews
+                    .iter()
+                    .any(|review| review.state == "CHANGES_REQUESTED")
+        }
+    }
+}
+
+fn parse_ready_to_merge(bytes: &[u8]) -> Result<Vec<SourceItem>, String> {
+    let response: GraphqlResponse = serde_json::from_slice(bytes)
+        .map_err(|err| format!("unexpected gh api graphql output: {err}"))?;
+    Ok(response
+        .data
+        .search
+        .nodes
+        .into_iter()
+        .flatten()
+        .filter(|pull| {
+            let reviews: Vec<GithubReview> = pull
+                .latest_reviews
+                .iter()
+                .flat_map(|reviews| reviews.nodes.iter().flatten().cloned())
+                .collect();
+            !pull.is_draft && is_approved(pull.review_decision.as_deref(), &reviews)
+        })
+        .map(|pull| {
+            let repo = pull.repository.name_with_owner;
+            SourceItem {
+                external_id: format!("{MERGE_PREFIX}{repo}#{}", pull.number),
+                title: pull.title,
+                context: format!("#{} {} · {repo}", pull.number, Event::ReadyToMerge.tag()),
+                author: pull.author.map(|author| author.login),
+                url: pull.url,
+                updated_at: pull.updated_at,
+            }
+        })
+        .collect())
+}
+
 fn parse_search(bytes: &[u8], event: Event) -> Result<Vec<SourceItem>, String> {
     let response: SearchResponse =
         serde_json::from_slice(bytes).map_err(|err| format!("unexpected gh api output: {err}"))?;
@@ -1109,7 +1226,11 @@ impl WorkItemSource for GithubSource {
             if query.trim().is_empty() {
                 continue;
             }
-            items.extend(self.search(event, query)?);
+            if event == Event::ReadyToMerge {
+                items.extend(self.search_ready_to_merge(query)?);
+            } else {
+                items.extend(self.search(event, query)?);
+            }
         }
         Ok(items)
     }
@@ -1130,6 +1251,7 @@ impl WorkItemSource for GithubSource {
         let fields = match event {
             Event::ChangesRequested => format!("{DETAIL_FIELDS},isCrossRepository,reviews"),
             Event::CiFailing => format!("{DETAIL_FIELDS},isCrossRepository"),
+            Event::ReadyToMerge => format!("{DETAIL_FIELDS},mergeStateStatus,latestReviews"),
             _ => DETAIL_FIELDS.to_string(),
         };
         let viewed = self.run_gh(&["pr", "view", &number_arg, "--repo", repo, "--json", &fields]);
@@ -1155,6 +1277,10 @@ impl WorkItemSource for GithubSource {
             Event::CiFailing => match self.failing_checks(repo, number) {
                 Ok(checks) => detail.failing_checks = checks,
                 Err(error) => errors.push(format!("checks unavailable: {error}")),
+            },
+            Event::ReadyToMerge => match self.merge_methods(repo) {
+                Ok(methods) => detail.merge_methods = methods,
+                Err(error) => errors.push(format!("merge settings unavailable: {error}")),
             },
             _ => {}
         }
@@ -1182,6 +1308,7 @@ impl WorkItemSource for GithubSource {
                     detail.inline_comments.len(),
                 )
             }
+            Event::ReadyToMerge => merge_summary(&detail),
             Event::CiFailing => {
                 let failing = detail.failing_checks.len();
                 format!(
@@ -1191,8 +1318,10 @@ impl WorkItemSource for GithubSource {
             }
             _ => size,
         };
+        // Nothing is checked out to merge, so there is no point fetching the change.
         if let Some(error) = self
             .repo(repo)
+            .filter(|_| event != Event::ReadyToMerge)
             .and_then(|mapped| self.prefetch(mapped, number).err())
         {
             errors.push(format!("prefetch failed: {error}"));
@@ -1206,6 +1335,9 @@ impl WorkItemSource for GithubSource {
 
     fn choices(&self, item: &WorkItem) -> ItemChoices {
         let event = Event::of(&item.external_id);
+        if event == Event::ReadyToMerge {
+            return merge_choices(item, item_detail::<GithubDetail>(item).as_ref());
+        }
         let repo = parse_external_id(&item.external_id)
             .map(|(repo, _)| repo)
             .unwrap_or(&item.external_id);
@@ -1219,6 +1351,7 @@ impl WorkItemSource for GithubSource {
                 description: Some(mode.description().into()),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: self.mode_unavailable(mode, event, repo, mapped),
+                confirm: None,
             })
             .collect();
         let (label, url) = match event {
@@ -1232,6 +1365,7 @@ impl WorkItemSource for GithubSource {
             description: Some("Open it in the browser".into()),
             action: WorkItemChoiceAction::OpenUrl { url },
             disabled_reason: None,
+            confirm: None,
         });
         let workflow = self.workflow(repo);
         let pull_detail = event
@@ -1279,7 +1413,9 @@ impl WorkItemSource for GithubSource {
         let agent_name_hint = match event {
             Event::ReviewRequested => format!("review-{number}"),
             Event::Assigned | Event::Mentioned => format!("issue-{number}"),
-            Event::ChangesRequested | Event::CiFailing => format!("pr-{number}"),
+            Event::ChangesRequested | Event::CiFailing | Event::ReadyToMerge => {
+                format!("pr-{number}")
+            }
         };
         let mut layout = WorkspaceLayout {
             agent: settings.agent.to_string(),
@@ -1388,6 +1524,39 @@ impl WorkItemSource for GithubSource {
             == OnResolvedConfig::Remove
     }
 
+    fn perform(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        if Event::of(&item.external_id) != Event::ReadyToMerge {
+            return Err(format!("choice {choice_id} cannot be carried out here"));
+        }
+        let flag = MERGE_METHODS
+            .iter()
+            .find(|(_, id, _)| *id == choice_id)
+            .map(|(method, _, _)| format!("--{}", method.to_lowercase()))
+            .ok_or_else(|| format!("unknown merge choice {choice_id}"))?;
+        let (repo, number) = parse_external_id(&item.external_id)
+            .ok_or_else(|| format!("unrecognised pull request id {}", item.external_id))?;
+        let detail = item_detail::<GithubDetail>(item)
+            .ok_or("pull request details are not available yet; try again shortly")?;
+        if let Some(blocker) = merge_blocker(&detail) {
+            return Err(blocker);
+        }
+        let number_arg = number.to_string();
+        let mut args = vec![
+            "pr",
+            "merge",
+            number_arg.as_str(),
+            "--repo",
+            repo,
+            flag.as_str(),
+        ];
+        // Only the commit you saw is merged: a push since then makes GitHub refuse.
+        if !detail.head_ref_oid.is_empty() {
+            args.extend(["--match-head-commit", detail.head_ref_oid.as_str()]);
+        }
+        self.run_gh(&args)?;
+        Ok(format!("Merged #{number} into {}", detail.base_ref_name))
+    }
+
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
         let title = Event::of(&item.external_id).arrival_title();
         (
@@ -1399,6 +1568,105 @@ impl WorkItemSource for GithubSource {
 
 const DETAIL_FIELDS: &str = "number,title,body,url,additions,deletions,changedFiles,files,\
                              baseRefName,headRefName,headRefOid,author";
+
+/// Merge methods in GitHub's names, with what the dialog calls them.
+const MERGE_METHODS: [(&str, &str, &str); 3] = [
+    ("SQUASH", "merge_squash", "Squash and merge"),
+    ("MERGE", "merge_commit", "Create a merge commit"),
+    ("REBASE", "merge_rebase", "Rebase and merge"),
+];
+
+fn approvers(detail: &GithubDetail) -> Vec<&str> {
+    detail
+        .latest_reviews
+        .iter()
+        .filter(|review| review.state == "APPROVED")
+        .filter_map(|review| review.author.as_ref().map(|author| author.login.as_str()))
+        .collect()
+}
+
+/// Why GitHub will refuse the merge right now, from its merge state.
+fn merge_blocker(detail: &GithubDetail) -> Option<String> {
+    let base = &detail.base_ref_name;
+    match detail.merge_state_status.as_str() {
+        "DIRTY" => Some(format!("Conflicts with {base}; resolve them first")),
+        "BEHIND" => Some(format!("Behind {base}; update the branch first")),
+        "BLOCKED" => Some("GitHub blocks the merge: required checks or reviews".into()),
+        "DRAFT" => Some("Still a draft".into()),
+        // CLEAN, HAS_HOOKS, UNSTABLE (optional checks failing) and UNKNOWN (still computing)
+        // are left to GitHub to accept or refuse.
+        _ => None,
+    }
+}
+
+fn merge_summary(detail: &GithubDetail) -> String {
+    let approvers = approvers(detail);
+    let approved = if approvers.is_empty() {
+        "Approved".to_string()
+    } else {
+        format!("Approved by {}", approvers.join(", "))
+    };
+    let state = match detail.merge_state_status.as_str() {
+        "CLEAN" | "HAS_HOOKS" => "ready to merge".to_string(),
+        "UNSTABLE" => "ready to merge, optional checks failing".to_string(),
+        _ => merge_blocker(detail)
+            .map(|blocker| blocker.to_lowercase())
+            .unwrap_or_else(|| "ready to merge".into()),
+    };
+    format!("{approved} · {state}")
+}
+
+/// Merge choices, your default method first, then opening it on GitHub.
+fn merge_choices(item: &WorkItem, detail: Option<&GithubDetail>) -> ItemChoices {
+    let Some(detail) = detail else {
+        return ItemChoices {
+            choices: vec![open_on_github(item, "Open on GitHub")],
+            default_choice_id: Some(GITHUB_CHOICE_ID.into()),
+        };
+    };
+    let blocker = merge_blocker(detail);
+    let base = &detail.base_ref_name;
+    let number = detail.number;
+    let mut choices: Vec<WorkItemChoiceInfo> = detail
+        .merge_methods
+        .iter()
+        .filter_map(|method| MERGE_METHODS.iter().find(|(name, _, _)| name == method))
+        .map(|(_, choice_id, label)| WorkItemChoiceInfo {
+            choice_id: (*choice_id).into(),
+            label: (*label).into(),
+            description: Some(format!("Merge #{number} into {base} on GitHub")),
+            action: WorkItemChoiceAction::Perform,
+            disabled_reason: blocker.clone(),
+            confirm: Some(format!(
+                "Merge #{number} into {base}? This cannot be undone. Press ↵ again to merge."
+            )),
+        })
+        .collect();
+    let default = choices
+        .iter()
+        .find(|choice| choice.disabled_reason.is_none())
+        .map_or(GITHUB_CHOICE_ID.to_string(), |choice| {
+            choice.choice_id.clone()
+        });
+    choices.push(open_on_github(item, "Open on GitHub"));
+    ItemChoices {
+        choices,
+        default_choice_id: Some(default),
+    }
+}
+
+fn open_on_github(item: &WorkItem, label: &str) -> WorkItemChoiceInfo {
+    WorkItemChoiceInfo {
+        choice_id: GITHUB_CHOICE_ID.into(),
+        label: label.into(),
+        description: Some("Open it in the browser".into()),
+        action: WorkItemChoiceAction::OpenUrl {
+            url: item.url.clone(),
+        },
+        disabled_reason: None,
+        confirm: None,
+    }
+}
 
 /// The pull request's base as a ref reviewers can diff against, and the refspec that
 /// fetches it. A named remote updates its remote-tracking branch, so the ref reads the way
@@ -1529,6 +1797,57 @@ impl GithubSource {
         }
         items.truncate(limit);
         Ok(items)
+    }
+
+    /// Merge methods the repository allows, your default first.
+    fn merge_methods(&self, repo: &str) -> Result<Vec<String>, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Settings {
+            #[serde(default)]
+            squash_merge_allowed: bool,
+            #[serde(default)]
+            merge_commit_allowed: bool,
+            #[serde(default)]
+            rebase_merge_allowed: bool,
+            #[serde(default)]
+            viewer_default_merge_method: String,
+        }
+        let stdout = self.run_gh(&[
+            "repo",
+            "view",
+            repo,
+            "--json",
+            "squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed,viewerDefaultMergeMethod",
+        ])?;
+        let settings: Settings = serde_json::from_slice(&stdout)
+            .map_err(|err| format!("unexpected gh repo view output: {err}"))?;
+        let mut methods: Vec<String> = [
+            ("SQUASH", settings.squash_merge_allowed),
+            ("MERGE", settings.merge_commit_allowed),
+            ("REBASE", settings.rebase_merge_allowed),
+        ]
+        .into_iter()
+        .filter(|(_, allowed)| *allowed)
+        .map(|(method, _)| method.to_string())
+        .collect();
+        if let Some(index) = methods
+            .iter()
+            .position(|method| *method == settings.viewer_default_merge_method)
+        {
+            let default = methods.remove(index);
+            methods.insert(0, default);
+        }
+        Ok(methods)
+    }
+
+    /// Your open pull requests that reviews approved. Uses GraphQL so the latest reviews come
+    /// with the search: GitHub's `review:approved` misses repositories without required reviews.
+    fn search_ready_to_merge(&self, query: &str) -> Result<Vec<SourceItem>, String> {
+        let query_arg = format!("query={READY_TO_MERGE_GRAPHQL}");
+        let search_arg = format!("q={query}");
+        let stdout = self.run_gh(&["api", "graphql", "-f", &query_arg, "-f", &search_arg])?;
+        parse_ready_to_merge(&stdout)
     }
 
     /// Issue or mention details through the REST API, which serves pull requests too.
@@ -1769,6 +2088,9 @@ mod tests {
             reviews: Vec::new(),
             inline_comments: Vec::new(),
             failing_checks: Vec::new(),
+            merge_state_status: String::new(),
+            latest_reviews: Vec::new(),
+            merge_methods: Vec::new(),
         }
     }
 
@@ -1795,6 +2117,8 @@ mod tests {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
+            action_in_flight: false,
+            action_error: None,
         }
     }
 
@@ -2353,6 +2677,7 @@ printf ']}}'
         only_reviews.changes_requested.clear();
         only_reviews.ci_failing.clear();
         only_reviews.assigned.clear();
+        only_reviews.ready_to_merge.clear();
         let gh = fake_gh("paging", 250);
         let source = GithubSource::new(GithubWorkItemsConfig {
             gh_path: gh.display().to_string(),
@@ -2374,5 +2699,131 @@ printf ']}}'
         let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         assert_eq!(items.len(), 120);
         assert_eq!(items[119].external_id, "o/r#120");
+    }
+
+    #[test]
+    fn approved_pull_requests_are_ready_to_merge_even_without_a_review_decision() {
+        let pull = |number: u64, draft: bool, decision: &str, reviews: &[(&str, &str)]| {
+            serde_json::json!({
+                "number": number, "title": format!("PR {number}"),
+                "url": format!("https://github.com/o/r/pull/{number}"),
+                "updatedAt": "2026-09-25T10:00:00Z", "isDraft": draft,
+                "author": {"login": "me"}, "repository": {"nameWithOwner": "o/r"},
+                "reviewDecision": decision,
+                "latestReviews": {"nodes": reviews.iter().map(|(login, state)| serde_json::json!({
+                    "state": state, "author": {"login": login}
+                })).collect::<Vec<_>>()},
+            })
+        };
+        let response = serde_json::json!({"data": {"search": {"nodes": [
+            // Reviews not required: GitHub leaves the decision empty.
+            pull(1, false, "", &[("alice", "APPROVED"), ("bob", "APPROVED")]),
+            pull(2, false, "APPROVED", &[]),
+            pull(3, false, "", &[("alice", "APPROVED"), ("bob", "CHANGES_REQUESTED")]),
+            pull(4, true, "APPROVED", &[("alice", "APPROVED")]),
+            pull(5, false, "REVIEW_REQUIRED", &[("alice", "APPROVED")]),
+            pull(6, false, "", &[("alice", "COMMENTED")]),
+        ]}}});
+        let items = parse_ready_to_merge(response.to_string().as_bytes()).expect("parses");
+        let ids: Vec<&str> = items.iter().map(|item| item.external_id.as_str()).collect();
+        assert_eq!(ids, vec!["merge:o/r#1", "merge:o/r#2"]);
+        assert_eq!(items[0].context, "#1 ready to merge · o/r");
+    }
+
+    fn merge_detail(state: &str) -> GithubDetail {
+        GithubDetail {
+            merge_state_status: state.into(),
+            latest_reviews: vec![GithubReview {
+                author: Some(GithubLogin {
+                    login: "tony".into(),
+                }),
+                state: "APPROVED".into(),
+                body: String::new(),
+            }],
+            merge_methods: vec!["SQUASH".into(), "MERGE".into()],
+            ..detail(&[("src/a.rs", 3, 1)])
+        }
+    }
+
+    fn merge_item(detail: &GithubDetail) -> WorkItem {
+        WorkItem {
+            key: "github:merge:o/r#5".into(),
+            external_id: "merge:o/r#5".into(),
+            ..work_item("o/r", Some(detail))
+        }
+    }
+
+    #[test]
+    fn clean_pull_request_offers_your_default_merge_with_a_confirmation() {
+        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let choices = source.choices(&merge_item(&merge_detail("CLEAN")));
+        let ids: Vec<&str> = choices
+            .choices
+            .iter()
+            .map(|choice| choice.choice_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["merge_squash", "merge_commit", "github"]);
+        assert_eq!(choices.default_choice_id.as_deref(), Some("merge_squash"));
+        let squash = &choices.choices[0];
+        assert_eq!(squash.action, WorkItemChoiceAction::Perform);
+        assert!(squash
+            .confirm
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains("cannot be undone")));
+        assert_eq!(
+            merge_summary(&merge_detail("CLEAN")),
+            "Approved by tony · ready to merge"
+        );
+    }
+
+    #[test]
+    fn blocked_merge_is_disabled_with_the_reason_and_defaults_to_github() {
+        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let choices = source.choices(&merge_item(&merge_detail("BEHIND")));
+        assert_eq!(
+            choices.choices[0].disabled_reason.as_deref(),
+            Some("Behind main; update the branch first")
+        );
+        assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
+        assert!(source
+            .perform(&merge_item(&merge_detail("BEHIND")), "merge_squash")
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merging_runs_gh_pr_merge_pinned_to_the_reviewed_commit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-fake-gh-merge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gh = dir.join("gh");
+        let log = dir.join("args");
+        std::fs::write(
+            &gh,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            gh_path: gh.display().to_string(),
+            ..GithubWorkItemsConfig::default()
+        });
+        let result = source.perform(&merge_item(&merge_detail("CLEAN")), "merge_commit");
+        let args = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result.as_deref(), Ok("Merged #5 into main"));
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            vec![
+                "pr",
+                "merge",
+                "5",
+                "--repo",
+                "o/r",
+                "--merge",
+                "--match-head-commit",
+                "0123456789abcdef"
+            ]
+        );
     }
 }

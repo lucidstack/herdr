@@ -34,6 +34,7 @@ Every poll runs one GitHub search per event. The defaults:
 | `ci_failing` | `is:pr is:open author:@me status:failure archived:false` | Diagnose the failures locally, or have the agent fix them |
 | `assigned` | `is:issue is:open assignee:@me archived:false` | Plan it locally, or have the agent implement it |
 | `mentioned` | off | Have the agent read the thread and draft a reply |
+| `ready_to_merge` | `is:pr is:open author:@me draft:false archived:false`, keeping those approved | Merge it, with any method the repository allows, or open it on GitHub |
 
 Change a query, or switch an event off with an empty string, under `[work_items.github.queries]`:
 
@@ -49,6 +50,12 @@ mentioned = "is:open mentions:@me"
 - **Your own pull requests** (changes requested, failing checks) use the pull request's head branch. An existing worktree of that branch is reopened, and an existing local branch is reused as it is. Otherwise a new branch tracks the remote one, so `git push` works. Pull requests from forks start from GitHub's copy of the head instead, so pushing needs the fork as a remote.
 - **Assigned issues** get a new branch `issue/<number>-<title words>` from the repository's default branch. It does not track anything, so a push cannot land on the default branch by accident.
 - **Mentions** and agent reviews without a checkout download the thread or diff into a scratch directory instead.
+
+### Merging approved pull requests
+
+Your pull requests show up as **ready to merge** once reviews approve them: at least one approval and nobody still asking for changes. This works whether or not the repository requires reviews; GitHub only records a review decision when it does, so Herdr reads the latest reviews themselves.
+
+The dialog lists the merge methods the repository allows, your default first, and says who approved it. Merging asks for a second <kbd>Enter</kbd>, since it cannot be undone, and only merges the commit you saw: if someone pushed since, GitHub refuses. When GitHub would refuse anyway (conflicts, a branch behind its base, required checks or reviews), the merge choices are disabled with the reason. The item leaves the inbox once GitHub reports the merge; if the merge fails, the reason shows on the item.
 
 Worktrees are created through Herdr's own worktree support, so `worktree.created` and `worktree.removed` [plugin hooks](/docs/plugins/) run for them, exactly as for worktrees you create by hand.
 

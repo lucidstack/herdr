@@ -125,4 +125,9 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn remove_on_resolved(&self, item: &WorkItem) -> bool;
     /// Pure: notification text when an item arrives or is requested again.
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>);
+    /// Blocking; background thread only. Carries out a choice whose action is `Perform`
+    /// and returns a one-line result for the user.
+    fn perform(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        Err(format!("choice {choice_id} cannot be carried out here"))
+    }
 }

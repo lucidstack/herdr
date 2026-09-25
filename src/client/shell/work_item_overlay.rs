@@ -99,11 +99,17 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         );
         menu_rows.push((rect, index));
     }
+    let confirming = o
+        .confirming
+        .filter(|index| *index == o.highlighted)
+        .and_then(|index| item.choices.get(index))
+        .and_then(|choice| choice.confirm.as_ref());
     if let Some(choice) = item.choices.get(o.highlighted) {
-        let (detail, color) = match (&choice.disabled_reason, &choice.description) {
-            (Some(reason), _) => (Some(reason), p.peach),
-            (None, Some(description)) => (Some(description), p.subtext0),
-            (None, None) => (None, p.subtext0),
+        let (detail, color) = match (confirming, &choice.disabled_reason, &choice.description) {
+            (Some(prompt), _, _) => (Some(prompt), p.peach),
+            (None, Some(reason), _) => (Some(reason), p.peach),
+            (None, None, Some(description)) => (Some(description), p.subtext0),
+            (None, None, None) => (None, p.subtext0),
         };
         if let Some(detail) = detail {
             put_text(
@@ -121,7 +127,11 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         i.x,
         i.bottom().saturating_sub(1),
         i.width,
-        " ↑/↓ choose · ↵ confirm · esc cancel",
+        if confirming.is_some() {
+            " ↵ again to confirm · ↑/↓ choose · esc cancel"
+        } else {
+            " ↑/↓ choose · ↵ confirm · esc cancel"
+        },
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     Some(OverlayRender {

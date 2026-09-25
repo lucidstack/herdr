@@ -1503,6 +1503,12 @@
           "description": "Search query for issues and pull requests that mention you, for example \"is:open mentions:@me\". Empty disables the event."
         },
         {
+          "key": "work_items.github.queries.ready_to_merge",
+          "type": "string",
+          "default": "\"is:pr is:open author:@me draft:false archived:false\"",
+          "description": "Search query for your pull requests that may be ready to merge; those approved in their latest reviews are shown, whether or not the repository requires reviews. Empty disables the event."
+        },
+        {
           "key": "work_items.jira.enabled",
           "type": "boolean",
           "default": "true",

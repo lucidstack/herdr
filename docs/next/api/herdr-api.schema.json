@@ -1152,6 +1152,19 @@
               "type": "object"
             },
             {
+              "description": "The source does it on the server, e.g. merging a pull request.",
+              "properties": {
+                "type": {
+                  "const": "perform",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "unknown",
@@ -1172,6 +1185,13 @@
             },
             "choice_id": {
               "type": "string"
+            },
+            "confirm": {
+              "description": "Shown before a choice that cannot be undone runs; the user confirms it a second time.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "description": {
               "description": "One line explaining what the choice does.",
@@ -11365,6 +11385,19 @@
               "type": "object"
             },
             {
+              "description": "The source does it on the server, e.g. merging a pull request.",
+              "properties": {
+                "type": {
+                  "const": "perform",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "unknown",
@@ -11385,6 +11418,13 @@
             },
             "choice_id": {
               "type": "string"
+            },
+            "confirm": {
+              "description": "Shown before a choice that cannot be undone runs; the user confirms it a second time.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "description": {
               "description": "One line explaining what the choice does.",

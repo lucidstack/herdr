@@ -121,6 +121,8 @@ pub(super) struct ClientWorkItemOverlay {
     pub(super) awaiting_provisioning: bool,
     /// Shows provisioning progress instead of the choices.
     pub(super) show_checklist: bool,
+    /// The choice waiting for a second confirm, when it cannot be undone.
+    pub(super) confirming: Option<usize>,
     pub(super) spinner_frame: usize,
 }
 
@@ -732,6 +734,7 @@ impl ClientShellState {
                 return_label,
                 awaiting_provisioning: false,
                 show_checklist,
+                confirming: None,
                 spinner_frame: self.work_items.spinner_frame,
             },
         )));
@@ -1055,6 +1058,12 @@ impl ClientShellState {
         if choice.disabled_reason.is_some() {
             return;
         }
+        // Choices that cannot be undone ask first; the second confirm carries them out.
+        if choice.confirm.is_some() && overlay.confirming != Some(index) {
+            overlay.highlighted = index;
+            overlay.confirming = Some(index);
+            return;
+        }
         let method = Method::WorkItemChoose(WorkItemChooseParams {
             item_id: overlay.item.item_id.clone(),
             choice_id: choice.choice_id,
@@ -1071,6 +1080,11 @@ impl ClientShellState {
                 overlay.show_checklist = true;
                 // Progress from an earlier attempt must not stand in for this one.
                 overlay.item.provisioning = None;
+                self.push_endpoint_method(method, outcome);
+            }
+            // The server carries it out; the item's spinner shows it running.
+            WorkItemChoiceAction::Perform => {
+                self.overlay = None;
                 self.push_endpoint_method(method, outcome);
             }
             WorkItemChoiceAction::Unknown => {}
@@ -1117,6 +1131,7 @@ impl ClientShellState {
 
 /// Moves the highlight to the previous or next enabled choice, if any.
 fn move_highlight(overlay: &mut ClientWorkItemOverlay, step: isize) {
+    overlay.confirming = None;
     let len = overlay.item.choices.len();
     if len == 0 {
         return;

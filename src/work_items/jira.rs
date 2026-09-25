@@ -725,6 +725,7 @@ impl WorkItemSource for JiraSource {
                 description: Some(format!("{where_}; the agent proposes a plan and waits")),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone(),
+                confirm: None,
             },
             WorkItemChoiceInfo {
                 choice_id: AGENT_CHOICE_ID.into(),
@@ -734,6 +735,7 @@ impl WorkItemSource for JiraSource {
                 )),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone().or(no_agent),
+                confirm: None,
             },
             WorkItemChoiceInfo {
                 choice_id: JIRA_CHOICE_ID.into(),
@@ -743,6 +745,7 @@ impl WorkItemSource for JiraSource {
                     url: item.url.clone(),
                 },
                 disabled_reason: None,
+                confirm: None,
             },
         ];
         ItemChoices {
@@ -870,6 +873,8 @@ mod tests {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
+            action_in_flight: false,
+            action_error: None,
         }
     }
 

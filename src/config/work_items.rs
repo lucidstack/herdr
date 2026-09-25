@@ -7,6 +7,10 @@ pub const DEFAULT_GITHUB_CHANGES_REQUESTED_QUERY: &str =
 pub const DEFAULT_GITHUB_CI_FAILING_QUERY: &str =
     "is:pr is:open author:@me status:failure archived:false";
 pub const DEFAULT_GITHUB_ASSIGNED_QUERY: &str = "is:issue is:open assignee:@me archived:false";
+/// Candidates only: approval is read from each pull request's latest reviews, because
+/// `review:approved` misses repositories that do not require reviews.
+pub const DEFAULT_GITHUB_READY_TO_MERGE_QUERY: &str =
+    "is:pr is:open author:@me draft:false archived:false";
 /// herdr-reviewr, showing the pull request against its base.
 pub const DEFAULT_REVIEW_COMMAND: &str =
     "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}";
@@ -143,6 +147,8 @@ pub struct GithubQueriesConfig {
     pub assigned: String,
     /// Search query for issues and pull requests that mention you, e.g. "is:open mentions:@me". Empty disables the event. Default: "".
     pub mentioned: String,
+    /// Search query for your pull requests that may be ready to merge; those approved in their latest reviews are shown. Empty disables the event. Default: "is:pr is:open author:@me draft:false archived:false".
+    pub ready_to_merge: String,
 }
 
 impl Default for GithubQueriesConfig {
@@ -153,6 +159,7 @@ impl Default for GithubQueriesConfig {
             ci_failing: DEFAULT_GITHUB_CI_FAILING_QUERY.into(),
             assigned: DEFAULT_GITHUB_ASSIGNED_QUERY.into(),
             mentioned: String::new(),
+            ready_to_merge: DEFAULT_GITHUB_READY_TO_MERGE_QUERY.into(),
         }
     }
 }

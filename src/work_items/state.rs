@@ -47,6 +47,12 @@ pub(crate) struct WorkItem {
     /// Why removing the workspace on resolution failed.
     #[serde(skip)]
     pub resolve_error: Option<String>,
+    /// A choice the source is carrying out, e.g. a merge.
+    #[serde(skip)]
+    pub action_in_flight: bool,
+    /// Why the last such choice failed.
+    #[serde(skip)]
+    pub action_error: Option<String>,
 }
 
 pub(crate) fn item_key(source_id: &str, external_id: &str) -> String {
@@ -77,6 +83,8 @@ impl WorkItem {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
+            action_in_flight: false,
+            action_error: None,
         }
     }
 
@@ -101,8 +109,9 @@ impl WorkItem {
             url: self.url.clone(),
             summary: self.summary.clone(),
             notice: self
-                .resolve_error
+                .action_error
                 .clone()
+                .or_else(|| self.resolve_error.clone())
                 .or_else(|| self.prepare_error.clone()),
             phase: self.phase,
             seen: self.seen,

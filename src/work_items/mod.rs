@@ -53,6 +53,11 @@ pub(crate) enum WorkItemsEvent {
         job_id: u64,
         result: Result<provision::SourceReady, String>,
     },
+    /// A `Perform` choice finished on its background thread.
+    Performed {
+        key: String,
+        result: Result<String, String>,
+    },
 }
 
 /// A review worktree created for an item, remembered so its branch can be cleaned up
@@ -348,6 +353,11 @@ impl WorkItems {
             }
             // Provisioning results need the app and are handled by its driver.
             WorkItemsEvent::CheckoutFinished { .. } => (false, Vec::new()),
+            WorkItemsEvent::Performed { key, result } => {
+                let notices: Vec<WorkItemNotice> =
+                    self.finish_action(&key, result, now).into_iter().collect();
+                (!notices.is_empty(), notices)
+            }
         }
     }
 
@@ -382,6 +392,54 @@ impl WorkItems {
             self.changed();
         }
         Ok(())
+    }
+
+    /// Marks a `Perform` choice as running: the item shows a spinner until the source stops
+    /// reporting it. Fails while one is already running.
+    pub(crate) fn begin_action(&mut self, key: &str) -> Result<(), &'static str> {
+        let item = self.state.get_mut(key).ok_or("work_item_not_found")?;
+        if item.action_in_flight {
+            return Err("work_item_busy");
+        }
+        item.action_in_flight = true;
+        item.action_error = None;
+        item.phase = WorkItemPhase::AwaitingExternal;
+        item.seen = true;
+        self.changed();
+        Ok(())
+    }
+
+    /// Records a finished `Perform` choice. Success polls the source at once, so the item
+    /// leaves the inbox as soon as the source agrees; failure puts it back with the reason.
+    pub(crate) fn finish_action(
+        &mut self,
+        key: &str,
+        result: Result<String, String>,
+        now: Instant,
+    ) -> Option<WorkItemNotice> {
+        let item = self.state.get_mut(key)?;
+        item.action_in_flight = false;
+        let context = item.context.clone();
+        let source_id = item.source_id.clone();
+        let notice = match result {
+            Ok(message) => {
+                self.next_poll.insert(source_id, now);
+                WorkItemNotice {
+                    title: message,
+                    body: Some(context),
+                }
+            }
+            Err(error) => {
+                item.phase = WorkItemPhase::Pending;
+                item.action_error = Some(error.clone());
+                WorkItemNotice {
+                    title: "Could not complete the action".into(),
+                    body: Some(format!("{context} · {error}")),
+                }
+            }
+        };
+        self.changed();
+        Some(notice)
     }
 
     /// Attaches an existing workspace to an item; a running provisioning job is dropped
