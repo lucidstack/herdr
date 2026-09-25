@@ -234,3 +234,8 @@ release $version $preview:
 # Print default config
 default-config:
     cargo run --release --locked -- --default-config
+
+# Build main, install it as the everyday herdr and live-hand off running sessions
+[unix]
+daily:
+    bash scripts/daily.sh
