@@ -70,7 +70,7 @@ use terminal_geometry::{
 #[cfg(unix)]
 use terminal_geometry::{reported_cell_size_from_events, store_reported_cell_size};
 use terminal_setup::{
-    effective_mouse_capture, effective_sgr_pixel_mouse, set_mouse_capture,
+    effective_mouse_capture, effective_sgr_pixel_mouse, is_ssh_session, set_mouse_capture,
     setup_direct_attach_terminal, setup_terminal, should_draw_host_cursor,
 };
 
@@ -80,9 +80,7 @@ fn refresh_host_mouse_capture(enabled: bool, sgr_pixels: bool) {
     }
 }
 #[cfg(windows)]
-use terminal_setup::{
-    enable_windows_virtual_terminal_input, is_ssh_session, windows_vti_input_backend_enabled,
-};
+use terminal_setup::{enable_windows_virtual_terminal_input, windows_vti_input_backend_enabled};
 #[cfg(test)]
 use terminal_setup::{
     should_enable_host_color_scheme_reports, windows_virtual_terminal_input_mode,
@@ -169,6 +167,7 @@ fn run_client_with_mode(
             .with_startup_onboarding(loaded_config.config.should_show_onboarding())
             .with_keybinding_source(keybinding_source)
             .with_local_endpoint(&socket_path)
+            .with_remote_viewer(is_ssh_session())
     });
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();

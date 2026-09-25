@@ -945,9 +945,7 @@ impl ClientShellState {
             }
             ClientContextMenuAction::WorkItemOpenUrl => {
                 self.mark_work_item_seen(&item, outcome);
-                outcome
-                    .actions
-                    .push(ClientShellAction::OpenSafeWebUrl(item.url));
+                self.open_web_link(item.url, outcome);
             }
             ClientContextMenuAction::WorkItemSnoozeHour => {
                 self.push_endpoint_method(hide(Some(HOUR)), outcome)
@@ -1071,7 +1069,7 @@ impl ClientShellState {
         match choice.action {
             WorkItemChoiceAction::OpenUrl { url } => {
                 self.overlay = None;
-                outcome.actions.push(ClientShellAction::OpenSafeWebUrl(url));
+                self.open_web_link(url, outcome);
                 self.push_endpoint_method(method, outcome);
             }
             WorkItemChoiceAction::ProvisionWorkspace => {

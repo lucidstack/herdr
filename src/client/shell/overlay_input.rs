@@ -476,6 +476,7 @@ impl ClientShellState {
 
         if self.route_work_item_overlay_key(key, outcome)
             || self.route_inbox_overlay_key(key, outcome)
+            || self.route_link_overlay_key(key, outcome)
         {
             return;
         }

@@ -959,6 +959,17 @@
           "description": "Ask for a workspace name before interactive TUI creation."
         },
         {
+          "key": "ui.open_links",
+          "type": "enum",
+          "default": "\"auto\"",
+          "description": "Where web links open, from panes and from work items. auto opens them in this machine's browser, except when the client runs over SSH or mosh: then the browser would open on the wrong screen, so Herdr shows the link to tap or copy to your device instead. local always opens them here; show always shows them.",
+          "values": [
+            "auto",
+            "local",
+            "show"
+          ]
+        },
+        {
           "key": "ui.pane_borders",
           "type": "enum",
           "default": "\"auto\"",

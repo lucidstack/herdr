@@ -102,6 +102,8 @@ pub(crate) struct ClientShellConfig {
     pub(super) mouse_scroll_lines: usize,
     pub(super) right_click_passthrough_modifiers: Option<crossterm::event::KeyModifiers>,
     pub(super) redraw_on_focus_gained: bool,
+    pub(super) open_links: crate::config::OpenLinksConfig,
+    pub(super) remote_viewer: bool,
     pub(super) switch_ascii_input_source_in_prefix: bool,
     pub(super) local_config_path: std::path::PathBuf,
     pub(super) preferences_path: Option<std::path::PathBuf>,
@@ -349,6 +351,7 @@ pub(super) enum ClientShellOverlayKind {
     Settings,
     WorkItem,
     Inbox,
+    Link,
 }
 
 #[derive(Debug)]
@@ -666,6 +669,7 @@ pub(super) enum ClientShellOverlay {
     Settings(ClientSettingsOverlay),
     WorkItem(Box<super::work_items::ClientWorkItemOverlay>),
     Inbox(super::work_items::ClientInboxOverlay),
+    Link(super::links::ClientLinkOverlay),
 }
 
 impl ClientShellOverlay {
@@ -686,6 +690,7 @@ impl ClientShellOverlay {
             Self::Settings(_) => ClientShellOverlayKind::Settings,
             Self::WorkItem(_) => ClientShellOverlayKind::WorkItem,
             Self::Inbox(_) => ClientShellOverlayKind::Inbox,
+            Self::Link(_) => ClientShellOverlayKind::Link,
         }
     }
 }

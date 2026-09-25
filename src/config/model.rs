@@ -68,6 +68,19 @@ pub enum ToastDelivery {
     System,
 }
 
+/// Where a client opens web links: pane links, and work items' "Open on GitHub".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenLinksConfig {
+    /// Show the link when the client runs over SSH or mosh, else open it here.
+    #[default]
+    Auto,
+    /// Always open links in this machine's browser.
+    Local,
+    /// Always show the link to copy or tap instead of opening it.
+    Show,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema, Default,
 )]
@@ -937,6 +950,10 @@ pub struct UiConfig {
     pub prompt_new_tab_name: bool,
     /// Ask for a workspace name before interactive creation. Default: false.
     pub prompt_new_workspace_name: bool,
+    /// Where links open. auto shows them to copy when this client runs over
+    /// SSH or mosh, since a browser here would open on the wrong screen;
+    /// local always opens them here; show always shows them. Default: auto.
+    pub open_links: OpenLinksConfig,
     /// Draw borders around split panes. auto draws them only for split panes,
     /// always also frames a lone pane (only while pane_outer_borders is
     /// enabled, since every edge of a lone pane is an outer edge), off
@@ -1177,6 +1194,7 @@ impl Default for UiConfig {
             host_cursor: HostCursorModeConfig::Auto,
             right_click_passthrough_modifier: RightClickPassthroughModifierConfig::default(),
             redraw_on_focus_gained: true,
+            open_links: OpenLinksConfig::Auto,
             mouse_scroll_lines: None,
             confirm_close: true,
             prompt_new_tab_name: true,

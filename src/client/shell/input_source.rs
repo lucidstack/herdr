@@ -13,6 +13,7 @@ impl ClientShellState {
                     | ClientShellOverlay::GlobalMenu(_)
                     | ClientShellOverlay::WorkItem(_)
                     | ClientShellOverlay::Inbox(_)
+                    | ClientShellOverlay::Link(_)
             );
         }
         matches!(

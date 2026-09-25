@@ -57,6 +57,8 @@ The same persistent Herdr session opens in your phone terminal. The TUI adapts t
 
 On iPhone, apps like [moshi](https://getmoshi.app/) work well.
 
+Links you open over SSH, from a pane or from a work item's **Open on GitHub**, would otherwise open in the server's browser. Herdr shows them instead: tap the link, or press <kbd>Enter</kbd> to copy it to your phone's clipboard. Copying works when your terminal accepts clipboard writes (OSC 52); mosh needs version 1.4 or later on both ends. Set `ui.open_links` to change this.
+
 <div class="mobile-doc-shots">
   <figure>
     <img src="/assets/mobile-agent-session-v2.jpeg" alt="Herdr agent session over SSH on a phone" loading="lazy" />

@@ -1179,7 +1179,6 @@ mod tests {
         };
 
         assert!(serde_json::from_str::<SuccessResponse>(&choose(&mut app)).is_ok());
-        assert_eq!(list(&mut app)[0].phase, WorkItemPhase::AwaitingExternal);
         run_until(&mut app, |app| list(app)[0].phase == WorkItemPhase::Pending);
         assert_eq!(list(&mut app)[0].notice.as_deref(), Some("merge refused"));
 

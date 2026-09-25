@@ -235,6 +235,99 @@ fn confirming_external_choice_opens_url_and_reports_the_choice() {
     assert!(state.overlay.is_none());
 }
 
+fn remote_shell_with(items: Vec<WorkItemInfo>) -> ClientShellState {
+    let mut state = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_remote_viewer(true),
+    );
+    state.set_snapshot(Box::new(two_workspace_snapshot()));
+    state.set_pane_surface(surface());
+    state.set_endpoint_work_items(&ClientEndpointId::Local, projection(1, items));
+    state
+}
+
+fn opens_locally(input: &ClientShellInput) -> bool {
+    input
+        .actions
+        .iter()
+        .any(|action| matches!(action, ClientShellAction::OpenSafeWebUrl(_)))
+}
+
+fn copied(input: &ClientShellInput) -> Option<String> {
+    input.actions.iter().find_map(|action| match action {
+        ClientShellAction::ClipboardWrite(bytes) => String::from_utf8(bytes.clone()).ok(),
+        _ => None,
+    })
+}
+
+#[test]
+fn remote_viewer_gets_the_link_to_copy_instead_of_a_browser_on_the_host() {
+    let mut seen = item("7");
+    seen.seen = true;
+    let mut state = remote_shell_with(vec![seen]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
+
+    let input = state.handle_input_bytes(b"\r");
+    assert!(!opens_locally(&input));
+    // The source still hears about the choice, so the item waits on GitHub.
+    assert!(matches!(
+        endpoint_methods(&input)[..],
+        [Method::WorkItemChoose(params)] if params.choice_id == "github"
+    ));
+    let screen = screen_text(&mut state);
+    assert!(screen.contains("https://github.com/o/r/pull/7"));
+
+    let copy = state.handle_input_bytes(b"\r");
+    assert_eq!(
+        copied(&copy).as_deref(),
+        Some("https://github.com/o/r/pull/7")
+    );
+    assert!(state.overlay.is_none());
+}
+
+#[test]
+fn tapping_the_shown_link_copies_it() {
+    let mut state = remote_shell_with(vec![item("7")]);
+    state.compose(106, 30).expect("frame");
+    let mut outcome = ClientShellInput::default();
+    state.open_web_link("https://github.com/o/r/pull/7".into(), &mut outcome);
+    state.compose(106, 30).expect("frame");
+    let link = state.hits.overlay_clear;
+    let tap = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        link.x + 3,
+        link.y,
+    );
+    assert_eq!(
+        copied(&tap).as_deref(),
+        Some("https://github.com/o/r/pull/7")
+    );
+}
+
+#[test]
+fn open_links_setting_overrides_where_the_client_runs() {
+    let url = || "https://github.com/o/r/pull/7".to_string();
+    let mut local = Config::default();
+    local.ui.open_links = crate::config::OpenLinksConfig::Local;
+    let mut remote_but_local =
+        ClientShellState::new(ClientShellConfig::from_config(&local).with_remote_viewer(true));
+    let mut outcome = ClientShellInput::default();
+    remote_but_local.open_web_link(url(), &mut outcome);
+    assert!(opens_locally(&outcome));
+
+    let mut show = Config::default();
+    show.ui.open_links = crate::config::OpenLinksConfig::Show;
+    let mut here_but_shown = ClientShellState::new(ClientShellConfig::from_config(&show));
+    let mut outcome = ClientShellInput::default();
+    here_but_shown.open_web_link(url(), &mut outcome);
+    assert!(!opens_locally(&outcome));
+    assert!(matches!(
+        here_but_shown.overlay,
+        Some(ClientShellOverlay::Link(_))
+    ));
+}
+
 #[test]
 fn dialog_closes_when_its_item_disappears() {
     let mut state = shell_with(vec![item("7")]);

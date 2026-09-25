@@ -1657,6 +1657,12 @@ impl ClientShellState {
             }
             return;
         }
+        if matches!(self.overlay, Some(ClientShellOverlay::Link(_))) {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.handle_link_overlay_click(point, outcome);
+            }
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Inbox(_))) {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {

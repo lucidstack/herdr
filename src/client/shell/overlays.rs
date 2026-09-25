@@ -80,6 +80,7 @@ pub(crate) fn render_client_overlay(
         }
         ClientShellOverlay::WorkItem(v) => work_item_overlay::render_work_item_overlay(b, v, p),
         ClientShellOverlay::Inbox(v) => work_item_overlay::render_inbox_overlay(b, v, p),
+        ClientShellOverlay::Link(v) => render_link_overlay(b, v, p),
         ClientShellOverlay::ContextMenu(_) | ClientShellOverlay::GlobalMenu(_) => None,
     }
 }
@@ -1220,6 +1221,79 @@ fn render_confirm_close_overlay(
         worktree_search: Rect::default(),
         worktree_rows: Vec::new(),
         cursor: None,
+        ..OverlayRender::default()
+    })
+}
+
+/// The link on rows of its own, only wrapped when wider than the screen, so a
+/// terminal that turns URLs into taps finds it whole.
+fn render_link_overlay(
+    b: &mut Buffer,
+    l: &crate::client::shell::links::ClientLinkOverlay,
+    p: &Palette,
+) -> Option<OverlayRender> {
+    let url_width = display_width(&l.url);
+    let width = url_width.saturating_add(4).clamp(52, 120);
+    let width = width.min(b.area.width.saturating_sub(4));
+    let text_width = usize::from(width.saturating_sub(3)).max(1);
+    let chars: Vec<char> = l.url.chars().collect();
+    let lines: Vec<String> = chars
+        .chunks(text_width)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    let line_count = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let q = popup(b.area, width, line_count.saturating_add(7))?;
+    let i = panel(b, q, p.accent, p.panel_bg)?;
+    let base = Style::default().bg(p.panel_bg);
+    put_text(
+        b,
+        i.x,
+        i.y,
+        i.width,
+        " Open link",
+        base.fg(p.text).add_modifier(Modifier::BOLD),
+    );
+    put_text(
+        b,
+        i.x,
+        i.y + 1,
+        i.width,
+        " Tap it, or copy it to this device.",
+        base.fg(p.overlay0),
+    );
+    let link = base.fg(p.accent).add_modifier(Modifier::UNDERLINED);
+    let url_top = i.y + 3;
+    let visible = line_count.min(i.height.saturating_sub(5));
+    for (offset, line) in (0..visible).zip(&lines) {
+        put_text(b, i.x + 1, url_top + offset, i.width - 1, line, link);
+    }
+    let rs = row(i, &[15, 11], 2, 4 + visible);
+    let [copy, close] = rs.as_slice() else {
+        return None;
+    };
+    button(
+        b,
+        *copy,
+        " ↵ copy link ",
+        Style::default()
+            .fg(contrast(p))
+            .bg(p.accent)
+            .add_modifier(Modifier::BOLD),
+    );
+    button(
+        b,
+        *close,
+        " esc close ",
+        Style::default()
+            .fg(p.text)
+            .bg(p.surface0)
+            .add_modifier(Modifier::BOLD),
+    );
+    Some(OverlayRender {
+        area: q,
+        primary: *copy,
+        clear: Rect::new(i.x, url_top, i.width, visible),
+        cancel: *close,
         ..OverlayRender::default()
     })
 }
