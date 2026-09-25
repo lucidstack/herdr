@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 use super::{App, AppPolicy};
 use crate::api::schema::{
     AgentPromptParams, AgentStartParams, ErrorBody, ErrorResponse, Method, PaneInfo,
-    PaneSendInputParams, Request, ResponseResult, SuccessResponse, TabCreateParams, TabInfo,
-    TabRenameParams, WorkItemStep, WorkItemStepStatus, WorkspaceCloseParams, WorkspaceCreateParams,
-    WorkspaceInfo, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    PaneSendInputParams, PaneTarget, Request, ResponseResult, SuccessResponse, TabCreateParams,
+    TabInfo, TabRenameParams, WorkItemStep, WorkItemStepStatus, WorkspaceCloseParams,
+    WorkspaceCreateParams, WorkspaceInfo, WorkspaceTarget, WorktreeCreateParams,
+    WorktreeOpenParams, WorktreeRemoveParams,
 };
 use crate::events::AppEvent;
 use crate::work_items::provision::{
@@ -165,6 +166,8 @@ impl App {
             self.advance_work_item_agent(job_id, now);
         }
         self.advance_work_item_removals(now);
+        self.work_items
+            .finish_follow_ups(|response| parse_response(response).err().map(|err| err.message));
         self.work_items.expire_snoozes();
         self.sync_work_item_events();
         let changed = self.work_items.revision() != revision;
@@ -255,6 +258,64 @@ impl App {
             let result = source.perform(&item, &choice_id);
             send_event(&event_tx, WorkItemsEvent::Performed { key, result });
         });
+        self.request_work_items_render();
+        Ok(())
+    }
+
+    /// Sends a `BriefAgent` choice's follow-up brief to the agent in the item's workspace and
+    /// focuses that agent. The agent does the work; its own permission prompts gate it.
+    pub(super) fn start_work_item_follow_up(
+        &mut self,
+        key: &str,
+        choice_id: &str,
+    ) -> Result<(), (&'static str, String)> {
+        let Some(item) = self.work_items.get(key).cloned() else {
+            return Err(("work_item_not_found", format!("unknown work item {key}")));
+        };
+        let Some(source) = self.work_items.source(&item.source_id).cloned() else {
+            return Err(("work_item_not_found", format!("unknown work item {key}")));
+        };
+        let no_agent = || {
+            (
+                "work_item_agent_not_found",
+                "No agent is running in the item's workspace".to_string(),
+            )
+        };
+        let Some((workspace_id, ws_idx)) = item.workspace_id.as_deref().and_then(|workspace_id| {
+            self.parse_workspace_id(workspace_id)
+                .map(|ws_idx| (workspace_id.to_string(), ws_idx))
+        }) else {
+            return Err((
+                "work_item_workspace_not_found",
+                "The item has no open workspace".into(),
+            ));
+        };
+        let target = self
+            .first_agent_target_in_workspace(ws_idx)
+            .ok_or_else(no_agent)?;
+        let text = source
+            .follow_up_brief(&item, choice_id)
+            .map_err(|message| ("work_item_choice_unavailable", message))?;
+        let pane = self
+            .public_pane_id(ws_idx, target.pane_id)
+            .ok_or_else(no_agent)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.handle_deferred_agent_api_request(
+            Request {
+                id: "work-items".into(),
+                method: Method::AgentPrompt(AgentPromptParams {
+                    target: pane.clone(),
+                    text,
+                    wait: None,
+                }),
+            },
+            tx,
+        );
+        self.work_items.start_follow_up(key, rx);
+        // The brief is already on its way; failing to move focus must not report failure.
+        let _ = self.work_items_api(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }));
+        let _ = self.work_items_api(Method::PaneFocus(PaneTarget { pane_id: pane }));
+        let _ = self.work_items.mark_seen(key);
         self.request_work_items_render();
         Ok(())
     }
@@ -1217,6 +1278,36 @@ mod tests {
         let item = &list(&mut app)[0];
         assert_eq!(item.workspace_id.as_deref(), Some(workspace_id.as_str()));
         assert_eq!(item.phase, WorkItemPhase::Local);
+    }
+
+    #[test]
+    fn briefing_the_agent_needs_an_open_workspace_with_an_agent() {
+        use crate::api::schema::WorkItemLinkParams;
+
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("started")];
+        let source = FakeSource::with_items(vec![source_item("a")]);
+        app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        let brief = |app: &mut App| {
+            let response =
+                app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
+                    item_id: "fake:a".into(),
+                    choice_id: "brief".into(),
+                })));
+            serde_json::from_str::<ErrorResponse>(&response)
+                .expect("error response")
+                .error
+                .code
+        };
+        assert_eq!(brief(&mut app), "work_item_workspace_not_found");
+
+        let workspace_id = app.public_workspace_id(0);
+        app.handle_api_request(request(Method::WorkItemLink(WorkItemLinkParams {
+            item_id: "fake:a".into(),
+            workspace_id,
+        })));
+        assert_eq!(brief(&mut app), "work_item_agent_not_found");
     }
 
     #[test]

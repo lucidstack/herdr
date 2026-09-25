@@ -91,6 +91,12 @@ impl App {
                     Err((code, message)) => encode_error(id, code, message),
                 }
             }
+            WorkItemChoiceAction::BriefAgent => {
+                match self.start_work_item_follow_up(&params.item_id, &params.choice_id) {
+                    Ok(()) => encode_success(id, ResponseResult::Ok {}),
+                    Err((code, message)) => encode_error(id, code, message),
+                }
+            }
             WorkItemChoiceAction::Unknown => encode_error(
                 id,
                 "work_item_choice_unavailable",

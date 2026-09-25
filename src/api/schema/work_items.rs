@@ -48,6 +48,8 @@ pub enum WorkItemChoiceAction {
     ProvisionWorkspace,
     /// The source does it on the server, e.g. merging a pull request.
     Perform,
+    /// Herdr sends a follow-up brief to the agent in the item's workspace and focuses it.
+    BriefAgent,
     #[serde(other)]
     Unknown,
 }

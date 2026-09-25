@@ -609,6 +609,7 @@ impl WorkItemSource for JiraSource {
             Ok(issue) => issue.fields,
             Err(error) => {
                 return PreparedItem {
+                    waiting: false,
                     detail: None,
                     summary: None,
                     error: Some(error),
@@ -682,6 +683,7 @@ impl WorkItemSource for JiraSource {
         .collect::<Vec<_>>()
         .join(" · ");
         PreparedItem {
+            waiting: false,
             detail: serde_json::to_value(&detail).ok(),
             summary: Some(summary),
             error,
@@ -875,6 +877,7 @@ mod tests {
             resolve_error: None,
             action_in_flight: false,
             action_error: None,
+            waiting: false,
         }
     }
 

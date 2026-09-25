@@ -158,6 +158,7 @@ mod tests {
             resolve_error: Some("dirty".into()),
             action_in_flight: false,
             action_error: None,
+            waiting: true,
         }
     }
 

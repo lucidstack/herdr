@@ -1171,6 +1171,19 @@
               "type": "object"
             },
             {
+              "description": "Herdr sends a follow-up brief to the agent in the item's workspace and focuses it.",
+              "properties": {
+                "type": {
+                  "const": "brief_agent",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "type": {
                   "const": "unknown",
@@ -11205,6 +11218,19 @@
               "properties": {
                 "type": {
                   "const": "perform",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "Herdr sends a follow-up brief to the agent in the item's workspace and focuses it.",
+              "properties": {
+                "type": {
+                  "const": "brief_agent",
                   "type": "string"
                 }
               },

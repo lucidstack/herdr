@@ -23,6 +23,8 @@ pub(crate) struct PreparedItem {
     pub detail: Option<serde_json::Value>,
     pub summary: Option<String>,
     pub error: Option<String>,
+    /// The item waits on someone else, e.g. reviewers asked to review again.
+    pub waiting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,5 +131,10 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// and returns a one-line result for the user.
     fn perform(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {
         Err(format!("choice {choice_id} cannot be carried out here"))
+    }
+    /// Pure: text sent to the agent in the item's workspace for a choice whose action is
+    /// `BriefAgent`.
+    fn follow_up_brief(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        Err(format!("choice {choice_id} does not brief an agent"))
     }
 }

@@ -633,3 +633,31 @@ fn irreversible_choice_runs_only_after_a_second_confirm() {
     ));
     assert!(state.overlay.is_none());
 }
+
+#[test]
+fn briefing_the_agent_closes_the_dialog_and_asks_the_server() {
+    let mut local = item("7");
+    local.seen = true;
+    local.choices.insert(
+        0,
+        WorkItemChoiceInfo {
+            choice_id: "push_reply".into(),
+            label: "Ask agent to push and reply".into(),
+            description: None,
+            action: WorkItemChoiceAction::BriefAgent,
+            disabled_reason: None,
+            confirm: None,
+        },
+    );
+    local.default_choice_id = Some("push_reply".into());
+    let mut state = shell_with(vec![local]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
+
+    let input = state.handle_input_bytes(b"\r");
+    assert!(matches!(
+        endpoint_methods(&input)[..],
+        [Method::WorkItemChoose(params)] if params.choice_id == "push_reply"
+    ));
+    assert!(state.overlay.is_none());
+}
