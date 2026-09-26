@@ -30,8 +30,8 @@ Every poll runs one GitHub search per event. The defaults:
 | Event | Default query | What you can do |
 | --- | --- | --- |
 | `review_requested` | `is:pr is:open review-requested:@me archived:false` | Review locally, have the agent review first, have the agent review and report back or post a comment, or open it on GitHub |
-| `changes_requested` | `is:pr is:open author:@me review:changes_requested archived:false` | Work on the feedback locally, or have the agent address it |
-| `ci_failing` | `is:pr is:open author:@me status:failure archived:false` | Diagnose the failures locally, or have the agent fix them |
+| `changes_requested` | `is:pr is:open author:@me review:changes_requested archived:false` | Work on the feedback locally, have the agent address it, then have the agent push and reply |
+| `ci_failing` | `is:pr is:open author:@me status:failure archived:false` | Diagnose the failures locally, have the agent fix them, then have the agent push the fix |
 | `assigned` | `is:issue is:open assignee:@me archived:false` | Plan it locally, or have the agent implement it |
 | `mentioned` | off | Have the agent read the thread and draft a reply |
 | `ready_to_merge` | `is:pr is:open author:@me draft:false archived:false`, keeping those approved | Merge it, with any method the repository allows, or open it on GitHub |
@@ -50,6 +50,12 @@ mentioned = "is:open mentions:@me"
 - **Your own pull requests** (changes requested, failing checks) use the pull request's head branch. An existing worktree of that branch is reopened, and an existing local branch is reused as it is. Otherwise a new branch tracks the remote one, so `git push` works. Pull requests from forks start from GitHub's copy of the head instead, so pushing needs the fork as a remote.
 - **Assigned issues** get a new branch `issue/<number>-<title words>` from the repository's default branch. It does not track anything, so a push cannot land on the default branch by accident.
 - **Mentions** and agent reviews without a checkout download the thread or diff into a scratch directory instead.
+
+### Sending feedback back to reviewers
+
+When the agent addresses review feedback or fixes failing checks, it commits on the branch but never pushes. Once you are happy with the commit, open the item again and choose **Ask agent to push and reply** (or **Ask agent to push the fix** for failing checks). Herdr sends the agent already in the item's workspace a follow-up and focuses it. The agent pushes with a plain `git push` (never a force-push), replies once in each review thread it addressed, and asks the reviewers who requested changes to review again. It does not resolve threads or post other comments. Herdr itself writes nothing to GitHub: every command runs in the agent's pane, so you approve each one in the agent's own permission prompts.
+
+The choice needs a workspace with a running agent. Once every reviewer who requested changes has been asked to review again, by the agent or by you on GitHub, the item reads **Waiting for re-review from @…**. When one of them reviews again while changes are still requested, the item is marked unread and you get a notification. Once nobody requests changes any more, the item leaves the inbox as usual.
 
 ### Merging approved pull requests
 

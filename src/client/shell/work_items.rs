@@ -1080,8 +1080,9 @@ impl ClientShellState {
                 overlay.item.provisioning = None;
                 self.push_endpoint_method(method, outcome);
             }
-            // The server carries it out; the item's spinner shows it running.
-            WorkItemChoiceAction::Perform => {
+            // The server carries it out; the item's spinner shows it running. A brief goes to
+            // the agent, which the server focuses.
+            WorkItemChoiceAction::Perform | WorkItemChoiceAction::BriefAgent => {
                 self.overlay = None;
                 self.push_endpoint_method(method, outcome);
             }

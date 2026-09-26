@@ -40,6 +40,9 @@ pub(crate) struct WorkItem {
     /// unchanged items again.
     #[serde(default)]
     pub prepared_for: Option<String>,
+    /// The item waits on someone else, e.g. reviewers asked to review again.
+    #[serde(default)]
+    pub waiting: bool,
     #[serde(skip)]
     pub prepare_in_flight: bool,
     #[serde(skip)]
@@ -85,6 +88,7 @@ impl WorkItem {
             resolve_error: None,
             action_in_flight: false,
             action_error: None,
+            waiting: false,
         }
     }
 
@@ -264,22 +268,29 @@ impl WorkItemsState {
             .collect()
     }
 
+    /// Stores a preparation. Returns (changed, review arrived): the item stopped waiting on
+    /// someone else, so it is marked unseen again.
     pub(crate) fn apply_prepared(
         &mut self,
         key: &str,
         updated_at: &str,
         prepared: PreparedItem,
-    ) -> bool {
+    ) -> (bool, bool) {
         let Some(item) = self.get_mut(key) else {
-            return false;
+            return (false, false);
         };
         let before = item.clone();
+        let review_arrived = item.waiting && !prepared.waiting;
         item.detail = prepared.detail;
         item.summary = prepared.summary;
         item.prepare_error = prepared.error;
+        item.waiting = prepared.waiting;
+        if review_arrived {
+            item.seen = false;
+        }
         item.prepared_for = Some(updated_at.to_string());
         item.prepare_in_flight = false;
-        *item != before
+        (*item != before, review_arrived)
     }
 
     pub(crate) fn mark_seen(&mut self, key: &str) -> Result<bool, NotFound> {
@@ -572,10 +583,32 @@ mod tests {
     }
 
     #[test]
+    fn a_review_arrives_once_the_item_stops_waiting() {
+        let mut state = state_with("gh", &["pr"]);
+        let prepared = |waiting: bool| PreparedItem {
+            detail: None,
+            summary: None,
+            error: None,
+            waiting,
+        };
+        state.apply_prepared("gh:pr", "t1", prepared(true));
+        state.mark_seen("gh:pr").expect("item");
+        assert_eq!(
+            state.apply_prepared("gh:pr", "t2", prepared(false)),
+            (true, true)
+        );
+        assert!(!state.get("gh:pr").expect("item").seen);
+        state.mark_seen("gh:pr").expect("item");
+        assert!(!state.apply_prepared("gh:pr", "t3", prepared(false)).1);
+        assert!(state.get("gh:pr").expect("item").seen);
+    }
+
+    #[test]
     fn restored_items_are_prepared_again_only_when_preparation_failed() {
         let mut state = state_with("gh", &["ok", "failed"]);
         state.needs_prepare("gh");
         let prepared = |error: Option<&str>| PreparedItem {
+            waiting: false,
             detail: Some(serde_json::json!({})),
             summary: None,
             error: error.map(str::to_string),

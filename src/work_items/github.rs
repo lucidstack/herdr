@@ -31,6 +31,8 @@ const MAX_POLL_SECONDS: u64 = 3600;
 const SEARCH_PAGE_SIZE: usize = 100;
 const MAX_SEARCH_RESULTS: usize = 1000;
 const GITHUB_CHOICE_ID: &str = "github";
+const PUSH_REPLY_CHOICE_ID: &str = "push_reply";
+const PUSH_FIX_CHOICE_ID: &str = "push_fix";
 const MAX_WORKSPACE_LABEL_CHARS: usize = 40;
 const MAX_BRIEF_BODY_CHARS: usize = 4000;
 const MAX_BRIEF_FILES: usize = 100;
@@ -230,6 +232,9 @@ pub(crate) struct GithubDetail {
     /// Submitted reviews; only fetched for changes-requested items.
     #[serde(default)]
     pub reviews: Vec<GithubReview>,
+    /// Users whose review is currently requested; only fetched for changes-requested items.
+    #[serde(default)]
+    pub review_requests: Vec<GithubReviewRequest>,
     /// Inline review comments; only fetched for changes-requested items.
     #[serde(default)]
     pub inline_comments: Vec<GithubInlineComment>,
@@ -321,6 +326,13 @@ pub(crate) struct GithubLogin {
     pub login: String,
 }
 
+/// One entry of `gh pr view --json reviewRequests`. Teams come back without a login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GithubReviewRequest {
+    #[serde(default)]
+    pub login: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GithubReview {
     #[serde(default)]
@@ -333,6 +345,12 @@ pub(crate) struct GithubReview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GithubInlineComment {
+    /// REST comment id; 0 in details stored before it was kept.
+    #[serde(default)]
+    pub id: u64,
+    /// Id of the thread's first comment when this comment is a reply.
+    #[serde(default)]
+    pub in_reply_to: Option<u64>,
     pub path: String,
     #[serde(default)]
     pub line: Option<u64>,
@@ -343,6 +361,10 @@ pub(crate) struct GithubInlineComment {
 /// One entry of `GET repos/{repo}/pulls/{n}/comments`.
 #[derive(Deserialize)]
 struct RestReviewComment {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    in_reply_to_id: Option<u64>,
     path: String,
     #[serde(default)]
     line: Option<u64>,
@@ -770,8 +792,13 @@ fn feedback_list(detail: &GithubDetail) -> String {
             Some(line) => format!("{}:{line}", comment.path),
             None => comment.path.clone(),
         };
+        let thread = if comment.id == 0 {
+            String::new()
+        } else {
+            format!("[thread {}] ", comment.in_reply_to.unwrap_or(comment.id))
+        };
         lines.push(format!(
-            "- {location} @{}: {}",
+            "- {thread}{location} @{}: {}",
             comment.author,
             one_line(&comment.body)
         ));
@@ -786,12 +813,57 @@ fn feedback_list(detail: &GithubDetail) -> String {
     }
 }
 
+/// Logins whose latest review requests changes, in first-seen order. Comment-only and pending
+/// reviews do not change a reviewer's verdict, as in GitHub's review decision.
+fn changes_requesters(detail: &GithubDetail) -> Vec<String> {
+    let mut latest: Vec<(&str, &str)> = Vec::new();
+    for review in &detail.reviews {
+        if matches!(review.state.as_str(), "COMMENTED" | "PENDING") {
+            continue;
+        }
+        let Some(login) = review.author.as_ref().map(|author| author.login.as_str()) else {
+            continue;
+        };
+        match latest.iter_mut().find(|(seen, _)| *seen == login) {
+            Some(entry) => entry.1 = review.state.as_str(),
+            None => latest.push((login, review.state.as_str())),
+        }
+    }
+    latest
+        .into_iter()
+        .filter(|(_, state)| *state == "CHANGES_REQUESTED")
+        .map(|(login, _)| login.to_string())
+        .collect()
+}
+
+/// The reviewers requesting changes, when every one of them has been asked to review again.
+fn waiting_for_rereview(detail: &GithubDetail) -> Option<Vec<String>> {
+    let requesters = changes_requesters(detail);
+    let all_requested = requesters.iter().all(|login| {
+        detail
+            .review_requests
+            .iter()
+            .any(|request| !request.login.is_empty() && request.login == *login)
+    });
+    (!requesters.is_empty() && all_requested).then_some(requesters)
+}
+
+/// `@a, @b`.
+fn at_logins(logins: &[String]) -> String {
+    logins
+        .iter()
+        .map(|login| format!("@{login}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn changes_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
     let number = detail.number;
     let head = &detail.head_ref_name;
     let instructions = if mode == ReviewMode::AddressAgent {
-        "Address each point now: make the changes and run the relevant tests. Do not commit, \
-         push or reply on GitHub. Report what you changed and any point you disagree with."
+        "Address each point now: make the changes and run the relevant tests, then commit \
+         them on this branch. Do not push, reply or comment on GitHub yet. Report what you \
+         changed and any point you disagree with."
     } else {
         "Summarise what the reviewers asked for, propose how to address each point and wait \
          for my instructions before changing anything."
@@ -842,8 +914,8 @@ fn ci_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode
             .join("\n")
     };
     let instructions = if mode == ReviewMode::FixChecksAgent {
-        "Fix the failures now and rerun the failing tests locally where you can. Do not commit, \
-         push or rerun CI. Report what you changed."
+        "Fix the failures now and rerun the failing tests locally where you can, then commit \
+         the fix on this branch. Do not push or rerun CI. Report what you changed."
     } else {
         "Find the cause of each failure, explain it and propose a fix, then wait for my \
          instructions before changing anything."
@@ -864,6 +936,57 @@ fn ci_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode
         url = item.url,
         head = detail.head_ref_name,
         base = detail.base_ref_name,
+    )
+}
+
+/// Follow-up asking the agent in the item's workspace to send its changes back to the
+/// reviewers. The agent does the GitHub writes; the user approves each in its pane.
+fn push_reply_brief(repo: &str, detail: &GithubDetail) -> String {
+    let number = detail.number;
+    let requesters = changes_requesters(detail);
+    let rerequest = if requesters.is_empty() {
+        "Nobody currently requests changes, so do not re-request review.".to_string()
+    } else {
+        let reviewers: String = requesters
+            .iter()
+            // Quoted: zsh treats an unquoted `[]` as a glob.
+            .map(|login| format!(" -f 'reviewers[]={login}'"))
+            .collect();
+        format!(
+            "Re-request review from {}: `gh api --method POST \
+             repos/{repo}/pulls/{number}/requested_reviewers{reviewers}`",
+            at_logins(&requesters)
+        )
+    };
+    format!(
+        "Send your changes for {repo}#{number} back to the reviewers now:\n\
+         1. Commit anything not yet committed on this branch ({head}).\n\
+         2. Push with a plain `git push`. Never force-push. If GitHub rejects the push because \
+         it has newer commits, stop and tell me.\n\
+         3. Reply once in each review thread you addressed, saying what changed or, where you \
+         disagree, why: `gh api --method POST \
+         repos/{repo}/pulls/{number}/comments/<thread id>/replies -f body=<reply>`. The thread \
+         ids are below; `gh api repos/{repo}/pulls/{number}/comments` lists them all. Do not \
+         resolve threads and do not post any other comment.\n\
+         4. {rerequest}\n\
+         Then report what you pushed and posted.\n\
+         \n\
+         Review feedback:\n\
+         {feedback}",
+        head = detail.head_ref_name,
+        feedback = feedback_list(detail),
+    )
+}
+
+/// Follow-up asking the agent in the item's workspace to push its fix for failing checks.
+fn push_fix_brief(repo: &str, detail: &GithubDetail) -> String {
+    format!(
+        "Push your fix for the failing checks on {repo}#{number} now: commit anything not yet \
+         committed on this branch ({head}), then push with a plain `git push`. Never \
+         force-push. If GitHub rejects the push because it has newer commits, stop and tell \
+         me. Do not rerun CI or comment on GitHub. Report what you pushed.",
+        number = detail.number,
+        head = detail.head_ref_name,
     )
 }
 
@@ -1238,6 +1361,7 @@ impl WorkItemSource for GithubSource {
     fn prepare(&self, item: &SourceItem) -> PreparedItem {
         let Some((repo, number)) = parse_external_id(&item.external_id) else {
             return PreparedItem {
+                waiting: false,
                 detail: None,
                 summary: None,
                 error: Some(format!("unrecognised pull request id {}", item.external_id)),
@@ -1249,7 +1373,9 @@ impl WorkItemSource for GithubSource {
         }
         let number_arg = number.to_string();
         let fields = match event {
-            Event::ChangesRequested => format!("{DETAIL_FIELDS},isCrossRepository,reviews"),
+            Event::ChangesRequested => {
+                format!("{DETAIL_FIELDS},isCrossRepository,reviews,reviewRequests")
+            }
             Event::CiFailing => format!("{DETAIL_FIELDS},isCrossRepository"),
             Event::ReadyToMerge => format!("{DETAIL_FIELDS},mergeStateStatus,latestReviews"),
             _ => DETAIL_FIELDS.to_string(),
@@ -1262,6 +1388,7 @@ impl WorkItemSource for GithubSource {
             Ok(detail) => detail,
             Err(error) => {
                 return PreparedItem {
+                    waiting: false,
                     detail: None,
                     summary: None,
                     error: Some(error),
@@ -1295,19 +1422,25 @@ impl WorkItemSource for GithubSource {
                 "files"
             }
         );
+        let waiting = (event == Event::ChangesRequested)
+            .then(|| waiting_for_rereview(&detail))
+            .flatten();
         let summary = match event {
-            Event::ChangesRequested => {
-                let requesting = detail
-                    .reviews
-                    .iter()
-                    .filter(|review| review.state == "CHANGES_REQUESTED")
-                    .count();
-                format!(
-                    "{requesting} {} requesting changes · {} inline comments · {size}",
-                    if requesting == 1 { "review" } else { "reviews" },
-                    detail.inline_comments.len(),
-                )
-            }
+            Event::ChangesRequested => match &waiting {
+                Some(logins) => format!("Waiting for re-review from {}", at_logins(logins)),
+                None => {
+                    let requesting = detail
+                        .reviews
+                        .iter()
+                        .filter(|review| review.state == "CHANGES_REQUESTED")
+                        .count();
+                    format!(
+                        "{requesting} {} requesting changes · {} inline comments · {size}",
+                        if requesting == 1 { "review" } else { "reviews" },
+                        detail.inline_comments.len(),
+                    )
+                }
+            },
             Event::ReadyToMerge => merge_summary(&detail),
             Event::CiFailing => {
                 let failing = detail.failing_checks.len();
@@ -1330,6 +1463,7 @@ impl WorkItemSource for GithubSource {
             detail: serde_json::to_value(&detail).ok(),
             summary: Some(summary),
             error: (!errors.is_empty()).then(|| errors.join("; ")),
+            waiting: waiting.is_some(),
         }
     }
 
@@ -1354,6 +1488,33 @@ impl WorkItemSource for GithubSource {
                 confirm: None,
             })
             .collect();
+        let follow_up = match event {
+            Event::ChangesRequested => Some((
+                PUSH_REPLY_CHOICE_ID,
+                "Ask agent to push and reply",
+                "The agent commits, pushes, replies in each thread and re-requests review; you \
+                 approve each step in its pane",
+            )),
+            Event::CiFailing => Some((
+                PUSH_FIX_CHOICE_ID,
+                "Ask agent to push the fix",
+                "The agent commits and pushes its fix; you approve the push in its pane",
+            )),
+            _ => None,
+        };
+        if let Some((choice_id, label, description)) = follow_up {
+            choices.push(WorkItemChoiceInfo {
+                choice_id: choice_id.into(),
+                label: label.into(),
+                description: Some(description.into()),
+                action: WorkItemChoiceAction::BriefAgent,
+                disabled_reason: item
+                    .workspace_id
+                    .is_none()
+                    .then(|| "Work on it locally first".into()),
+                confirm: None,
+            });
+        }
         let (label, url) = match event {
             Event::ReviewRequested => ("Review on GitHub", item.url.clone()),
             Event::CiFailing => ("Open the checks on GitHub", format!("{}/checks", item.url)),
@@ -1555,6 +1716,26 @@ impl WorkItemSource for GithubSource {
         }
         self.run_gh(&args)?;
         Ok(format!("Merged #{number} into {}", detail.base_ref_name))
+    }
+
+    fn follow_up_brief(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        let event = Event::of(&item.external_id);
+        let briefs = matches!(
+            (event, choice_id),
+            (Event::ChangesRequested, PUSH_REPLY_CHOICE_ID)
+                | (Event::CiFailing, PUSH_FIX_CHOICE_ID)
+        );
+        let repo = parse_external_id(&item.external_id)
+            .filter(|_| briefs)
+            .map(|(repo, _)| repo)
+            .ok_or_else(|| format!("choice {choice_id} does not brief an agent"))?;
+        let detail = item_detail::<GithubDetail>(item)
+            .ok_or("details are not available yet; try again shortly")?;
+        Ok(if event == Event::ChangesRequested {
+            push_reply_brief(repo, &detail)
+        } else {
+            push_fix_brief(repo, &detail)
+        })
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
@@ -1862,6 +2043,7 @@ impl GithubSource {
             Ok(issue) => issue,
             Err(error) => {
                 return PreparedItem {
+                    waiting: false,
                     detail: None,
                     summary: None,
                     error: Some(error),
@@ -1929,6 +2111,7 @@ impl GithubSource {
             summary.push_str(&format!(" · {}", detail.labels.join(", ")));
         }
         PreparedItem {
+            waiting: false,
             detail: serde_json::to_value(&detail).ok(),
             summary: Some(summary),
             error: (!errors.is_empty()).then(|| errors.join("; ")),
@@ -1978,6 +2161,8 @@ impl GithubSource {
         Ok(comments
             .into_iter()
             .map(|comment| GithubInlineComment {
+                id: comment.id,
+                in_reply_to: comment.in_reply_to_id,
                 path: comment.path,
                 line: comment.line.or(comment.original_line),
                 author: comment
@@ -2086,6 +2271,7 @@ mod tests {
             head_ref_oid: "0123456789abcdef".into(),
             is_cross_repository: false,
             reviews: Vec::new(),
+            review_requests: Vec::new(),
             inline_comments: Vec::new(),
             failing_checks: Vec::new(),
             merge_state_status: String::new(),
@@ -2119,6 +2305,7 @@ mod tests {
             resolve_error: None,
             action_in_flight: false,
             action_error: None,
+            waiting: false,
         }
     }
 
@@ -2368,6 +2555,8 @@ mod tests {
                 },
             ],
             inline_comments: vec![GithubInlineComment {
+                id: 0,
+                in_reply_to: None,
                 path: "src/a.rs".into(),
                 line: Some(12),
                 author: "bob".into(),
@@ -2375,6 +2564,109 @@ mod tests {
             }],
             ..detail(&[("src/a.rs", 40, 2)])
         }
+    }
+
+    fn review(login: &str, state: &str) -> GithubReview {
+        GithubReview {
+            author: Some(GithubLogin {
+                login: login.into(),
+            }),
+            state: state.into(),
+            body: String::new(),
+        }
+    }
+
+    fn requested(logins: &[&str]) -> Vec<GithubReviewRequest> {
+        logins
+            .iter()
+            .map(|login| GithubReviewRequest {
+                login: (*login).into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn feedback_tags_each_inline_comment_with_its_thread() {
+        let detail = GithubDetail {
+            reviews: Vec::new(),
+            inline_comments: vec![
+                GithubInlineComment {
+                    id: 101,
+                    in_reply_to: Some(100),
+                    path: "src/a.rs".into(),
+                    line: Some(3),
+                    author: "bob".into(),
+                    body: "Still panics.".into(),
+                },
+                GithubInlineComment {
+                    id: 0,
+                    in_reply_to: None,
+                    path: "src/b.rs".into(),
+                    line: None,
+                    author: "bob".into(),
+                    body: "Stored before ids.".into(),
+                },
+            ],
+            ..detail(&[])
+        };
+        assert_eq!(
+            feedback_list(&detail),
+            "- [thread 100] src/a.rs:3 @bob: Still panics.\n- src/b.rs @bob: Stored before ids."
+        );
+    }
+
+    #[test]
+    fn a_comment_after_requesting_changes_keeps_the_request() {
+        let detail = GithubDetail {
+            reviews: vec![
+                review("bob", "CHANGES_REQUESTED"),
+                review("bob", "COMMENTED"),
+            ],
+            ..detail(&[])
+        };
+        assert_eq!(changes_requesters(&detail), vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn waiting_for_rereview_once_every_requester_is_asked_again() {
+        let detail = GithubDetail {
+            reviews: vec![
+                review("bob", "CHANGES_REQUESTED"),
+                review("carol", "CHANGES_REQUESTED"),
+            ],
+            review_requests: requested(&["carol", "", "bob"]),
+            ..detail(&[])
+        };
+        assert_eq!(
+            waiting_for_rereview(&detail),
+            Some(vec!["bob".to_string(), "carol".to_string()])
+        );
+    }
+
+    #[test]
+    fn not_waiting_while_a_requester_is_not_asked_again() {
+        let detail = GithubDetail {
+            reviews: vec![
+                review("bob", "CHANGES_REQUESTED"),
+                review("carol", "CHANGES_REQUESTED"),
+            ],
+            review_requests: requested(&["bob"]),
+            ..detail(&[])
+        };
+        assert_eq!(waiting_for_rereview(&detail), None);
+    }
+
+    #[test]
+    fn not_waiting_once_the_requester_approved() {
+        let detail = GithubDetail {
+            reviews: vec![
+                review("bob", "CHANGES_REQUESTED"),
+                review("bob", "APPROVED"),
+            ],
+            review_requests: requested(&["bob"]),
+            ..detail(&[])
+        };
+        assert_eq!(waiting_for_rereview(&detail), None);
     }
 
     #[test]
@@ -2397,7 +2689,10 @@ mod tests {
             .iter()
             .map(|choice| choice.choice_id.as_str())
             .collect();
-        assert_eq!(ids, vec!["address", "address_agent", "github"]);
+        assert_eq!(
+            ids,
+            vec!["address", "address_agent", "push_reply", "github"]
+        );
         assert_eq!(choices.default_choice_id.as_deref(), Some("address"));
         assert!(source
             .provision_plan(
@@ -2439,7 +2734,64 @@ mod tests {
         assert!(!plan.brief.contains("@carol"));
         assert!(plan
             .brief
-            .contains("Do not commit, push or reply on GitHub"));
+            .contains("commit them on this branch. Do not push, reply or comment on GitHub"));
+    }
+
+    fn push_reply_choice(item: &WorkItem) -> WorkItemChoiceInfo {
+        mapped_source(repo_config())
+            .choices(item)
+            .choices
+            .into_iter()
+            .find(|choice| choice.choice_id == "push_reply")
+            .expect("offered")
+    }
+
+    #[test]
+    fn pushing_and_replying_needs_a_local_workspace() {
+        let item = changes_item(Some(&feedback_detail()));
+        assert_eq!(
+            push_reply_choice(&item).disabled_reason.as_deref(),
+            Some("Work on it locally first")
+        );
+        let local = WorkItem {
+            workspace_id: Some("w1".into()),
+            ..item
+        };
+        let choice = push_reply_choice(&local);
+        assert_eq!(choice.disabled_reason, None);
+        assert_eq!(choice.action, WorkItemChoiceAction::BriefAgent);
+    }
+
+    #[test]
+    fn push_and_reply_brief_re_requests_review_from_each_requester() {
+        let detail = GithubDetail {
+            reviews: vec![
+                review("bob", "CHANGES_REQUESTED"),
+                review("carol", "CHANGES_REQUESTED"),
+            ],
+            ..feedback_detail()
+        };
+        let brief = mapped_source(repo_config())
+            .follow_up_brief(&changes_item(Some(&detail)), "push_reply")
+            .expect("brief");
+        assert!(brief.contains(
+            "4. Re-request review from @bob, @carol: `gh api --method POST \
+             repos/o/r/pulls/5/requested_reviewers -f 'reviewers[]=bob' -f 'reviewers[]=carol'`"
+        ));
+    }
+
+    #[test]
+    fn push_and_reply_brief_does_not_re_request_without_requesters() {
+        let detail = GithubDetail {
+            reviews: vec![review("bob", "APPROVED")],
+            ..feedback_detail()
+        };
+        let brief = mapped_source(repo_config())
+            .follow_up_brief(&changes_item(Some(&detail)), "push_reply")
+            .expect("brief");
+        assert!(
+            brief.contains("4. Nobody currently requests changes, so do not re-request review.")
+        );
     }
 
     #[test]
@@ -2567,7 +2919,9 @@ mod tests {
         assert!(plan
             .brief
             .contains("- CI / rspec: https://github.com/o/r/actions/runs/42/job/7"));
-        assert!(plan.brief.contains("Do not commit"));
+        assert!(plan
+            .brief
+            .contains("commit the fix on this branch. Do not push"));
     }
 
     #[test]

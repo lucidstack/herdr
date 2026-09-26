@@ -105,6 +105,13 @@ impl App {
         })
     }
 
+    /// The first agent pane of a workspace, in tab and layout order.
+    pub(crate) fn first_agent_target_in_workspace(&self, ws_idx: usize) -> Option<TerminalTarget> {
+        self.terminal_targets()
+            .into_iter()
+            .find(|target| target.ws_idx == ws_idx && self.target_is_agent(target))
+    }
+
     fn target_is_agent(&self, target: &TerminalTarget) -> bool {
         self.state
             .terminals

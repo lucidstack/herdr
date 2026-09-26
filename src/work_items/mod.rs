@@ -101,6 +101,8 @@ pub(crate) struct WorkItems {
     /// Resolved items whose workspace should be removed, waiting for the app.
     pending_resolutions: Vec<String>,
     removals: Vec<PendingRemoval>,
+    /// Follow-up briefs sent to an item's agent, waiting for the `agent.prompt` response.
+    follow_ups: Vec<(String, std::sync::mpsc::Receiver<String>)>,
 }
 
 impl std::fmt::Debug for WorkItems {
@@ -149,6 +151,7 @@ impl WorkItems {
             owned_worktrees: Vec::new(),
             pending_resolutions: Vec::new(),
             removals: Vec::new(),
+            follow_ups: Vec::new(),
         }
     }
 
@@ -345,11 +348,21 @@ impl WorkItems {
                 updated_at,
                 prepared,
             } => {
-                let changed = self.state.apply_prepared(&key, &updated_at, prepared);
+                let (changed, review_arrived) =
+                    self.state.apply_prepared(&key, &updated_at, prepared);
                 if changed {
                     self.changed();
                 }
-                (changed, Vec::new())
+                let notices = review_arrived
+                    .then(|| self.state.get(&key))
+                    .flatten()
+                    .map(|item| WorkItemNotice {
+                        title: "New review on your pull request".into(),
+                        body: Some(item.context.clone()),
+                    })
+                    .into_iter()
+                    .collect();
+                (changed, notices)
             }
             // Provisioning results need the app and are handled by its driver.
             WorkItemsEvent::CheckoutFinished { .. } => (false, Vec::new()),
@@ -459,6 +472,44 @@ impl WorkItems {
         if self.state.workspace_closed(workspace_id) {
             self.changed();
         }
+    }
+
+    /// Tracks a follow-up brief whose `agent.prompt` response arrives on `response`.
+    pub(crate) fn start_follow_up(
+        &mut self,
+        key: &str,
+        response: std::sync::mpsc::Receiver<String>,
+    ) {
+        if let Some(item) = self.state.get_mut(key) {
+            item.action_error = None;
+        }
+        self.follow_ups.push((key.to_string(), response));
+        self.changed();
+    }
+
+    /// Drains finished follow-up responses; `parse` returns why one failed, if it did.
+    pub(crate) fn finish_follow_ups(&mut self, parse: impl Fn(&str) -> Option<String>) {
+        let mut failures = Vec::new();
+        self.follow_ups.retain(|(key, response)| {
+            let failure = match response.try_recv() {
+                Ok(response) => parse(&response),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some("agent prompt response was lost".to_string())
+                }
+            };
+            failures.extend(failure.map(|error| (key.clone(), error)));
+            false
+        });
+        if failures.is_empty() {
+            return;
+        }
+        for (key, error) in failures {
+            if let Some(item) = self.state.get_mut(&key) {
+                item.action_error = Some(error);
+            }
+        }
+        self.changed();
     }
 
     pub(crate) fn has_job(&self, key: &str) -> bool {

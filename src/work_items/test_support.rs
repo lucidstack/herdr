@@ -73,6 +73,7 @@ impl WorkItemSource for FakeSource {
     fn prepare(&self, _item: &SourceItem) -> PreparedItem {
         self.prepare_calls.fetch_add(1, Ordering::SeqCst);
         PreparedItem {
+            waiting: false,
             detail: None,
             summary: Some("+1 −0 across 1 file".into()),
             error: None,
@@ -108,6 +109,14 @@ impl WorkItemSource for FakeSource {
                     disabled_reason: None,
                     confirm: Some("Sure?".into()),
                 },
+                WorkItemChoiceInfo {
+                    choice_id: "brief".into(),
+                    label: "Brief the agent".into(),
+                    description: None,
+                    action: WorkItemChoiceAction::BriefAgent,
+                    disabled_reason: None,
+                    confirm: None,
+                },
             ],
             default_choice_id: Some("web".into()),
         }
@@ -135,6 +144,10 @@ impl WorkItemSource for FakeSource {
             Some(error) => Err(error),
             None => Ok("Done".into()),
         }
+    }
+
+    fn follow_up_brief(&self, _item: &WorkItem, _choice_id: &str) -> Result<String, String> {
+        Ok("hello".into())
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
