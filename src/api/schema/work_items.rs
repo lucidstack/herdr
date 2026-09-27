@@ -190,6 +190,11 @@ pub struct WorkItemInfo {
     /// the last text sent to it.
     #[serde(default)]
     pub is_pick_next: bool,
+    /// Set when you work on the item (it has a workspace) but its tracker lags behind:
+    /// the ticket is not assigned to you, or still in a to-do status. One line for the
+    /// user, e.g. "You're working on this, but it isn't assigned to you".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_reminder: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

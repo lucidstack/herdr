@@ -17,8 +17,9 @@ use crate::config::{
 
 use super::process::{failure_detail, run_with_timeout};
 use super::source::{
-    DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, TicketDetail,
-    WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+    DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, StartReminder,
+    TicketDetail, WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+    START_WORK_CHOICE_ID,
 };
 use super::state::WorkItem;
 
@@ -161,6 +162,8 @@ pub(crate) struct GithubSource {
     fallback: Workflow,
     branch_fallback: BranchWorkflowConfig,
     build_error: Option<String>,
+    /// Your GitHub login, to tell whether an issue is assigned to you.
+    viewer: std::sync::Mutex<Option<String>>,
 }
 
 /// One `[[work_items.github.review_requested]]` block, ready for matching.
@@ -288,6 +291,9 @@ pub(crate) struct GithubIssueDetail {
     /// Default branch of the repository; fetched for assigned issues.
     #[serde(default)]
     pub default_branch: String,
+    /// Whether the issue is assigned to you; unknown for pull requests and older details.
+    #[serde(default)]
+    pub assigned_to_me: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +445,7 @@ impl GithubSource {
             fallback,
             branch_fallback: BranchWorkflowConfig::default(),
             build_error,
+            viewer: std::sync::Mutex::new(None),
         }
     }
 
@@ -530,6 +537,22 @@ impl GithubSource {
             return Some(format!("No agent configured for {repo} {}", event.name()));
         }
         None
+    }
+
+    /// Your login, asked once.
+    fn viewer_login(&self) -> Result<String, String> {
+        if let Some(login) = self.viewer.lock().ok().and_then(|login| login.clone()) {
+            return Ok(login);
+        }
+        let stdout = self.run_gh(&["api", "user", "--jq", ".login"])?;
+        let login = String::from_utf8_lossy(&stdout).trim().to_string();
+        if login.is_empty() {
+            return Err("gh did not say who you are".into());
+        }
+        if let Ok(mut cached) = self.viewer.lock() {
+            *cached = Some(login.clone());
+        }
+        Ok(login)
     }
 
     fn run_gh(&self, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -1828,7 +1851,44 @@ impl WorkItemSource for GithubSource {
             == OnResolvedConfig::Remove
     }
 
+    fn start_reminder(&self, item: &WorkItem) -> Option<StartReminder> {
+        let detail = item_detail::<GithubIssueDetail>(item)?;
+        // Issues only: a pull request has no assignee you need to become.
+        if Event::of(&item.external_id).is_pull_request_event()
+            || detail.is_pull_request
+            || detail.assigned_to_me != Some(false)
+        {
+            return None;
+        }
+        Some(StartReminder {
+            message: "You're working on this, but it isn't assigned to you".into(),
+            choice: WorkItemChoiceInfo {
+                choice_id: START_WORK_CHOICE_ID.into(),
+                label: "Assign to me".into(),
+                description: Some("Adds you as an assignee on GitHub".into()),
+                action: WorkItemChoiceAction::Perform,
+                disabled_reason: None,
+                confirm: None,
+            },
+        })
+    }
+
     fn perform(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        if choice_id == START_WORK_CHOICE_ID {
+            let (repo, number) = parse_external_id(&item.external_id)
+                .ok_or_else(|| format!("unrecognised issue id {}", item.external_id))?;
+            let number_arg = number.to_string();
+            self.run_gh(&[
+                "issue",
+                "edit",
+                number_arg.as_str(),
+                "--repo",
+                repo,
+                "--add-assignee",
+                "@me",
+            ])?;
+            return Ok(format!("#{number} is assigned to you"));
+        }
         if Event::of(&item.external_id) != Event::ReadyToMerge {
             return Err(format!("choice {choice_id} cannot be carried out here"));
         }
@@ -2376,6 +2436,18 @@ impl GithubSource {
         } else {
             String::new()
         };
+        // Unknown when gh will not say who you are: then no reminder, rather than a wrong one.
+        let assigned_to_me = if issue.pull_request.is_some() {
+            None
+        } else {
+            self.viewer_login().ok().map(|me| {
+                issue
+                    .assignees
+                    .iter()
+                    .chain(issue.assignee.as_ref())
+                    .any(|user| user.login.eq_ignore_ascii_case(&me))
+            })
+        };
         let detail = GithubIssueDetail {
             number: issue.number,
             body: issue.body.unwrap_or_default(),
@@ -2391,6 +2463,7 @@ impl GithubSource {
                 })
                 .collect(),
             default_branch,
+            assigned_to_me,
         };
         let mut summary = format!(
             "{} {}",
@@ -2640,6 +2713,8 @@ mod tests {
             waiting: false,
             manual: false,
             is_pick_next: false,
+            start_reminder_muted: false,
+            phase_before_action: None,
         }
     }
 
@@ -3207,6 +3282,7 @@ mod tests {
                 body: "Seen on <b>main</b> too.".into(),
             }],
             default_branch: default_branch.into(),
+            assigned_to_me: None,
         }
     }
 

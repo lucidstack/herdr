@@ -54,11 +54,9 @@ impl App {
         let Some(item) = self.work_items.get(&params.item_id) else {
             return not_found(id, &params.item_id);
         };
-        let Some(source) = self.work_items.source(&item.source_id) else {
-            return not_found(id, &params.item_id);
-        };
-        let Some(choice) = source
-            .choices(item)
+        let Some(choice) = self
+            .work_items
+            .item_choices(item)
             .choices
             .into_iter()
             .find(|choice| choice.choice_id == params.choice_id)
@@ -69,6 +67,12 @@ impl App {
                 format!("unknown choice {} for {}", params.choice_id, params.item_id),
             );
         };
+        if choice.choice_id == crate::work_items::source::MUTE_START_REMINDER_CHOICE_ID {
+            return match self.work_items.mute_start_reminder(&params.item_id) {
+                Ok(()) => encode_success(id, ResponseResult::Ok {}),
+                Err(_) => not_found(id, &params.item_id),
+            };
+        }
         if let Some(reason) = choice.disabled_reason {
             return encode_error(id, "work_item_choice_unavailable", reason);
         }

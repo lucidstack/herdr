@@ -107,6 +107,7 @@ mod tests {
             default_choice_id: None,
             provisioning: None,
             is_pick_next: false,
+            start_reminder: None,
         }
     }
 

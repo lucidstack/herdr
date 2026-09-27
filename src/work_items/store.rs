@@ -172,6 +172,8 @@ mod tests {
             waiting: true,
             manual: true,
             is_pick_next: false,
+            start_reminder_muted: true,
+            phase_before_action: Some(WorkItemPhase::Local),
         }
     }
 
@@ -213,6 +215,7 @@ mod tests {
             resolve_error: None,
             action_in_flight: false,
             action_error: None,
+            phase_before_action: None,
             ..original
         };
         assert_eq!(

@@ -45,6 +45,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         default_choice_id: Some("github".into()),
         provisioning: None,
         is_pick_next: false,
+        start_reminder: None,
     }
 }
 

@@ -627,6 +627,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         default_choice_id: None,
         provisioning: None,
         is_pick_next: false,
+        start_reminder: None,
     };
     let projection = |boot: &str, items| EndpointWorkItemsProjection {
         boot_id: boot.into(),

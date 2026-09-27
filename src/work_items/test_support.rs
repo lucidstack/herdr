@@ -32,6 +32,8 @@ pub(crate) struct FakeSource {
     pub scripted_pick_next_plan: Mutex<Option<ProvisionPlan>>,
     /// Every `context` passed to `pick_next_plan`, in call order.
     pub pick_next_contexts: Mutex<Vec<String>>,
+    /// Reminder line for every item asked about; `None` means the tracker is up to date.
+    pub start_reminder: Mutex<Option<String>>,
 }
 
 impl FakeSource {
@@ -48,6 +50,7 @@ impl FakeSource {
             fetch_error: Mutex::new(None),
             scripted_pick_next_plan: Mutex::new(None),
             pick_next_contexts: Mutex::new(Vec::new()),
+            start_reminder: Mutex::new(None),
         })
     }
 
@@ -86,6 +89,25 @@ impl WorkItemSource for FakeSource {
 
     fn poll(&self) -> Result<Vec<SourceItem>, String> {
         Ok(self.items.lock().expect("fake source lock").clone())
+    }
+
+    fn start_reminder(&self, _item: &WorkItem) -> Option<super::source::StartReminder> {
+        let message = self
+            .start_reminder
+            .lock()
+            .expect("fake source lock")
+            .clone()?;
+        Some(super::source::StartReminder {
+            message,
+            choice: WorkItemChoiceInfo {
+                choice_id: super::source::START_WORK_CHOICE_ID.into(),
+                label: "Assign to me".into(),
+                description: None,
+                action: WorkItemChoiceAction::Perform,
+                disabled_reason: None,
+                confirm: None,
+            },
+        })
     }
 
     fn prepare(&self, _item: &SourceItem) -> PreparedItem {

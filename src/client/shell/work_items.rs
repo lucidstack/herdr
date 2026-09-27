@@ -549,11 +549,17 @@ fn render_item_rows(
         None
     };
     let status_width = u16::from(status.is_some()) * 2;
+    // Amber while the tracker lags behind work you started on the item.
+    let context_color = if item.start_reminder.is_some() {
+        palette.yellow
+    } else {
+        palette.mauve
+    };
     let context_style = if item.seen {
-        Style::default().fg(palette.mauve)
+        Style::default().fg(context_color)
     } else {
         Style::default()
-            .fg(palette.mauve)
+            .fg(context_color)
             .add_modifier(Modifier::BOLD)
     };
     put_segment(

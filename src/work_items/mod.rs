@@ -453,6 +453,7 @@ impl WorkItems {
         }
         item.action_in_flight = true;
         item.action_error = None;
+        item.phase_before_action = Some(item.phase);
         item.phase = WorkItemPhase::AwaitingExternal;
         item.seen = true;
         self.changed();
@@ -469,10 +470,16 @@ impl WorkItems {
     ) -> Option<WorkItemNotice> {
         let item = self.state.get_mut(key)?;
         item.action_in_flight = false;
+        let before = item.phase_before_action.take();
         let context = item.context.clone();
         let source_id = item.source_id.clone();
         let notice = match result {
             Ok(message) => {
+                // Work in its own workspace carries on (e.g. after updating the tracker);
+                // anything else waits for the source to drop the item (e.g. a merge).
+                if before == Some(WorkItemPhase::Local) {
+                    item.phase = WorkItemPhase::Local;
+                }
                 self.next_poll.insert(source_id, now);
                 WorkItemNotice {
                     title: message,
@@ -480,7 +487,7 @@ impl WorkItems {
                 }
             }
             Err(error) => {
-                item.phase = WorkItemPhase::Pending;
+                item.phase = before.unwrap_or(WorkItemPhase::Pending);
                 item.action_error = Some(error.clone());
                 WorkItemNotice {
                     title: "Could not complete the action".into(),
@@ -555,15 +562,66 @@ impl WorkItems {
 
     /// The projected info for one item, if it exists.
     pub(crate) fn item_info(&self, key: &str) -> Option<WorkItemInfo> {
-        let item = self.state.get(key)?;
-        let choices = self
-            .source(&item.source_id)
-            .map(|source| source.choices(item))
-            .unwrap_or(source::ItemChoices {
-                choices: Vec::new(),
-                default_choice_id: None,
-            });
-        Some(item.info(choices))
+        self.state.get(key).map(|item| self.project(item))
+    }
+
+    fn project(&self, item: &WorkItem) -> WorkItemInfo {
+        let (choices, reminder) = self.choices_and_reminder(item);
+        item.info(choices, reminder.map(|reminder| reminder.message))
+    }
+
+    /// The choices offered for `item`, including the start reminder's.
+    pub(crate) fn item_choices(&self, item: &WorkItem) -> source::ItemChoices {
+        self.choices_and_reminder(item).0
+    }
+
+    /// The source's choices, plus, while the item has a workspace and its tracker lags
+    /// behind, the reminder's fix (the default when available) and a way to mute it.
+    fn choices_and_reminder(
+        &self,
+        item: &WorkItem,
+    ) -> (source::ItemChoices, Option<source::StartReminder>) {
+        let Some(source) = self.source(&item.source_id) else {
+            return (
+                source::ItemChoices {
+                    choices: Vec::new(),
+                    default_choice_id: None,
+                },
+                None,
+            );
+        };
+        let mut choices = source.choices(item);
+        let reminder = (item.workspace_id.is_some() && !item.start_reminder_muted)
+            .then(|| source.start_reminder(item))
+            .flatten();
+        if let Some(reminder) = &reminder {
+            if reminder.choice.disabled_reason.is_none() {
+                choices.default_choice_id = Some(reminder.choice.choice_id.clone());
+            }
+            choices.choices.insert(0, reminder.choice.clone());
+            choices.choices.insert(
+                1,
+                crate::api::schema::WorkItemChoiceInfo {
+                    choice_id: source::MUTE_START_REMINDER_CHOICE_ID.into(),
+                    label: "Don't remind me for this ticket".into(),
+                    description: Some("Keep working without updating the tracker".into()),
+                    action: crate::api::schema::WorkItemChoiceAction::Perform,
+                    disabled_reason: None,
+                    confirm: None,
+                },
+            );
+        }
+        (choices, reminder)
+    }
+
+    /// "Don't remind me for this ticket".
+    pub(crate) fn mute_start_reminder(&mut self, key: &str) -> Result<(), NotFound> {
+        let item = self.state.get_mut(key).ok_or(NotFound)?;
+        if !item.start_reminder_muted {
+            item.start_reminder_muted = true;
+            self.changed();
+        }
+        Ok(())
     }
 
     pub(crate) fn workspace_closed(&mut self, workspace_id: &str) {
@@ -789,16 +847,7 @@ impl WorkItems {
         self.state
             .sorted()
             .into_iter()
-            .map(|item| {
-                let choices = self
-                    .source(&item.source_id)
-                    .map(|source| source.choices(item))
-                    .unwrap_or(source::ItemChoices {
-                        choices: Vec::new(),
-                        default_choice_id: None,
-                    });
-                item.info(choices)
-            })
+            .map(|item| self.project(item))
             .collect()
     }
 

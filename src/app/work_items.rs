@@ -383,6 +383,9 @@ impl App {
         let response = match result {
             Ok(detail) => {
                 let item = self.work_items.add_ticket(source_id, detail.source_item);
+                // Prepare it now rather than at the next poll, so a choice made straight
+                // away (as "Pick next" does) finds its details.
+                self.start_work_items_prepare(source_id);
                 match self.work_items.item_info(&item.key) {
                     Some(info) => encode_success(id, ResponseResult::WorkItemAdded { item: info }),
                     None => encode_error(
@@ -1486,6 +1489,47 @@ mod tests {
     }
 
     #[test]
+    fn added_ticket_is_prepared_without_waiting_for_the_next_poll() {
+        use crate::api::schema::{WorkItemTicketInfo, WorkItemTicketTarget};
+        use crate::work_items::TicketDetail;
+
+        let mut app = test_app();
+        let source = FakeSource::with_items(vec![source_item("a")]);
+        *source.fetch_ticket.lock().unwrap() = Some(TicketDetail {
+            ticket: WorkItemTicketInfo {
+                key: "b".into(),
+                title: "Title b".into(),
+                status: "open".into(),
+                done: false,
+                assignee: None,
+                updated_at: "2026-01-01T00:00:00Z".into(),
+                url: "https://example.test/b".into(),
+            },
+            description: String::new(),
+            comments: Vec::new(),
+            source_item: source_item("b"),
+        });
+        app.work_items = WorkItems::for_test(vec![source.clone()], Instant::now());
+        // The first poll is done once its item is prepared; the next one is a minute away.
+        run_until(&mut app, |app| {
+            list(app).first().is_some_and(|item| item.summary.is_some())
+        });
+        let (tx, _rx) = std::sync::mpsc::channel();
+        assert!(app.handle_deferred_work_item_api_request(
+            request(Method::WorkItemAdd(WorkItemTicketTarget {
+                source_id: "fake".into(),
+                key: "b".into(),
+            })),
+            tx,
+        ));
+        run_until(&mut app, |app| {
+            list(app)
+                .iter()
+                .any(|item| item.item_id == "fake:b" && item.summary.is_some())
+        });
+    }
+
+    #[test]
     fn performed_choice_leaves_on_success_and_comes_back_with_the_reason_on_failure() {
         let mut app = test_app();
         let source = FakeSource::with_items(vec![source_item("a")]);
@@ -1538,6 +1582,66 @@ mod tests {
         let item = &list(&mut app)[0];
         assert_eq!(item.workspace_id.as_deref(), Some(workspace_id.as_str()));
         assert_eq!(item.phase, WorkItemPhase::Local);
+    }
+
+    #[test]
+    fn start_reminder_follows_worked_items_until_muted_and_its_fix_keeps_the_workspace() {
+        use crate::api::schema::WorkItemLinkParams;
+        use crate::work_items::source::{MUTE_START_REMINDER_CHOICE_ID, START_WORK_CHOICE_ID};
+
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("started")];
+        let source = FakeSource::with_items(vec![source_item("a")]);
+        *source.start_reminder.lock().unwrap() = Some("It isn't assigned to you".into());
+        app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        // Not worked on yet: the tracker lagging is no reason to nag.
+        assert_eq!(list(&mut app)[0].start_reminder, None);
+
+        let workspace_id = app.public_workspace_id(0);
+        app.handle_api_request(request(Method::WorkItemLink(WorkItemLinkParams {
+            item_id: "fake:a".into(),
+            workspace_id: workspace_id.clone(),
+        })));
+        let item = list(&mut app).remove(0);
+        assert_eq!(
+            item.start_reminder.as_deref(),
+            Some("It isn't assigned to you")
+        );
+        assert_eq!(
+            item.default_choice_id.as_deref(),
+            Some(START_WORK_CHOICE_ID)
+        );
+
+        let choose = |app: &mut App, choice_id: &str| {
+            app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:a".into(),
+                choice_id: choice_id.into(),
+            })))
+        };
+        let fixed = choose(&mut app, START_WORK_CHOICE_ID);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&fixed).is_ok(),
+            "{fixed}"
+        );
+        // The work carries on in its workspace once the tracker is updated.
+        run_until(&mut app, |app| list(app)[0].phase == WorkItemPhase::Local);
+        assert_eq!(
+            list(&mut app)[0].workspace_id.as_deref(),
+            Some(workspace_id.as_str())
+        );
+
+        let muted = choose(&mut app, MUTE_START_REMINDER_CHOICE_ID);
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&muted).is_ok(),
+            "{muted}"
+        );
+        let item = list(&mut app).remove(0);
+        assert_eq!(item.start_reminder, None);
+        assert!(item
+            .choices
+            .iter()
+            .all(|choice| choice.choice_id != START_WORK_CHOICE_ID));
     }
 
     #[test]

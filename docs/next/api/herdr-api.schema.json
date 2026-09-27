@@ -1311,6 +1311,13 @@
             "source_id": {
               "type": "string"
             },
+            "start_reminder": {
+              "description": "Set when you work on the item (it has a workspace) but its tracker lags behind:\nthe ticket is not assigned to you, or still in a to-do status. One line for the\nuser, e.g. \"You're working on this, but it isn't assigned to you\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "summary": {
               "type": [
                 "string",
@@ -11555,6 +11562,13 @@
             },
             "source_id": {
               "type": "string"
+            },
+            "start_reminder": {
+              "description": "Set when you work on the item (it has a workspace) but its tracker lags behind:\nthe ticket is not assigned to you, or still in a to-do status. One line for the\nuser, e.g. \"You're working on this, but it isn't assigned to you\".",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "summary": {
               "type": [
