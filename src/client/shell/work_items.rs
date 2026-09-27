@@ -392,9 +392,10 @@ pub(super) fn render_items_section<'a>(
             .as_ref()
             .map_or(0, |rows| rows.len().max(1) as u16);
         let remaining = visible.len() - index;
+        let item_height = item_rows(item);
         // Keep one row for the "more" marker unless this is the last item.
         let reserve = u16::from(remaining > 1);
-        if y.saturating_add(2 + nested_height + reserve) > items_limit {
+        if y.saturating_add(item_height + nested_height + reserve) > items_limit {
             let row_y = y.min(items_limit.saturating_sub(1));
             hits.inbox.more_below = Rect::new(area.x, row_y, width, 1);
             put_text(
@@ -409,7 +410,7 @@ pub(super) fn render_items_section<'a>(
             break;
         }
         hits.inbox.shown += 1;
-        let item_rect = Rect::new(area.x, y, width, 2);
+        let item_rect = Rect::new(area.x, y, width, item_height);
         render_item_rows(
             buffer,
             item_rect,
@@ -422,7 +423,7 @@ pub(super) fn render_items_section<'a>(
             rect: item_rect,
             item_id: item.item_id.clone(),
         });
-        y += 2;
+        y += item_height;
         if let (Some((workspace_index, workspace)), Some(rows)) = (nested, nested_rows) {
             let rect = Rect::new(area.x, y, area.width.saturating_sub(1), nested_height);
             let selected = false;
@@ -698,6 +699,11 @@ fn repository_home<'a>(
         .find(|(_, workspace)| workspace.workspace_id == workspace_id)
 }
 
+/// Context and title, plus the tracker's state when the source reports one.
+fn item_rows(item: &WorkItemInfo) -> u16 {
+    2 + u16::from(item.tracker_state.is_some())
+}
+
 fn render_item_rows(
     buffer: &mut Buffer,
     rect: Rect,
@@ -786,6 +792,16 @@ fn render_item_rows(
             title_y,
             rect.right(),
             &format!(" · @{author}"),
+            Style::default().fg(palette.overlay0),
+        );
+    }
+    if let Some(state) = &item.tracker_state {
+        put_segment(
+            buffer,
+            rect.x.saturating_add(3),
+            title_y.saturating_add(1),
+            rect.right(),
+            state,
             Style::default().fg(palette.overlay0),
         );
     }
@@ -1339,6 +1355,7 @@ impl ClientShellState {
                 .is_some_and(|worktree| worktree.is_linked_worktree),
             has_progress: item.provisioning.is_some(),
             hidden: is_hidden(item),
+            start_reminder: item.start_reminder.is_some(),
             link_target: self
                 .snapshot
                 .as_deref()

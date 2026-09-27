@@ -176,8 +176,7 @@ struct Workflow {
 struct Settings<'a> {
     agent: &'a str,
     agent_args: &'a [String],
-    editor_command: &'a str,
-    lazygit_command: &'a str,
+    tabs: &'a [crate::config::WorkspaceTabConfig],
     /// Viewer of the downloaded file when there is no checkout; `{file}` is the file.
     diff_command: &'a str,
     delete_branch: bool,
@@ -478,8 +477,7 @@ impl GithubSource {
             return Settings {
                 agent: &config.agent,
                 agent_args: &config.agent_args,
-                editor_command: &config.editor_command,
-                lazygit_command: &config.lazygit_command,
+                tabs: &config.tabs,
                 diff_command: &config.diff_command,
                 delete_branch: config.delete_branch,
                 on_resolved: config.on_resolved,
@@ -489,8 +487,7 @@ impl GithubSource {
         Settings {
             agent: &config.agent,
             agent_args: &config.agent_args,
-            editor_command: &config.editor_command,
-            lazygit_command: &config.lazygit_command,
+            tabs: &config.tabs,
             diff_command: &config.viewer_command,
             delete_branch: config.delete_branch,
             on_resolved: config.on_resolved,
@@ -1394,6 +1391,7 @@ fn parse_ready_to_merge(bytes: &[u8]) -> Result<Vec<SourceItem>, String> {
                 author: pull.author.map(|author| author.login),
                 url: pull.url,
                 updated_at: pull.updated_at,
+                tracker_state: None,
             }
         })
         .collect())
@@ -1433,6 +1431,7 @@ fn parse_search(bytes: &[u8], event: Event) -> Result<Vec<SourceItem>, String> {
                 author: item.user.map(|user| user.login),
                 url: item.html_url,
                 updated_at: item.updated_at,
+                tracker_state: None,
             })
         })
         .collect())
@@ -1747,10 +1746,8 @@ impl WorkItemSource for GithubSource {
         let mut layout = WorkspaceLayout {
             agent: settings.agent.to_string(),
             agent_args: settings.agent_args.to_vec(),
-            editor_command: settings.editor_command.to_string(),
-            lazygit_command: settings.lazygit_command.to_string(),
+            tabs: settings.tabs.to_vec(),
             diff_command: settings.diff_command.to_string(),
-            review_command: String::new(),
         };
         let checkout = mapped.filter(|_| mode.checks_out());
         let (source, brief) = if event.is_pull_request_event() {
@@ -1758,11 +1755,10 @@ impl WorkItemSource for GithubSource {
             let source = match (checkout, event) {
                 (Some(repo), Event::ReviewRequested) => {
                     let (base_refspec, base) = review_base(repo, &detail.base_ref_name);
-                    layout.review_command = self
-                        .workflow(repo_name)
-                        .config
-                        .review_command
-                        .replace("{base}", &base);
+                    for tab in &mut layout.tabs {
+                        tab.command = tab.command.replace("{base}", &base);
+                        tab.fallback = tab.fallback.replace("{base}", &base);
+                    }
                     WorkspaceSource::Worktree(WorktreeSpec {
                         repo_path: crate::worktree::expand_tilde_absolute_path(&repo.path),
                         remote: repo.remote.clone(),
@@ -2037,6 +2033,7 @@ impl WorkItemSource for GithubSource {
             author: assignee,
             url: issue.html_url,
             updated_at: issue.updated_at,
+            tracker_state: None,
         };
         Ok(Some(TicketDetail {
             ticket,
@@ -2084,10 +2081,8 @@ impl WorkItemSource for GithubSource {
             layout: WorkspaceLayout {
                 agent: config.agent.clone(),
                 agent_args: config.agent_args.clone(),
-                editor_command: config.editor_command.clone(),
-                lazygit_command: config.lazygit_command.clone(),
+                tabs: config.tabs.clone(),
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: false,
         })
@@ -2577,6 +2572,7 @@ mod tests {
                     author: Some("alice".into()),
                     url: "https://github.com/o/r/pull/12".into(),
                     updated_at: "2026-01-02T00:00:00Z".into(),
+                    tracker_state: None,
                 },
                 SourceItem {
                     external_id: "x/y#3".into(),
@@ -2585,6 +2581,7 @@ mod tests {
                     author: Some("bob".into()),
                     url: "https://github.com/x/y/pull/3".into(),
                     updated_at: "2026-01-01T00:00:00Z".into(),
+                    tracker_state: None,
                 },
             ]
         );
@@ -2695,6 +2692,7 @@ mod tests {
             author: Some("alice".into()),
             url: format!("https://github.com/{repo}/pull/5"),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            tracker_state: None,
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,
             prepare_error: None,
@@ -2802,7 +2800,7 @@ mod tests {
             })
         );
         assert_eq!(
-            plan.layout.review_command,
+            plan.layout.tabs[1].command,
             "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base origin/main"
         );
         assert!(plan.delete_branch);
@@ -2825,7 +2823,11 @@ mod tests {
                     repos: vec!["o/r".into()],
                     delete_branch: false,
                     on_resolved: OnResolvedConfig::Remove,
-                    editor_command: "hx .".into(),
+                    tabs: vec![crate::config::WorkspaceTabConfig {
+                        label: "editor".into(),
+                        command: "hx .".into(),
+                        fallback: String::new(),
+                    }],
                     agent_args: vec!["--model".into(), "opus".into()],
                     ..ReviewRequestedConfig::default()
                 },
@@ -2837,7 +2839,7 @@ mod tests {
             .provision_plan(&item, "local", Path::new("/worktrees"))
             .expect("plan");
         assert!(!plan.delete_branch);
-        assert_eq!(plan.layout.editor_command, "hx .");
+        assert_eq!(plan.layout.tabs[0].command, "hx .");
         assert_eq!(plan.layout.agent, "claude");
         assert_eq!(plan.layout.agent_args, ["--model", "opus"]);
         assert!(source.remove_on_resolved(&item));
@@ -3255,6 +3257,7 @@ mod tests {
                     author: None,
                     url: item.url.clone(),
                     updated_at: item.updated_at.clone(),
+                    tracker_state: None,
                 })
                 .0,
             "Changes requested"

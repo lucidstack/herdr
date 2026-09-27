@@ -612,6 +612,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         item_id: format!("github:o/r#{id}"),
         source_id: "github".into(),
         context: format!("#{id} o/r"),
+        tracker_state: None,
         title: format!("Pull request {id}"),
         author: None,
         url: String::new(),

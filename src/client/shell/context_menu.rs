@@ -80,12 +80,17 @@ impl ClientContextMenuOverlay {
                 is_linked_worktree,
                 has_progress,
                 hidden,
+                start_reminder,
                 link_target,
                 ..
             } => {
                 let mut items = Vec::new();
                 if workspace_id.is_some() {
                     items.push(item("Go to workspace", Action::WorkItemFocus));
+                    // The item's dialog is the only place its tracker fix is offered.
+                    if *start_reminder {
+                        items.push(item("Update ticket status...", Action::WorkItemChoose));
+                    }
                 } else {
                     items.push(item("Choose what to do...", Action::WorkItemChoose));
                 }

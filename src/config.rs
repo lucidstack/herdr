@@ -41,6 +41,7 @@ pub use self::{
     work_items::{
         BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, JiraProjectConfig,
         JiraWorkItemsConfig, OnResolvedConfig, ReviewRequestedConfig, WorkItemsConfig,
+        WorkspaceTabConfig,
     },
 };
 

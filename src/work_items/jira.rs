@@ -142,6 +142,8 @@ struct IssueFields {
     updated: String,
     #[serde(default)]
     assignee: Option<Person>,
+    #[serde(default)]
+    reporter: Option<Person>,
 }
 
 #[derive(Deserialize)]
@@ -308,11 +310,21 @@ fn start_plan(detail: &JiraDetail) -> Result<StartPlan, String> {
             [] => {
                 return Err("No transition leads to an in-progress status; move it in Jira".into())
             }
+            // Workflows often add side routes such as "Blocked" in the same category; the
+            // one named In Progress is what "move to In Progress" means.
             several => {
-                return Err(format!(
-                    "{} transitions lead to an in-progress status; move it in Jira",
-                    several.len()
-                ))
+                let mut named = several
+                    .iter()
+                    .filter(|transition| transition.to.trim().eq_ignore_ascii_case("in progress"));
+                match (named.next(), named.next()) {
+                    (Some(transition), None) => Some(transition.clone()),
+                    _ => {
+                        return Err(format!(
+                            "{} transitions lead to an in-progress status; move it in Jira",
+                            several.len()
+                        ))
+                    }
+                }
             }
         }
     } else {
@@ -680,6 +692,16 @@ fn http_error(status: u16, body: &[u8]) -> String {
     }
 }
 
+/// The ticket's status and who it is assigned to, shown under its title.
+fn tracker_state(status: &str, assignee: Option<&str>) -> String {
+    let assignee = assignee.unwrap_or("unassigned");
+    if status.is_empty() {
+        assignee.to_string()
+    } else {
+        format!("{status} · {assignee}")
+    }
+}
+
 /// One page of search results as items, and the token of the next page.
 /// `browse_url` turns an issue key into its web page.
 fn parse_search(
@@ -698,12 +720,13 @@ fn parse_search(
                 .status
                 .map(|status| status.name)
                 .unwrap_or_default();
+            let assignee = issue
+                .fields
+                .assignee
+                .map(|person| person.display_name)
+                .filter(|name| !name.is_empty());
             SourceItem {
-                context: if status.is_empty() {
-                    issue.key.clone()
-                } else {
-                    format!("{} · {status}", issue.key)
-                },
+                context: issue.key.clone(),
                 url: browse_url(&issue.key),
                 external_id: issue.key,
                 title: issue.fields.summary,
@@ -713,6 +736,7 @@ fn parse_search(
                     .map(|person| person.display_name)
                     .filter(|name| !name.is_empty()),
                 updated_at: issue.fields.updated,
+                tracker_state: Some(tracker_state(&status, assignee.as_deref())),
             }
         })
         .collect();
@@ -903,7 +927,7 @@ impl WorkItemSource for JiraSource {
             let mut body = serde_json::json!({
                 "jql": self.config.jql,
                 "maxResults": (limit - items.len()).min(PAGE_SIZE),
-                "fields": ["summary", "status", "updated", "reporter"],
+                "fields": ["summary", "status", "updated", "reporter", "assignee"],
             });
             if let Some(token) = page_token.take() {
                 body["nextPageToken"] = serde_json::Value::String(token);
@@ -1182,10 +1206,8 @@ impl WorkItemSource for JiraSource {
             layout: WorkspaceLayout {
                 agent: workflow.agent.clone(),
                 agent_args: workflow.agent_args.clone(),
-                editor_command: workflow.editor_command.clone(),
-                lazygit_command: workflow.lazygit_command.clone(),
+                tabs: workflow.tabs.clone(),
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: workflow.delete_branch,
         })
@@ -1221,7 +1243,7 @@ impl WorkItemSource for JiraSource {
             return Err(error.clone());
         }
         let fields = "summary,description,issuetype,priority,status,labels,comment,updated,\
-                      assignee";
+                      assignee,reporter";
         let (status, body) =
             self.api_with_status("GET", &format!("issue/{key}?fields={fields}"), None)?;
         if status == 404 {
@@ -1266,11 +1288,7 @@ impl WorkItemSource for JiraSource {
                 body: comment.body.as_ref().map(adf_text).unwrap_or_default(),
             })
             .collect();
-        let context = if status_name.is_empty() {
-            key.to_string()
-        } else {
-            format!("{key} · {status_name}")
-        };
+        let tracker_state = tracker_state(&status_name, assignee.as_deref());
         let ticket = crate::api::schema::WorkItemTicketInfo {
             key: key.to_string(),
             title: fields.summary.clone(),
@@ -1283,10 +1301,14 @@ impl WorkItemSource for JiraSource {
         let source_item = SourceItem {
             external_id: key.to_string(),
             title: fields.summary,
-            context,
-            author: assignee,
+            context: key.to_string(),
+            author: fields
+                .reporter
+                .map(|person| person.display_name)
+                .filter(|name| !name.is_empty()),
             url: self.browse_url(key),
             updated_at: fields.updated,
+            tracker_state: Some(tracker_state),
         };
         Ok(Some(TicketDetail {
             ticket,
@@ -1340,10 +1362,8 @@ impl WorkItemSource for JiraSource {
             layout: WorkspaceLayout {
                 agent: config.agent.clone(),
                 agent_args: config.agent_args.clone(),
-                editor_command: config.editor_command.clone(),
-                lazygit_command: config.lazygit_command.clone(),
+                tabs: config.tabs.clone(),
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: false,
         })
@@ -1376,10 +1396,11 @@ mod tests {
             source_id: "jira".into(),
             external_id: key.into(),
             title: "Add manual vehicle entry form".into(),
-            context: format!("{key} · In Progress"),
+            context: key.into(),
             author: Some("Tony".into()),
             url: format!("https://example.atlassian.net/browse/{key}"),
             updated_at: "2026-09-24T15:51:59.000+0100".into(),
+            tracker_state: Some("In Progress · Tony".into()),
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,
             prepare_error: None,
@@ -1495,12 +1516,27 @@ mod tests {
     }
 
     #[test]
-    fn start_fix_is_disabled_without_exactly_one_in_progress_transition() {
-        for transitions in [&[][..], &["In Progress", "In Review"][..]] {
+    fn start_fix_is_disabled_without_a_single_in_progress_transition() {
+        for transitions in [&[][..], &["Doing", "In Review"][..]] {
             let reminder =
                 start_reminder_for(&to_do(true, transitions), false).expect("still reminds");
             assert!(reminder.choice.disabled_reason.is_some(), "{transitions:?}");
         }
+    }
+
+    #[test]
+    fn start_fix_takes_the_in_progress_transition_among_side_routes() {
+        let detail = to_do(true, &["BLOCKED / ON HOLD", "In Progress"]);
+        assert_eq!(
+            start_plan(&detail),
+            Ok(StartPlan {
+                assign: false,
+                transition: Some(JiraTransition {
+                    id: "12".into(),
+                    to: "In Progress".into(),
+                }),
+            })
+        );
     }
 
     #[test]
@@ -1536,18 +1572,32 @@ mod tests {
     fn search_results_become_items_keyed_by_issue() {
         let json = br#"{"issues":[{"key":"TECH-7","fields":{"summary":"Fix it",
             "updated":"2026-09-24T10:00:00.000+0100","status":{"name":"To Do"},
-            "reporter":{"displayName":"Tony"}}}]}"#;
+            "reporter":{"displayName":"Tony"}}},
+            {"key":"TECH-8","fields":{"summary":"Ship it","updated":"2026-09-24T11:00:00.000+0100",
+            "status":{"name":"In Progress"},"assignee":{"displayName":"Ada"}}}]}"#;
         assert_eq!(
             parse_search(json, |key| format!("https://x/browse/{key}")).unwrap(),
             (
-                vec![SourceItem {
-                    external_id: "TECH-7".into(),
-                    title: "Fix it".into(),
-                    context: "TECH-7 · To Do".into(),
-                    author: Some("Tony".into()),
-                    url: "https://x/browse/TECH-7".into(),
-                    updated_at: "2026-09-24T10:00:00.000+0100".into(),
-                }],
+                vec![
+                    SourceItem {
+                        external_id: "TECH-7".into(),
+                        title: "Fix it".into(),
+                        context: "TECH-7".into(),
+                        author: Some("Tony".into()),
+                        url: "https://x/browse/TECH-7".into(),
+                        updated_at: "2026-09-24T10:00:00.000+0100".into(),
+                        tracker_state: Some("To Do · unassigned".into()),
+                    },
+                    SourceItem {
+                        external_id: "TECH-8".into(),
+                        title: "Ship it".into(),
+                        context: "TECH-8".into(),
+                        author: None,
+                        url: "https://x/browse/TECH-8".into(),
+                        updated_at: "2026-09-24T11:00:00.000+0100".into(),
+                        tracker_state: Some("In Progress · Ada".into()),
+                    },
+                ],
                 None
             )
         );

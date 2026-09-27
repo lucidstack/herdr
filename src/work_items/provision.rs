@@ -55,7 +55,7 @@ pub(crate) struct ProvisionJob {
     pub agent_name: Option<String>,
     /// Branch the worktree was created on, once known.
     pub branch: Option<String>,
-    /// Waiting for Herdr to create the worktree.
+    /// Waiting for Herdr to create or reopen the worktree.
     pub worktree: Option<PendingResponse>,
     /// Waiting for the shell in the agent pane to accept `agent.start`.
     pub agent_start: Option<AgentAttempt>,
@@ -499,10 +499,8 @@ mod tests {
             layout: WorkspaceLayout {
                 agent: agent.into(),
                 agent_args: Vec::new(),
-                editor_command: String::new(),
-                lazygit_command: String::new(),
+                tabs: Vec::new(),
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: true,
         }

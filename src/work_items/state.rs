@@ -18,6 +18,9 @@ pub(crate) struct WorkItem {
     pub author: Option<String>,
     pub url: String,
     pub updated_at: String,
+    /// Where the ticket stands in its tracker, e.g. "Selected for Development · unassigned".
+    #[serde(default)]
+    pub tracker_state: Option<String>,
     #[serde(default)]
     pub detail: Option<serde_json::Value>,
     #[serde(default)]
@@ -92,6 +95,7 @@ impl WorkItem {
             author: item.author,
             url: item.url,
             updated_at: item.updated_at,
+            tracker_state: item.tracker_state,
             detail: None,
             summary: None,
             prepare_error: None,
@@ -127,6 +131,7 @@ impl WorkItem {
             author: None,
             url: String::new(),
             updated_at: "0".to_string(),
+            tracker_state: None,
             detail: None,
             summary: None,
             prepare_error: None,
@@ -158,6 +163,7 @@ impl WorkItem {
             author: self.author.clone(),
             url: self.url.clone(),
             updated_at: self.updated_at.clone(),
+            tracker_state: self.tracker_state.clone(),
         }
     }
 
@@ -167,6 +173,7 @@ impl WorkItem {
             item_id: self.key.clone(),
             source_id: self.source_id.clone(),
             context: self.context.clone(),
+            tracker_state: self.tracker_state.clone(),
             title: self.title.clone(),
             author: self.author.clone(),
             url: self.url.clone(),
@@ -306,6 +313,7 @@ impl WorkItemsState {
             item.author = source_item.author;
             item.url = source_item.url;
             item.updated_at = source_item.updated_at;
+            item.tracker_state = source_item.tracker_state;
             if item.resolved {
                 item.resolved = false;
                 item.seen = false;
@@ -561,6 +569,7 @@ mod tests {
             author: Some("octocat".into()),
             url: format!("https://example.test/{id}"),
             updated_at: updated_at.to_string(),
+            tracker_state: None,
         }
     }
 

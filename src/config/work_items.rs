@@ -14,6 +14,46 @@ pub const DEFAULT_GITHUB_READY_TO_MERGE_QUERY: &str =
 /// herdr-reviewr, showing the pull request against its base.
 pub const DEFAULT_REVIEW_COMMAND: &str =
     "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}";
+
+/// A tab opened after the agent's tab in a workspace with a checkout, in list order.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTabConfig {
+    /// Tab label.
+    pub label: String,
+    /// Command typed into the tab; {plugin:ID} is an installed plugin's folder. Empty skips the tab.
+    pub command: String,
+    /// Command used instead when `command` names a plugin that is not installed. Empty skips the tab. Default: "".
+    #[serde(default)]
+    pub fallback: String,
+}
+
+impl WorkspaceTabConfig {
+    fn new(label: &str, command: &str, fallback: &str) -> Self {
+        Self {
+            label: label.into(),
+            command: command.into(),
+            fallback: fallback.into(),
+        }
+    }
+}
+
+/// Editor and lazygit.
+fn default_branch_tabs() -> Vec<WorkspaceTabConfig> {
+    vec![
+        WorkspaceTabConfig::new("editor", "nvim .", ""),
+        WorkspaceTabConfig::new("lazygit", "lazygit", ""),
+    ]
+}
+
+/// Editor and herdr-reviewr, or lazygit without the reviewr plugin.
+fn default_review_tabs() -> Vec<WorkspaceTabConfig> {
+    vec![
+        WorkspaceTabConfig::new("editor", "nvim .", ""),
+        WorkspaceTabConfig::new("review", DEFAULT_REVIEW_COMMAND, "lazygit"),
+    ]
+}
+
 pub const DEFAULT_JIRA_JQL: &str =
     "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
 
@@ -207,14 +247,10 @@ pub struct ReviewRequestedConfig {
     pub agent: String,
     /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
     pub agent_args: Vec<String>,
-    /// Command run in the editor tab of a worktree review. Empty disables the tab. Default: "nvim .".
-    pub editor_command: String,
-    /// Command run in the Git tab of a worktree review. Empty disables the tab. Default: "lazygit".
-    pub lazygit_command: String,
+    /// Tabs after the agent's tab in a worktree review, each { label, command, fallback }; {base} is the pull request's base branch. Default: an "editor" tab running "nvim ." and a "review" tab running "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}", falling back to "lazygit".
+    pub tabs: Vec<WorkspaceTabConfig>,
     /// Command run in the diff tab of an agent review without checkout; {file} is the downloaded diff. Empty disables the tab. Default: "nvim -R {file}".
     pub diff_command: String,
-    /// Command run in the review tab of a worktree review, in place of the Git tab; {plugin:ID} is an installed plugin's folder and {base} the pull request's base branch. The Git tab is used when it is empty or its plugin is not installed. Default: "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}".
-    pub review_command: String,
 }
 
 impl Default for ReviewRequestedConfig {
@@ -230,10 +266,8 @@ impl Default for ReviewRequestedConfig {
             ],
             agent: "claude".into(),
             agent_args: Vec::new(),
-            editor_command: "nvim .".into(),
-            lazygit_command: "lazygit".into(),
+            tabs: default_review_tabs(),
             diff_command: "nvim -R {file}".into(),
-            review_command: DEFAULT_REVIEW_COMMAND.into(),
         }
     }
 }
@@ -257,10 +291,8 @@ pub struct BranchWorkflowConfig {
     pub agent: String,
     /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
     pub agent_args: Vec<String>,
-    /// Command run in the editor tab. Empty disables the tab. Default: "nvim .".
-    pub editor_command: String,
-    /// Command run in the Git tab. Empty disables the tab. Default: "lazygit".
-    pub lazygit_command: String,
+    /// Tabs after the agent's tab in a workspace with a checkout, each { label, command, fallback }. Default: an "editor" tab running "nvim ." and a "lazygit" tab running "lazygit".
+    pub tabs: Vec<WorkspaceTabConfig>,
     /// Command showing a downloaded thread when there is no checkout; {file} is the file. Empty disables the tab. Default: "nvim -R {file}".
     pub viewer_command: String,
 }
@@ -273,8 +305,7 @@ impl Default for BranchWorkflowConfig {
             delete_branch: false,
             agent: "claude".into(),
             agent_args: Vec::new(),
-            editor_command: "nvim .".into(),
-            lazygit_command: "lazygit".into(),
+            tabs: default_branch_tabs(),
             viewer_command: "nvim -R {file}".into(),
         }
     }
@@ -375,5 +406,39 @@ repos = ["acme/app"]
         assert!(block.applies_to("acme/app"));
         assert!(!block.delete_branch);
         assert_eq!(block.on_resolved, OnResolvedConfig::Keep);
+    }
+
+    #[test]
+    fn workflow_tabs_replace_the_default_layout_in_order() {
+        let config: Config = toml::from_str(
+            r#"
+[work_items.jira]
+site = "acme.atlassian.net"
+email = "me@acme.test"
+
+[[work_items.jira.issues]]
+tabs = [
+  { label = "review", command = "{plugin:p}/bin/r", fallback = "lazygit" },
+  { label = "editor", command = "hx ." },
+]
+"#,
+        )
+        .expect("config parses");
+        let jira = config.work_items.jira.expect("jira configured");
+        assert_eq!(
+            jira.issues[0].tabs,
+            [
+                WorkspaceTabConfig::new("review", "{plugin:p}/bin/r", "lazygit"),
+                WorkspaceTabConfig::new("editor", "hx .", ""),
+            ]
+        );
+        let review_tab = |key: &str| {
+            toml::from_str::<Config>(&format!(
+                "[work_items.github]\n[[work_items.github.review_requested]]\n\
+                 tabs = [{{ label = \"editor\", {key} = \"hx .\" }}]\n"
+            ))
+        };
+        assert!(review_tab("command").is_ok());
+        assert!(review_tab("cmd").is_err(), "a misspelt key is rejected");
     }
 }

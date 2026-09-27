@@ -581,6 +581,8 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_progress: bool,
         hidden: bool,
+        /// The tracker lags behind work started on the item; its dialog offers the fix.
+        start_reminder: bool,
         /// The focused workspace, when it could become the item's workspace.
         link_target: Option<String>,
     },

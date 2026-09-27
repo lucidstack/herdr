@@ -1327,6 +1327,13 @@
             "title": {
               "type": "string"
             },
+            "tracker_state": {
+              "description": "Where the ticket stands in its tracker, e.g. \"Selected for Development · unassigned\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "url": {
               "type": "string"
             },
@@ -11585,6 +11592,13 @@
             },
             "title": {
               "type": "string"
+            },
+            "tracker_state": {
+              "description": "Where the ticket stands in its tracker, e.g. \"Selected for Development · unassigned\".",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "url": {
               "type": "string"

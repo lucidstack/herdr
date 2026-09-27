@@ -92,6 +92,7 @@ mod tests {
             item_id: id.into(),
             source_id: "gh".into(),
             context: id.into(),
+            tracker_state: None,
             title: "t".into(),
             author: None,
             url: "u".into(),

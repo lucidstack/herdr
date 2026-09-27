@@ -151,6 +151,7 @@ mod tests {
             author: Some("octocat".into()),
             url: "https://example.test".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            tracker_state: None,
             detail: Some(serde_json::json!({"number": 1})),
             summary: Some("+1 −0".into()),
             prepare_error: None,

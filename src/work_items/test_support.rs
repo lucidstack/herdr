@@ -71,6 +71,7 @@ pub(crate) fn source_item(id: &str) -> SourceItem {
         author: Some("octocat".into()),
         url: format!("https://example.test/{id}"),
         updated_at: "2026-01-01T00:00:00Z".into(),
+        tracker_state: None,
     }
 }
 

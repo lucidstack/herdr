@@ -14,6 +14,8 @@ pub(crate) struct SourceItem {
     pub author: Option<String>,
     pub url: String,
     pub updated_at: String,
+    /// Where the ticket stands in its tracker, e.g. "Selected for Development · unassigned".
+    pub tracker_state: Option<String>,
 }
 
 /// Result of the cheap background preparation of one item.
@@ -98,12 +100,10 @@ pub(crate) struct WorkspaceLayout {
     pub agent: String,
     /// Extra arguments the agent is started with.
     pub agent_args: Vec<String>,
-    pub editor_command: String,
-    pub lazygit_command: String,
+    /// Tabs opened after the agent's tab when the workspace has a checkout.
+    pub tabs: Vec<crate::config::WorkspaceTabConfig>,
     /// Diff viewer for download workspaces; `{file}` is the downloaded file.
     pub diff_command: String,
-    /// Replaces the Git tab of a worktree when `{plugin:ID}` resolves; `{base}` is already filled in.
-    pub review_command: String,
 }
 
 /// Everything needed to provision a local workspace for an item.

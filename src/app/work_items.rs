@@ -686,71 +686,29 @@ impl App {
                 }
             }
             (WorkspaceSource::Worktree(spec), SourceReady::ExistingWorktree { path, branch }) => {
-                let opened = self.work_items_api(Method::WorktreeOpen(WorktreeOpenParams {
-                    workspace_id: None,
-                    cwd: Some(spec.repo_path.display().to_string()),
-                    path: Some(path.display().to_string()),
-                    branch: None,
-                    label: Some(plan.workspace_label.clone()),
-                    focus: false,
-                    trust_repository: false,
-                }));
-                match opened {
-                    // Already a workspace here: it is someone's live work, so link it
-                    // without adding tabs or typing an agent into its shell.
-                    Ok(ResponseResult::WorktreeOpened {
-                        workspace,
-                        already_open: true,
-                        ..
-                    }) => {
-                        if let Some(job) = self.work_items.job_mut(job_id) {
-                            job.branch = Some(branch.clone());
-                        }
-                        self.work_items
-                            .link_workspace(job_id, &workspace.workspace_id);
-                        self.work_items.update_progress(job_id, |progress| {
-                            provision::set_step(
-                                progress,
-                                WorkItemStep::Checkout,
-                                WorkItemStepStatus::Done,
-                                Some(format!("linked to the open workspace on {branch}")),
-                            );
-                            provision::end_unfinished(
-                                progress,
-                                WorkItemStepStatus::Skipped,
-                                "the workspace was already open",
-                            );
-                        });
-                        self.work_items.finish_job_if_done(job_id);
-                    }
-                    Ok(ResponseResult::WorktreeOpened {
-                        workspace,
-                        tab,
-                        root_pane,
-                        worktree,
-                        ..
-                    }) => {
-                        if let Some(job) = self.work_items.job_mut(job_id) {
-                            job.branch = Some(branch.clone());
-                        }
-                        self.work_item_workspace_ready(
-                            job_id,
-                            workspace,
-                            tab,
-                            root_pane,
-                            &worktree.path,
-                            Some(format!("reopened {branch}")),
-                            now,
-                        );
-                    }
-                    Ok(_) => self.fail_work_item_workspace(
-                        job_id,
-                        unexpected_response("worktree.open").message,
-                    ),
-                    Err(err) => self.fail_work_item_workspace(
-                        job_id,
-                        format!("worktree.open: {}", err.message),
-                    ),
+                // worktree.open, like worktree.create, is answered by the app runtime later.
+                let (tx, rx) = std::sync::mpsc::channel();
+                let request = Request {
+                    id: "work-items".into(),
+                    method: Method::WorktreeOpen(WorktreeOpenParams {
+                        workspace_id: None,
+                        cwd: Some(spec.repo_path.display().to_string()),
+                        path: Some(path.display().to_string()),
+                        branch: None,
+                        label: Some(plan.workspace_label.clone()),
+                        focus: false,
+                        trust_repository: false,
+                    }),
+                };
+                if let Some(job) = self.work_items.job_mut(job_id) {
+                    job.branch = Some(branch);
+                    job.worktree = Some(PendingResponse {
+                        next_check: now + RESPONSE_POLL_INTERVAL,
+                        response: rx,
+                    });
+                }
+                if !self.handle_deferred_worktree_api_request(request, tx, false) {
+                    self.fail_work_item_workspace(job_id, "worktree.open is unavailable".into());
                 }
             }
             (
@@ -789,7 +747,7 @@ impl App {
         }
     }
 
-    /// Checks a pending `worktree.create` and continues once Herdr answers.
+    /// Checks a pending `worktree.create` or `worktree.open` and continues once Herdr answers.
     fn advance_work_item_worktree(&mut self, job_id: u64, now: Instant) {
         let Some(pending) = self
             .work_items
@@ -808,8 +766,7 @@ impl App {
                 return;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return self
-                    .fail_work_item_workspace(job_id, "worktree.create response was lost".into());
+                return self.fail_work_item_workspace(job_id, "worktree response was lost".into());
             }
         };
         let Some(job) = self.work_items.job_mut(job_id) else {
@@ -844,11 +801,47 @@ impl App {
                     now,
                 );
             }
-            Ok(_) => self
-                .fail_work_item_workspace(job_id, unexpected_response("worktree.create").message),
-            Err(err) => {
-                self.fail_work_item_workspace(job_id, format!("worktree.create: {}", err.message))
+            // Already a workspace here: it is someone's live work, so link it without
+            // adding tabs or typing an agent into its shell.
+            Ok(ResponseResult::WorktreeOpened {
+                workspace,
+                already_open: true,
+                ..
+            }) => {
+                self.work_items
+                    .link_workspace(job_id, &workspace.workspace_id);
+                self.work_items.update_progress(job_id, |progress| {
+                    provision::set_step(
+                        progress,
+                        WorkItemStep::Checkout,
+                        WorkItemStepStatus::Done,
+                        Some(format!("linked to the open workspace on {branch}")),
+                    );
+                    provision::end_unfinished(
+                        progress,
+                        WorkItemStepStatus::Skipped,
+                        "the workspace was already open",
+                    );
+                });
+                self.work_items.finish_job_if_done(job_id);
             }
+            Ok(ResponseResult::WorktreeOpened {
+                workspace,
+                tab,
+                root_pane,
+                worktree,
+                ..
+            }) => self.work_item_workspace_ready(
+                job_id,
+                workspace,
+                tab,
+                root_pane,
+                &worktree.path,
+                Some(format!("reopened {branch}")),
+                now,
+            ),
+            Ok(_) => self.fail_work_item_workspace(job_id, unexpected_response("worktree").message),
+            Err(err) => self.fail_work_item_workspace(job_id, format!("worktree: {}", err.message)),
         }
     }
 
@@ -885,12 +878,13 @@ impl App {
         if let Some(job) = self.work_items.job_mut(job_id) {
             job.agent_pane_id = Some(root_pane.pane_id);
         }
-        // "Pick next" has no checklist dialog to open its workspace from: go straight there.
-        let discovery = self
+        let item = self
             .work_items
             .job(job_id)
-            .and_then(|job| self.work_items.get(&job.key))
-            .is_some_and(|item| item.is_pick_next);
+            .and_then(|job| self.work_items.get(&job.key));
+        let discovery = item.is_some_and(|item| item.is_pick_next);
+        let source_id = item.map(|item| item.source_id.clone());
+        // "Pick next" has no checklist dialog to open its workspace from: go straight there.
         if discovery {
             let _ = self.work_items_api(Method::WorkspaceFocus(WorkspaceTarget {
                 workspace_id: workspace.workspace_id.clone(),
@@ -900,6 +894,37 @@ impl App {
         }
         self.start_work_item_agent(job_id, now);
         self.work_items.finish_job_if_done(job_id);
+        if !discovery {
+            if let Some(source_id) = source_id {
+                self.close_pick_next_workspace(&source_id);
+            }
+        }
+    }
+
+    /// A ticket of this provider now has its workspace: the next task is picked, so the
+    /// provider's "Pick next" discovery workspace has done its job and closes. Waiting for
+    /// the ticket's workspace, not the choice, keeps the discussion when provisioning fails.
+    fn close_pick_next_workspace(&mut self, source_id: &str) {
+        let key = crate::work_items::state::item_key(
+            source_id,
+            crate::work_items::state::PICK_NEXT_EXTERNAL_ID,
+        );
+        let Some(workspace_id) = self
+            .work_items
+            .get(&key)
+            .and_then(|item| item.workspace_id.clone())
+        else {
+            return;
+        };
+        if self.parse_workspace_id(&workspace_id).is_none() {
+            return;
+        }
+        if let Err(err) = self.work_items_api(Method::WorkspaceClose(WorkspaceCloseParams {
+            workspace_id,
+            close_group: false,
+        })) {
+            tracing::warn!(error = %err.message, "closing the pick-next workspace failed");
+        }
     }
 
     fn add_work_item_tabs(
@@ -924,13 +949,18 @@ impl App {
             .into(),
         }))?;
         let tools: Vec<(&str, String)> = match &plan.source {
-            WorkspaceSource::Worktree(_) => vec![
-                ("editor", layout.editor_command.clone()),
-                match self.resolve_plugin_command(&layout.review_command) {
-                    Some(review) => ("review", review),
-                    None => ("lazygit", layout.lazygit_command.clone()),
-                },
-            ],
+            WorkspaceSource::Worktree(_) => layout
+                .tabs
+                .iter()
+                .filter(|tab| !tab.command.trim().is_empty())
+                // A plugin command that does not resolve gives way to its fallback.
+                .filter_map(|tab| {
+                    let command = self
+                        .resolve_plugin_command(&tab.command)
+                        .or_else(|| self.resolve_plugin_command(&tab.fallback))?;
+                    Some((tab.label.as_str(), command))
+                })
+                .collect(),
             WorkspaceSource::Download(download) => vec![(
                 "diff",
                 layout.diff_command.replace("{file}", &download.file_name),
@@ -1923,10 +1953,19 @@ mod tests {
             layout: WorkspaceLayout {
                 agent: String::new(),
                 agent_args: Vec::new(),
-                editor_command: "true".into(),
-                lazygit_command: "true".into(),
+                tabs: vec![
+                    crate::config::WorkspaceTabConfig {
+                        label: "editor".into(),
+                        command: "true".into(),
+                        fallback: String::new(),
+                    },
+                    crate::config::WorkspaceTabConfig {
+                        label: "lazygit".into(),
+                        command: "true".into(),
+                        fallback: String::new(),
+                    },
+                ],
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: true,
         });
@@ -2026,6 +2065,90 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn choosing_again_after_closing_reopens_the_existing_worktree() {
+        use crate::api::schema::{TabListParams, WorkItemStepStatus, WorkspaceCloseParams};
+
+        let repo = ReviewRepo::new("reopen");
+        let (mut app, _source) = provisioning_app(&repo);
+        let first = provision(&mut app);
+        api(
+            &mut app,
+            Method::WorkspaceClose(WorkspaceCloseParams {
+                workspace_id: first,
+                close_group: false,
+            }),
+        )
+        .expect("workspace closes");
+        run_until(&mut app, |app| list(app)[0].workspace_id.is_none());
+
+        let reopened = provision(&mut app);
+        let item = list(&mut app).remove(0);
+        let progress = item.provisioning.expect("progress");
+        assert_eq!(progress.steps[0].status, WorkItemStepStatus::Done);
+        assert!(progress.steps[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with("reopened")));
+        let Ok(ResponseResult::TabList { tabs }) = api(
+            &mut app,
+            Method::TabList(TabListParams {
+                workspace_id: Some(reopened),
+            }),
+        ) else {
+            panic!("tab list");
+        };
+        let labels: Vec<_> = tabs.iter().map(|tab| tab.label.as_str()).collect();
+        assert_eq!(labels, vec!["shell", "editor", "lazygit"]);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn picking_a_ticket_closes_the_pick_next_workspace() {
+        use crate::work_items::source::{ProvisionPlan, WorkspaceLayout, WorkspaceSource};
+
+        let repo = ReviewRepo::new("pick-next-close");
+        let (mut app, source) = provisioning_app(&repo);
+        *source.scripted_pick_next_plan.lock().unwrap() = Some(ProvisionPlan {
+            source: WorkspaceSource::Scratch(repo.root.join("pick-next")),
+            workspace_label: "Pick next \u{b7} Fake".into(),
+            agent_name_hint: "pick-next-fake".into(),
+            brief: "investigate".into(),
+            layout: WorkspaceLayout {
+                agent: String::new(),
+                agent_args: Vec::new(),
+                tabs: Vec::new(),
+                diff_command: String::new(),
+            },
+            delete_branch: false,
+        });
+        app.start_pick_next("fake", "").expect("pick next starts");
+        let pick_next_workspace = |app: &mut App| {
+            list(app)
+                .into_iter()
+                .find(|item| item.is_pick_next)
+                .and_then(|item| item.workspace_id)
+                .filter(|workspace_id| app.parse_workspace_id(workspace_id).is_some())
+        };
+        run_until(&mut app, |app| pick_next_workspace(app).is_some());
+
+        choose_local(&mut app).expect("local choice accepted");
+        run_until(&mut app, |app| {
+            list(app).iter().any(|item| {
+                item.item_id == "fake:1"
+                    && item
+                        .provisioning
+                        .as_ref()
+                        .is_some_and(|provisioning| provisioning.finished)
+            })
+        });
+
+        assert_eq!(pick_next_workspace(&mut app), None);
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn removing_the_review_worktree_deletes_its_branch() {
         let repo = ReviewRepo::new("remove-branch");
         let (mut app, _source) = provisioning_app(&repo);
@@ -2118,10 +2241,8 @@ mod tests {
             layout: WorkspaceLayout {
                 agent: "claude".into(),
                 agent_args: Vec::new(),
-                editor_command: String::new(),
-                lazygit_command: String::new(),
+                tabs: Vec::new(),
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: true,
         };
@@ -2353,10 +2474,8 @@ mod tests {
             layout: WorkspaceLayout {
                 agent: String::new(),
                 agent_args: Vec::new(),
-                editor_command: String::new(),
-                lazygit_command: String::new(),
+                tabs: Vec::new(),
                 diff_command: String::new(),
-                review_command: String::new(),
             },
             delete_branch: false,
         });

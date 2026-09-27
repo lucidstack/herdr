@@ -77,12 +77,19 @@ small_diff_lines = 40       # small changes default to reviewing on GitHub
 
 [[work_items.github.changes_requested]]
 agent = "codex"
-editor_command = "hx ."
+tabs = [
+  { label = "editor", command = "hx ." },
+  { label = "lazygit", command = "lazygit" },
+]
 ```
 
-`agent` is the coding agent started in the first tab; leave it empty to disable the agent-led choices. `agent_args` are passed to it, for example `agent_args = ["--model", "opus", "--effort", "high"]` for Claude Code. `editor_command` and `lazygit_command` fill the other tabs.
+`agent` is the coding agent started in the first tab; leave it empty to disable the agent-led choices. `agent_args` are passed to it, for example `agent_args = ["--model", "opus", "--effort", "high"]` for Claude Code.
 
-Review requests open [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) in a **review** tab instead of lazygit, with the pull request's base branch fetched and passed as `--base`, so its branch scope shows exactly the pull request's changes. Without the `persiyanov.reviewr` plugin installed, the tab falls back to `lazygit_command`. Change it with `review_command`, where `{plugin:ID}` is an installed plugin's folder and `{base}` the base branch, or set it to `""` to keep lazygit. See the [configuration reference](/docs/config-reference/) for every key.
+`tabs` lists the tabs opened after the agent's tab when the workspace has a checkout, in order. Each tab has a `label` and a `command` typed into it; `{plugin:ID}` in a command is an installed plugin's folder. When a command names a plugin that is not installed, the tab runs its `fallback` instead, or is skipped without one. An empty `tabs` list opens only the agent's tab. By default a worktree gets an **editor** tab (`nvim .`) and a **lazygit** tab.
+
+Review requests default to an **editor** tab and a **review** tab running [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) with the pull request's base branch fetched and passed as `--base`, so its branch scope shows exactly the pull request's changes; `{base}` in a review-request tab is that base. Without the `persiyanov.reviewr` plugin installed, the review tab falls back to lazygit. See the [configuration reference](/docs/config-reference/) for every key.
+
+reviewr also opens itself as a split beside the agent when a worktree workspace is created. With a review tab in your layout, set `auto_open = false` in `~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml` so it only appears in its tab.
 
 ## Jira
 
@@ -99,6 +106,18 @@ key = "APP"
 path = "~/src/app"
 branch_template = "{key_lower}-{slug}"   # {key}, {key_lower} and {slug} are replaced
 ```
+
+The same `[[work_items.jira.issues]]` blocks set the agent and tabs for Jira issues, with `repos` listing project keys. For example, to review the agent's changes in reviewr instead of lazygit:
+
+```toml
+[[work_items.jira.issues]]
+tabs = [
+  { label = "editor", command = "nvim ." },
+  { label = "review", command = "{plugin:persiyanov.reviewr}/bin/herdr-reviewr", fallback = "lazygit" },
+]
+```
+
+Each issue shows its key, its title, and a line with its status and assignee, **unassigned** when nobody has it.
 
 Issues of a mapped project can be worked on locally on a new branch from `base_branch`, or from the remote's default branch when unset. When the clone already has a worktree or local branch whose name contains the issue key (from Orca, `git worktree add` or another Herdr), the choice reads **Continue on <branch>** and reopens that work instead of starting a new branch. A worktree that is already open as a workspace in this Herdr is linked as it is, without new tabs or agent. The agent brief carries the description, type, priority, status, labels and comments. Issues of unmapped projects can only be opened in Jira.
 
@@ -120,7 +139,7 @@ When an item no longer applies (the review is submitted, the checks pass, the is
 
 ### Keeping the tracker in step
 
-Once an item has a workspace, Herdr checks that its tracker knows you are on it. When a Jira issue is not assigned to you or is still in a to-do status (by status category, whatever your workflow calls it), or a GitHub issue is not assigned to you, the item's context turns amber and its dialog (right-click, **Choose what to do...**) says what is missing. One choice fixes it: **Assign to me and move to In Progress**, or just the part that is needed. For Jira it applies the one transition into an in-progress status; with none or several, the choice explains why it is unavailable and **Open in Jira** is still there. A token without `write:jira-work` disables it with that reason. The reminder clears as soon as the tracker catches up, and **Don't remind me for this ticket** silences it for good. There is no notification or sound.
+Once an item has a workspace, Herdr checks that its tracker knows you are on it. When a Jira issue is not assigned to you or is still in a to-do status (by status category, whatever your workflow calls it), or a GitHub issue is not assigned to you, the item's key turns amber and its dialog (right-click, **Update ticket status...**) says what is missing. One choice fixes it: **Assign to me and move to In Progress**, or just the part that is needed. For Jira it applies the one transition into an in-progress status, or, when the workflow has several (such as a Blocked status in the same category), the one named In Progress; otherwise the choice explains why it is unavailable and **Open in Jira** is still there. A token without `write:jira-work` disables it with that reason. The reminder clears as soon as the tracker catches up, and **Don't remind me for this ticket** silences it for good. There is no notification or sound.
 
 ### Picking what to work on next
 
@@ -128,7 +147,7 @@ Click **+ Pick next task…** at the bottom of the inbox (or bind `keys.pick_nex
 
 Talk it through in its pane. Once you confirm a pick, the agent adds the ticket to the inbox with `herdr work-item add` and chooses it (the local choice unless you ask for another), so its workspace is set up as usual. It never assigns or transitions the ticket.
 
-Each tracker keeps one discovery workspace. It sits under its own row at the bottom of the inbox rather than in the spaces list, collapsed to the agent's status unless focused. Picking again while it is open focuses it and sends your new context as a follow-up. The dialog remembers the tracker you used last and the last text for each. Close the workspace when you are done.
+Each tracker keeps one discovery workspace. It sits under its own row at the bottom of the inbox rather than in the spaces list, collapsed to the agent's status unless focused. Picking again while it is open focuses it and sends your new context as a follow-up. The dialog remembers the tracker you used last and the last text for each. Once a ticket from that tracker has its workspace, the discovery workspace has done its job and closes, leaving **+ Pick next task…** for next time. It stays open if setting up the ticket's workspace fails.
 
 ## Scripts and plugins
 

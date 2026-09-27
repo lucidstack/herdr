@@ -11,6 +11,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         item_id: format!("github:o/r#{id}"),
         source_id: "github".into(),
         context: format!("o/r #{id}"),
+        tracker_state: None,
         title: format!("Pull request {id}"),
         author: Some("alice".into()),
         url: format!("https://github.com/o/r/pull/{id}"),
@@ -621,6 +622,63 @@ fn item_menu_links_the_focused_workspace() {
         endpoint_methods(&input)[..],
         [Method::WorkItemLink(params)]
             if params.item_id == "github:o/r#7" && params.workspace_id == "ws_1"
+    ));
+}
+
+#[test]
+fn tracker_state_gets_its_own_line_under_the_title() {
+    let mut ticket = item("7");
+    ticket.tracker_state = Some("Selected for Development · unassigned".into());
+    let mut state = shell_with(vec![ticket, item("8")]);
+    state.compose(106, 30).expect("frame");
+    let [first, second] = state.hits.work_items.as_slice() else {
+        panic!("two items drawn");
+    };
+    assert_eq!(first.rect.height, 3);
+    assert_eq!(second.rect.y, first.rect.y + 3);
+    let text = screen_text(&mut state);
+    let lines: Vec<&str> = text.lines().collect();
+    let title_row = lines
+        .iter()
+        .position(|line| line.contains("Pull request 7"))
+        .expect("title drawn");
+    assert!(lines[title_row + 1].contains("Selected for"), "{text}");
+}
+
+#[test]
+fn item_menu_of_a_started_item_opens_its_tracker_fix() {
+    let mut started = item("7");
+    started.seen = true;
+    started.workspace_id = Some("ws_2".into());
+    started.start_reminder = Some("You're working on this, but it isn't assigned to you".into());
+    let mut state = shell_with(vec![started]);
+    state.compose(106, 30).expect("frame");
+    let rect = state.hits.work_items[0].rect;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        rect.x + 2,
+        rect.y,
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    let update = menu
+        .items()
+        .iter()
+        .position(|entry| entry.label == "Update ticket status...")
+        .expect("tracker fix offered");
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[update];
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#7"
     ));
 }
 

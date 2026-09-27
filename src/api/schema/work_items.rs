@@ -160,6 +160,9 @@ pub struct WorkItemInfo {
     pub item_id: String,
     pub source_id: String,
     pub context: String,
+    /// Where the ticket stands in its tracker, e.g. "Selected for Development · unassigned".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker_state: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
