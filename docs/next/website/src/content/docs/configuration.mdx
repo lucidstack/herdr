@@ -494,9 +494,10 @@ Sound notifications play through the local Herdr client. Custom sounds must be m
 path = "sounds/notification.mp3"
 done_path = "sounds/done.mp3"
 request_path = "sounds/request.mp3"
+inbox_path = "sounds/inbox.mp3"
 ```
 
-`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
+`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds. `inbox_path` overrides the sound for work-item inbox notices, which otherwise play the needs-input sound. Set `inbox_enabled = false` to silence inbox notices while keeping agent sounds.
 
 Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.
 

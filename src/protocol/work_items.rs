@@ -10,6 +10,15 @@ use crate::api::schema::{WorkItemInfo, WorkItemSourceInfo};
 
 pub const WORK_ITEMS_PROJECTION_KIND: &str = "endpoint.work-items.v1";
 
+/// Sent alongside (never instead of) the projection, one per notice. Kept out of
+/// the frozen `SemanticNotification` wire enum, which an older generation-1
+/// endpoint client cannot safely gain new variants on; unaware clients just
+/// ignore the kind, so a notice quietly stops arriving until the client updates
+/// rather than failing to decode. The client turns this into its own semantic
+/// notification locally and picks the sound from `[ui.sound] inbox_path` /
+/// `inbox_enabled`.
+pub const WORK_ITEMS_NOTICE_KIND: &str = "endpoint.work-items.notice.v1";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointWorkItemsProjection {
     pub boot_id: String,
@@ -18,6 +27,13 @@ pub struct EndpointWorkItemsProjection {
     pub sources: Vec<WorkItemSourceInfo>,
     #[serde(default)]
     pub items: Vec<WorkItemInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointWorkItemsNotice {
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 pub fn projection_message(
@@ -35,6 +51,14 @@ pub fn projection_message(
     Ok(ServerMessage::EndpointControl {
         kind: WORK_ITEMS_PROJECTION_KIND.into(),
         data: serde_json::to_string(&projection)?,
+    })
+}
+
+pub fn notice_message(title: String, body: Option<String>) -> serde_json::Result<ServerMessage> {
+    let notice = EndpointWorkItemsNotice { title, body };
+    Ok(ServerMessage::EndpointControl {
+        kind: WORK_ITEMS_NOTICE_KIND.into(),
+        data: serde_json::to_string(&notice)?,
     })
 }
 

@@ -12,6 +12,7 @@ pub(crate) enum EndpointControlMessage {
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     WorkItems(Box<crate::protocol::work_items::EndpointWorkItemsProjection>),
+    WorkItemNotice(crate::protocol::work_items::EndpointWorkItemsNotice),
     Ignored,
 }
 
@@ -57,6 +58,12 @@ pub(crate) fn decode_endpoint_control(
     if kind == crate::protocol::work_items::WORK_ITEMS_PROJECTION_KIND {
         return Ok(match serde_json::from_str(data) {
             Ok(projection) => EndpointControlMessage::WorkItems(Box::new(projection)),
+            Err(_) => EndpointControlMessage::Ignored,
+        });
+    }
+    if kind == crate::protocol::work_items::WORK_ITEMS_NOTICE_KIND {
+        return Ok(match serde_json::from_str(data) {
+            Ok(notice) => EndpointControlMessage::WorkItemNotice(notice),
             Err(_) => EndpointControlMessage::Ignored,
         });
     }
@@ -193,6 +200,38 @@ mod tests {
         assert!(matches!(
             decode_endpoint_control(
                 crate::protocol::work_items::WORK_ITEMS_PROJECTION_KIND,
+                "not json"
+            )
+            .unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+    }
+
+    #[test]
+    fn work_items_notice_decodes() {
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::work_items::notice_message(
+                "New pull request".into(),
+                Some("o/r #7".into()),
+            )
+            .unwrap()
+        else {
+            panic!("expected endpoint control");
+        };
+        let EndpointControlMessage::WorkItemNotice(notice) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("decoded work item notice");
+        };
+        assert_eq!(notice.title, "New pull request");
+        assert_eq!(notice.body.as_deref(), Some("o/r #7"));
+    }
+
+    #[test]
+    fn malformed_work_items_notice_is_ignored() {
+        assert!(matches!(
+            decode_endpoint_control(
+                crate::protocol::work_items::WORK_ITEMS_NOTICE_KIND,
                 "not json"
             )
             .unwrap(),

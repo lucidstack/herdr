@@ -2,9 +2,6 @@
 
 use crate::app::App;
 use crate::events::AppEvent;
-use crate::protocol::{
-    SemanticNotification, SemanticNotificationKind, SemanticNotificationSound, ServerMessage,
-};
 
 use super::HeadlessServer;
 
@@ -29,17 +26,14 @@ impl HeadlessServer {
 
     fn send_work_item_notices(&mut self, notices: Vec<crate::work_items::WorkItemNotice>) {
         for notice in notices {
-            self.send_to_client_shells(ServerMessage::SemanticNotification(SemanticNotification {
-                kind: SemanticNotificationKind::Custom,
-                title: notice.title,
-                body: notice.body,
-                sound: Some(SemanticNotificationSound::Request),
-                agent: None,
-                workspace_id: None,
-                tab_id: None,
-                pane_id: None,
-                position: None,
-            }));
+            match crate::protocol::work_items::notice_message(notice.title, notice.body) {
+                Ok(message) => {
+                    self.send_to_client_shells(message);
+                }
+                Err(err) => {
+                    tracing::warn!(err = %err, "failed to encode work item notice");
+                }
+            }
         }
     }
 
