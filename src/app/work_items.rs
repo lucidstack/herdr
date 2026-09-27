@@ -47,6 +47,16 @@ fn send_event(event_tx: &tokio::sync::mpsc::Sender<AppEvent>, event: WorkItemsEv
     let _ = event_tx.blocking_send(AppEvent::WorkItems(Box::new(event)));
 }
 
+/// Whether `workspace` sits on the main checkout (not a linked worktree) of the Git
+/// repository `key`, judged from cached metadata only: no filesystem access.
+fn workspace_is_main_checkout_of(workspace: &crate::workspace::Workspace, key: &str) -> bool {
+    match (workspace.worktree_space(), workspace.git_space()) {
+        (Some(space), _) => space.key == key && !space.is_linked_worktree,
+        (None, Some(space)) => space.key == key && !space.is_linked_worktree,
+        (None, None) => false,
+    }
+}
+
 fn parse_response(response: &str) -> Result<ResponseResult, ErrorBody> {
     if let Ok(success) = serde_json::from_str::<SuccessResponse>(response) {
         return Ok(success.result);
@@ -170,6 +180,13 @@ impl App {
         self.work_items
             .finish_follow_ups(|response| parse_response(response).err().map(|err| err.message));
         self.work_items.expire_snoozes();
+        let workspaces = &self.state.workspaces;
+        self.work_items.update_repository_homes(|key| {
+            workspaces
+                .iter()
+                .find(|workspace| workspace_is_main_checkout_of(workspace, key))
+                .map(|workspace| workspace.id.as_str())
+        });
         self.sync_work_item_events();
         let changed = self.work_items.revision() != revision;
         if changed {
@@ -1486,6 +1503,35 @@ mod tests {
         assert!(!items[0].seen);
         assert_eq!(items[0].phase, WorkItemPhase::Pending);
         assert_eq!(source.prepare_calls(), 1);
+    }
+
+    #[test]
+    fn only_the_main_checkout_is_a_repository_home() {
+        let membership = |linked: bool| crate::workspace::WorktreeSpaceMembership {
+            key: "/src/app/.git".into(),
+            label: "app".into(),
+            repo_root: "/src/app".into(),
+            checkout_path: if linked {
+                "/src/app-feature"
+            } else {
+                "/src/app"
+            }
+            .into(),
+            is_linked_worktree: linked,
+        };
+        let mut main = crate::workspace::Workspace::test_new("main");
+        main.worktree_space = Some(membership(false));
+        let mut linked = crate::workspace::Workspace::test_new("feature");
+        linked.worktree_space = Some(membership(true));
+        assert!(super::workspace_is_main_checkout_of(&main, "/src/app/.git"));
+        assert!(!super::workspace_is_main_checkout_of(
+            &linked,
+            "/src/app/.git"
+        ));
+        assert!(!super::workspace_is_main_checkout_of(
+            &main,
+            "/src/other/.git"
+        ));
     }
 
     #[test]

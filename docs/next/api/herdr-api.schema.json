@@ -11128,6 +11128,13 @@
                     "last_context": {}
                   }
                 },
+                "repositories": {
+                  "default": [],
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkItemRepositoryInfo"
+                  },
+                  "type": "array"
+                },
                 "sources": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/WorkItemSourceInfo"
@@ -11659,6 +11666,31 @@
           "required": [
             "steps",
             "finished"
+          ],
+          "type": "object"
+        },
+        "WorkItemRepositoryInfo": {
+          "description": "A local clone mapped by a work-item source (`[work_items.github] repos`,\n`[work_items.jira] projects`), offered as a way to reach its main checkout.",
+          "properties": {
+            "label": {
+              "description": "Short name, e.g. the directory name.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Absolute path of the clone on the server's machine.",
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "The open workspace on the clone's main checkout (its \"home\"), if any.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "label"
           ],
           "type": "object"
         },

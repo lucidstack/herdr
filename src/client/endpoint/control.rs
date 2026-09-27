@@ -182,11 +182,14 @@ mod tests {
     fn work_items_projection_decodes() {
         let crate::protocol::ServerMessage::EndpointControl { kind, data } =
             crate::protocol::work_items::projection_message(
-                "boot",
-                2,
-                Vec::new(),
-                Vec::new(),
-                Default::default(),
+                &crate::protocol::work_items::EndpointWorkItemsProjection {
+                    boot_id: "boot".into(),
+                    revision: 2,
+                    sources: Vec::new(),
+                    items: Vec::new(),
+                    pick_next: Default::default(),
+                    repositories: Vec::new(),
+                },
             )
             .unwrap()
         else {

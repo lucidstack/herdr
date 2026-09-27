@@ -50,11 +50,14 @@ impl HeadlessServer {
     /// Frames the current work-item projection for one client shell.
     pub(super) fn frame_work_items_projection(app: &App, boot_id: &str) -> Result<Vec<u8>, String> {
         let message = crate::protocol::work_items::projection_message(
-            boot_id,
-            app.work_items.revision(),
-            app.work_items.source_infos(),
-            app.work_items.projection_items(),
-            app.work_items.pick_next_info(),
+            &crate::protocol::work_items::EndpointWorkItemsProjection {
+                boot_id: boot_id.to_owned(),
+                revision: app.work_items.revision(),
+                sources: app.work_items.source_infos(),
+                items: app.work_items.projection_items(),
+                pick_next: app.work_items.pick_next_info(),
+                repositories: app.work_items.repository_infos(),
+            },
         )
         .map_err(|err| err.to_string())?;
         Self::frame_server_message(&message).map_err(|err| err.to_string())

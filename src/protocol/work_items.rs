@@ -6,7 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::ServerMessage;
-use crate::api::schema::{WorkItemInfo, WorkItemPickNextInfo, WorkItemSourceInfo};
+use crate::api::schema::{
+    WorkItemInfo, WorkItemPickNextInfo, WorkItemRepositoryInfo, WorkItemSourceInfo,
+};
 
 pub const WORK_ITEMS_PROJECTION_KIND: &str = "endpoint.work-items.v1";
 
@@ -29,6 +31,8 @@ pub struct EndpointWorkItemsProjection {
     pub items: Vec<WorkItemInfo>,
     #[serde(default)]
     pub pick_next: WorkItemPickNextInfo,
+    #[serde(default)]
+    pub repositories: Vec<WorkItemRepositoryInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,22 +43,11 @@ pub struct EndpointWorkItemsNotice {
 }
 
 pub fn projection_message(
-    boot_id: &str,
-    revision: u64,
-    sources: Vec<WorkItemSourceInfo>,
-    items: Vec<WorkItemInfo>,
-    pick_next: WorkItemPickNextInfo,
+    projection: &EndpointWorkItemsProjection,
 ) -> serde_json::Result<ServerMessage> {
-    let projection = EndpointWorkItemsProjection {
-        boot_id: boot_id.to_owned(),
-        revision,
-        sources,
-        items,
-        pick_next,
-    };
     Ok(ServerMessage::EndpointControl {
         kind: WORK_ITEMS_PROJECTION_KIND.into(),
-        data: serde_json::to_string(&projection)?,
+        data: serde_json::to_string(projection)?,
     })
 }
 
@@ -72,32 +65,29 @@ mod tests {
 
     #[test]
     fn projection_message_round_trips_under_its_kind() {
-        let sources = vec![WorkItemSourceInfo {
-            source_id: "github".into(),
-            label: "GitHub".into(),
-            error: Some("offline".into()),
-        }];
-        let ServerMessage::EndpointControl { kind, data } = projection_message(
-            "boot",
-            3,
-            sources.clone(),
-            Vec::new(),
-            WorkItemPickNextInfo::default(),
-        )
-        .unwrap() else {
+        let projection = EndpointWorkItemsProjection {
+            boot_id: "boot".into(),
+            revision: 3,
+            sources: vec![WorkItemSourceInfo {
+                source_id: "github".into(),
+                label: "GitHub".into(),
+                error: Some("offline".into()),
+            }],
+            items: Vec::new(),
+            pick_next: WorkItemPickNextInfo::default(),
+            repositories: vec![WorkItemRepositoryInfo {
+                path: "/src/app".into(),
+                label: "app".into(),
+                workspace_id: Some("w1".into()),
+            }],
+        };
+        let ServerMessage::EndpointControl { kind, data } =
+            projection_message(&projection).unwrap()
+        else {
             panic!("expected endpoint control");
         };
         assert_eq!(kind, WORK_ITEMS_PROJECTION_KIND);
         let decoded: EndpointWorkItemsProjection = serde_json::from_str(&data).unwrap();
-        assert_eq!(
-            decoded,
-            EndpointWorkItemsProjection {
-                boot_id: "boot".into(),
-                revision: 3,
-                sources,
-                items: Vec::new(),
-                pick_next: WorkItemPickNextInfo::default(),
-            }
-        );
+        assert_eq!(decoded, projection);
     }
 }

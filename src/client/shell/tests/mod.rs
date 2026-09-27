@@ -261,6 +261,7 @@ mod mobile;
 mod mouse_selection;
 mod pick_next;
 mod popup_focus_projection;
+mod repositories;
 mod sidebar_sections;
 mod startup_overlays;
 mod work_items;

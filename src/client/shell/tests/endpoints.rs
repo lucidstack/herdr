@@ -639,6 +639,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         }],
         items,
         pick_next: Default::default(),
+        repositories: Vec::new(),
     };
     let (mut state, remote) = state_with_remote();
     let local_boot = snapshot().boot_id;
