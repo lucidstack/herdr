@@ -289,23 +289,40 @@ fn run_config_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn config_check(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str = "usage: herdr config check [--session NAME]";
     match args {
         [] => {}
+        [flag, name] if flag == "--session" => {
+            if let Err(err) = crate::session::validate_name(name) {
+                eprintln!("{err}");
+                return Ok(2);
+            }
+            // Only this process: the check reads the files `--session NAME` would.
+            std::env::set_var(crate::session::SESSION_ENV_VAR, name);
+        }
         [flag] if matches!(flag.as_str(), "help" | "--help" | "-h") => {
-            eprintln!("usage: herdr config check");
+            eprintln!("{USAGE}");
             return Ok(0);
         }
         _ => {
-            eprintln!("usage: herdr config check");
+            eprintln!("{USAGE}");
             return Ok(2);
         }
     }
 
     let diagnostics = crate::config::Config::load().diagnostics;
+    let files = match crate::config::session_layer_path().filter(|path| path.is_file()) {
+        Some(layer) => format!(
+            " ({} + {})",
+            crate::config::display_config_path(&crate::config::config_path()),
+            crate::config::display_config_path(&layer)
+        ),
+        None => String::new(),
+    };
     if diagnostics.is_empty() {
-        println!("config: ok");
+        println!("config: ok{files}");
     } else {
-        println!("config: issues found");
+        println!("config: issues found{files}");
         for diagnostic in &diagnostics {
             println!("{diagnostic}");
         }
@@ -995,16 +1012,28 @@ fn parse_session_name_and_json(args: &[String], usage: &str) -> Result<(String, 
 }
 
 fn print_session_table(sessions: &[crate::session::SessionInfo]) {
-    println!("{:<20} {:<8} {:<48} socket", "name", "status", "directory");
+    println!(
+        "{:<20} {:<8} {:<28} {:<48} socket",
+        "name", "status", "config", "directory"
+    );
     for session in sessions {
+        let config = match session
+            .config_layer
+            .as_deref()
+            .and_then(|layer| std::path::Path::new(layer).file_name())
+        {
+            Some(layer) => format!("config.toml + {}", layer.to_string_lossy()),
+            None => "config.toml".to_string(),
+        };
         println!(
-            "{:<20} {:<8} {:<48} {}",
+            "{:<20} {:<8} {:<28} {:<48} {}",
             session.name,
             if session.running {
                 "running"
             } else {
                 "stopped"
             },
+            config,
             session.session_dir,
             session.socket_path
         );

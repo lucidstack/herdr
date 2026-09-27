@@ -24,6 +24,9 @@ pub struct SessionInfo {
     pub running: bool,
     pub socket_path: String,
     pub session_dir: String,
+    /// The session's own config layered on `config.toml`, when that file exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_layer: Option<String>,
 }
 
 pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
@@ -222,6 +225,9 @@ pub fn session_info(name: Option<&str>) -> SessionInfo {
         running: is_running_at(&socket_path),
         socket_path: socket_path.display().to_string(),
         session_dir: session_dir.display().to_string(),
+        config_layer: crate::config::session_layer_path_for(name)
+            .filter(|path| path.is_file())
+            .map(|path| path.display().to_string()),
     }
 }
 

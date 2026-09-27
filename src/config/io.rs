@@ -130,8 +130,7 @@ pub(super) fn read_optional_config(path: &Path) -> std::io::Result<Option<String
 
 impl Config {
     pub fn load() -> LoadedConfig {
-        let path = config_path();
-        let content = match read_optional_config(&path) {
+        let content = match read_config_content() {
             Ok(Some(content)) => content,
             Ok(None) => {
                 return LoadedConfig {
@@ -144,7 +143,7 @@ impl Config {
                 warn!(err = %err, "config read error, using defaults");
                 return LoadedConfig {
                     config: Self::default(),
-                    diagnostics: vec![format!("config read error: {err}; using defaults")],
+                    diagnostics: vec![format!("{err}; using defaults")],
                     invalid_sections: Vec::new(),
                 };
             }
@@ -164,6 +163,7 @@ impl Config {
                     None,
                 ));
                 diagnostics.extend(config.collect_diagnostics());
+                let diagnostics = attribute_layer_diagnostics(diagnostics);
                 LoadedConfig {
                     config,
                     diagnostics,
@@ -200,16 +200,190 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Session names that never layer a file of their own: `config` is the base itself, and
+/// the default session uses `config.toml` alone.
+const RESERVED_LAYER_NAMES: &[&str] = &["config", crate::session::DEFAULT_SESSION_NAME];
+
+/// The active session's own config, e.g. `work.toml` next to `config.toml` for
+/// `--session work`, layered on top of the base when it exists. `None` for the default
+/// session, reserved names, and whenever `HERDR_CONFIG_PATH` picks one exact file.
+pub fn session_layer_path() -> Option<PathBuf> {
+    if std::env::var_os(CONFIG_PATH_ENV_VAR).is_some() {
+        return None;
+    }
+    session_layer_candidate()
+}
+
+/// Where the active session's layer lives, whether or not `HERDR_CONFIG_PATH` bypasses it.
+fn session_layer_candidate() -> Option<PathBuf> {
+    session_layer_path_for(crate::session::active_name().as_deref())
+}
+
+/// Where session `name`'s layer lives; `None` for the default session and reserved names.
+pub fn session_layer_path_for(name: Option<&str>) -> Option<PathBuf> {
+    let name = name?;
+    if RESERVED_LAYER_NAMES.contains(&name) {
+        return None;
+    }
+    Some(config_dir().join(format!("{name}.toml")))
+}
+
+/// One line saying which files the active session reads, printed before the TUI takes
+/// over. `None` when the session reads `config.toml` alone as usual.
+pub fn session_layer_notice() -> Option<String> {
+    let name = crate::session::active_name()?;
+    let candidate = session_layer_candidate().filter(|path| path.is_file());
+    if let Ok(path) = std::env::var(CONFIG_PATH_ENV_VAR) {
+        return candidate.map(|layer| {
+            format!(
+                "herdr: session \"{name}\" uses HERDR_CONFIG_PATH ({path}) only; {} is not layered",
+                display_config_path(&layer)
+            )
+        });
+    }
+    candidate.map(|layer| {
+        format!(
+            "herdr: session \"{name}\" uses {} on top of config.toml",
+            display_config_path(&layer)
+        )
+    })
+}
+
+/// `path` with the home directory shortened to `~`.
+pub fn display_config_path(path: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if path.starts_with(&home) => {
+            format!("~/{}", path.strip_prefix(&home).unwrap_or(path).display())
+        }
+        _ => path.display().to_string(),
+    }
+}
+
+/// The config text to load: `config.toml` (or `HERDR_CONFIG_PATH`) with the active
+/// session's layer merged on top. `None` when neither file exists. `Err` is a
+/// diagnostic naming the file at fault, to be completed with what happens next.
+fn read_config_content() -> Result<Option<String>, String> {
+    let base_path = config_path();
+    let base =
+        read_optional_config(&base_path).map_err(|err| format!("config read error: {err}"))?;
+    let Some(layer_path) = session_layer_path() else {
+        return Ok(base);
+    };
+    let layer = read_optional_config(&layer_path)
+        .map_err(|err| format!("config read error: {}: {err}", file_label(&layer_path)))?;
+    let Some(layer) = layer else {
+        return Ok(base);
+    };
+    let parse = |content: &str, path: &Path| {
+        content
+            .parse::<toml::Table>()
+            .map_err(|err| format!("config parse error in {}: {err}", file_label(path)))
+    };
+    let mut merged = match &base {
+        Some(base) => parse(base, &base_path)?,
+        None => toml::Table::new(),
+    };
+    merge_config_tables(&mut merged, parse(&layer, &layer_path)?);
+    toml::to_string(&merged)
+        .map(Some)
+        .map_err(|err| format!("config parse error: cannot combine config files: {err}"))
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Layers `layer` onto `base`: tables merge key by key, all the way down; anything else,
+/// arrays and arrays of tables included, replaces the base value as a whole.
+fn merge_config_tables(base: &mut toml::Table, layer: toml::Table) {
+    for (key, value) in layer {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(base_table)), toml::Value::Table(layer_table)) => {
+                merge_config_tables(base_table, layer_table)
+            }
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
+}
+
+/// Names the session layer in unknown-key diagnostics for keys it set, so each points
+/// at the file to edit.
+fn attribute_layer_diagnostics(diagnostics: Vec<String>) -> Vec<String> {
+    let Some(layer_path) = session_layer_path() else {
+        return diagnostics;
+    };
+    let Some(layer) = read_optional_config(&layer_path)
+        .ok()
+        .flatten()
+        .and_then(|content| content.parse::<toml::Table>().ok())
+    else {
+        return diagnostics;
+    };
+    let label = file_label(&layer_path);
+    diagnostics
+        .into_iter()
+        .map(|diagnostic| {
+            let Some(key) = diagnostic
+                .strip_prefix("unknown config key ")
+                .and_then(|rest| rest.strip_suffix("; ignoring key"))
+            else {
+                return diagnostic;
+            };
+            if table_has_key_path(&layer, key) {
+                format!("unknown config key {key} in {label}; ignoring key")
+            } else {
+                diagnostic
+            }
+        })
+        .collect()
+}
+
+/// Whether the dotted `path` (as diagnostics format it) names a value in `table`.
+fn table_has_key_path(table: &toml::Table, path: &str) -> bool {
+    let mut current = toml::Value::Table(table.clone());
+    for segment in path.split('.') {
+        let segment = segment.trim_matches('"');
+        current = match current {
+            toml::Value::Table(mut table) => match table.remove(segment) {
+                Some(value) => value,
+                None => return false,
+            },
+            toml::Value::Array(mut items) => match segment.parse::<usize>() {
+                Ok(index) if index < items.len() => items.swap_remove(index),
+                _ => return false,
+            },
+            _ => return false,
+        };
+    }
+    true
+}
+
 pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
     if diagnostics.is_empty() {
         return None;
     }
 
-    let target = config_path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("config.toml")
-        .to_string();
+    // Point at the session layer when every problem comes from it.
+    let layer_label = session_layer_path().map(|path| file_label(&path));
+    let target = match layer_label {
+        Some(label)
+            if diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.contains(&label)) =>
+        {
+            label
+        }
+        _ => config_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config.toml")
+            .to_string(),
+    };
     let read_error = diagnostics
         .iter()
         .any(|diagnostic| diagnostic.starts_with("config read error:"));
@@ -244,8 +418,7 @@ pub fn config_diagnostic_summary(diagnostics: &[String]) -> Option<String> {
 }
 
 pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
-    let path = config_path();
-    let content = match read_optional_config(&path) {
+    let content = match read_config_content() {
         Ok(Some(content)) => content,
         Ok(None) => {
             return Ok(LoadedConfig {
@@ -254,13 +427,12 @@ pub fn load_live_config() -> Result<LoadedConfig, Vec<String>> {
                 invalid_sections: Vec::new(),
             });
         }
-        Err(err) => {
-            return Err(vec![format!(
-                "config read error: {err}; keeping current config"
-            )]);
-        }
+        Err(err) => return Err(vec![format!("{err}; keeping current config")]),
     };
-    load_live_config_from_str(&content)
+    load_live_config_from_str(&content).map(|mut loaded| {
+        loaded.diagnostics = attribute_layer_diagnostics(loaded.diagnostics);
+        loaded
+    })
 }
 
 fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>> {
@@ -759,6 +931,86 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config dir with `config.toml` and `<session>.toml`, selected as the active session.
+    fn layered_env(tag: &str, session: &str, base: &str, layer: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("herdr-layer-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::env::set_var("XDG_CONFIG_HOME", &home);
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        std::env::set_var(crate::session::SESSION_ENV_VAR, session);
+        let dir = config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), base).unwrap();
+        std::fs::write(dir.join(format!("{session}.toml")), layer).unwrap();
+        home
+    }
+
+    const BASE: &str = "[ui.sound]\nenabled = true\n\n[ui.sound.agents]\nclaude = \"off\"\n\n[ui.sidebar]\nsections = [\"inbox\", \"spaces\", \"agents\"]\n";
+
+    #[test]
+    fn session_layer_merges_tables_and_replaces_values_and_arrays() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let home = layered_env(
+            "merge",
+            "work",
+            BASE,
+            "[ui.sound]\nenabled = false\n\n[ui.sidebar]\nsections = [\"agents\"]\n",
+        );
+        let loaded = Config::load();
+        let _ = std::fs::remove_dir_all(home);
+        assert_eq!(loaded.diagnostics, Vec::<String>::new());
+        assert!(!loaded.config.ui.sound.enabled);
+        // Keys the layer leaves alone keep the base value.
+        assert_eq!(
+            loaded
+                .config
+                .ui
+                .sound
+                .agents
+                .for_agent(Some(crate::detect::Agent::Claude)),
+            super::super::sound::AgentSoundSetting::Off
+        );
+        assert_eq!(
+            loaded.config.ui.sidebar.sections,
+            vec![crate::config::SidebarSection::Agents]
+        );
+    }
+
+    #[test]
+    fn config_path_override_reads_that_file_alone() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let home = layered_env("override", "work", BASE, "[ui.sound]\nenabled = false\n");
+        std::env::set_var(CONFIG_PATH_ENV_VAR, config_dir().join("config.toml"));
+        let overridden = Config::load();
+        let notice = session_layer_notice();
+        std::env::remove_var(CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(home);
+        assert!(overridden.config.ui.sound.enabled);
+        assert!(notice.is_some_and(|notice| notice.contains("is not layered")));
+    }
+
+    #[test]
+    fn session_layer_problems_name_the_layer_file() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let home = layered_env("unknown", "work", BASE, "[ui.sound]\nloudness = 11\n");
+        let unknown = Config::load().diagnostics;
+        std::fs::write(config_dir().join("work.toml"), "[ui.sound\n").unwrap();
+        let broken = Config::load().diagnostics;
+        let _ = std::fs::remove_dir_all(home);
+        assert_eq!(
+            unknown,
+            vec!["unknown config key ui.sound.loudness in work.toml; ignoring key".to_string()]
+        );
+        assert!(
+            broken.len() == 1 && broken[0].starts_with("config parse error in work.toml"),
+            "{broken:?}"
+        );
+        assert_eq!(
+            config_diagnostic_summary(&unknown).as_deref(),
+            Some("work.toml has unknown keys; herdr config check")
+        );
+    }
 
     #[test]
     fn upsert_top_level_bool_replaces_existing_value() {
