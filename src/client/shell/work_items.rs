@@ -63,6 +63,8 @@ pub(super) struct InboxHits {
     pub(super) more_below: Rect,
     /// The collapsed sidebar's one-row inbox badge; opens the inbox list.
     pub(super) badge: Rect,
+    /// The "+ Pick next task…" row; opens the "Pick next" dialog.
+    pub(super) pick_next: Rect,
     /// Items drawn in the last frame.
     pub(super) shown: usize,
     /// Items not hidden by dismissing or snoozing.
@@ -81,7 +83,7 @@ pub(super) fn render_inbox_badge(
     if rect.is_empty() {
         return false;
     }
-    let visible = projection.items.iter().filter(|item| !is_hidden(item));
+    let visible = projection.items.iter().filter(|item| is_listed(item));
     let (count, unseen) = visible.fold((0, 0), |(count, unseen), item| {
         (count + 1, unseen + usize::from(!item.seen))
     });
@@ -109,6 +111,12 @@ pub(super) fn render_inbox_badge(
 /// Dismissed and snoozed items stay out of the sidebar.
 pub(super) fn is_hidden(item: &WorkItemInfo) -> bool {
     item.dismissed || item.snoozed_until.is_some()
+}
+
+/// Items the inbox lists as tickets: not hidden, and not a provider's "Pick next"
+/// discovery row, which has its own place at the bottom of the inbox.
+pub(super) fn is_listed(item: &WorkItemInfo) -> bool {
+    !is_hidden(item) && !item.is_pick_next
 }
 
 #[derive(Debug)]
@@ -187,9 +195,13 @@ pub(super) fn render_items_section<'a>(
     let visible: Vec<&WorkItemInfo> = projection
         .items
         .iter()
-        .filter(|item| !is_hidden(item))
+        .filter(|item| is_listed(item))
         .collect();
-    let hidden = projection.items.len() - visible.len();
+    let hidden = projection
+        .items
+        .iter()
+        .filter(|item| !item.is_pick_next && is_hidden(item))
+        .count();
     // With a following section (normally spaces), keep this to a share of the
     // zone instead of consuming all of it; expanded keeps that follower to a
     // header and one row. Alone, or last, there is nothing else to save room
@@ -202,6 +214,46 @@ pub(super) fn render_items_section<'a>(
         area.height / 2
     };
     let limit = area.y.saturating_add(3.max(budget).min(area.height));
+    let focused_workspace_id = snapshot.focused_workspace_id.as_deref();
+    // "Pick next" discovery rows: one per provider whose workspace is starting or open,
+    // expanded only while focused, then the "+ Pick next task…" row. Their workspaces
+    // live here and never in the spaces list.
+    let discovery: Vec<(&WorkItemInfo, Option<(usize, &ClientShellWorkspace)>)> = projection
+        .items
+        .iter()
+        .filter(|item| item.is_pick_next)
+        .filter_map(|item| {
+            let workspace = item.workspace_id.as_deref().and_then(|workspace_id| {
+                snapshot
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .find(|(_, workspace)| workspace.workspace_id == workspace_id)
+            });
+            (workspace.is_some() || provisioning_running(item)).then_some((item, workspace))
+        })
+        .collect();
+    let discovery_rows: u16 = discovery
+        .iter()
+        .map(|(_, workspace)| match workspace {
+            Some((_, workspace)) if workspace.focused => {
+                1 + super::render::sidebar::workspace_rows(
+                    workspace,
+                    workspace.agent_status,
+                    true,
+                    &config.spaces,
+                )
+                .len()
+                .max(1) as u16
+            }
+            _ => 1,
+        })
+        .sum();
+    // Tickets keep at least one row below the header; the footer gives way first.
+    let footer_rows = discovery_rows + 1;
+    let items_limit = limit
+        .saturating_sub(footer_rows)
+        .max(area.y.saturating_add(2).min(limit));
     let width = area.width.saturating_sub(1);
     let mut y = area.y;
     hits.inbox = InboxHits {
@@ -247,7 +299,7 @@ pub(super) fn render_items_section<'a>(
         let Some(error) = &source.error else {
             continue;
         };
-        if y >= limit {
+        if y >= items_limit {
             break;
         }
         put_text(
@@ -262,7 +314,7 @@ pub(super) fn render_items_section<'a>(
     }
 
     let scroll = view.scroll.min(visible.len().saturating_sub(1));
-    if scroll > 0 && y < limit {
+    if scroll > 0 && y < items_limit {
         hits.inbox.more_above = Rect::new(area.x, y, width, 1);
         put_text(
             buffer,
@@ -274,7 +326,6 @@ pub(super) fn render_items_section<'a>(
         );
         y += 1;
     }
-    let focused_workspace_id = snapshot.focused_workspace_id.as_deref();
     for (index, item) in visible.iter().copied().enumerate().skip(scroll) {
         let nested = item.workspace_id.as_deref().and_then(|workspace_id| {
             snapshot
@@ -297,8 +348,8 @@ pub(super) fn render_items_section<'a>(
         let remaining = visible.len() - index;
         // Keep one row for the "more" marker unless this is the last item.
         let reserve = u16::from(remaining > 1);
-        if y.saturating_add(2 + nested_height + reserve) > limit {
-            let row_y = y.min(limit.saturating_sub(1));
+        if y.saturating_add(2 + nested_height + reserve) > items_limit {
+            let row_y = y.min(items_limit.saturating_sub(1));
             hits.inbox.more_below = Rect::new(area.x, row_y, width, 1);
             put_text(
                 buffer,
@@ -308,7 +359,7 @@ pub(super) fn render_items_section<'a>(
                 &format!(" ↓ {remaining} more"),
                 Style::default().fg(palette.overlay0),
             );
-            y = y.saturating_add(1).min(limit);
+            y = y.saturating_add(1).min(items_limit);
             break;
         }
         hits.inbox.shown += 1;
@@ -361,6 +412,98 @@ pub(super) fn render_items_section<'a>(
             }
             y += nested_height;
         }
+    }
+    for (item, workspace) in discovery {
+        if let Some(workspace_id) = item.workspace_id.as_deref() {
+            nested_workspace_ids.push(workspace_id);
+        }
+        if y >= area.bottom() {
+            continue;
+        }
+        let row = Rect::new(area.x, y, width, 1);
+        let focused = workspace.is_some_and(|(_, workspace)| workspace.focused);
+        if focused {
+            buffer.set_style(row, Style::default().bg(palette.active_row_bg));
+        }
+        // Starting: the provisioning spinner; open: the agent's status, like a space.
+        let (glyph, color) = match workspace {
+            Some((_, workspace)) => (
+                status_icon(workspace.agent_status, config.status_indicators),
+                status_color(workspace.agent_status, palette),
+            ),
+            None => (
+                SPINNER_FRAMES[view.spinner_frame % SPINNER_FRAMES.len()],
+                palette.yellow,
+            ),
+        };
+        let x = put_segment(buffer, row.x, y, row.right(), " ", Style::default());
+        let x = put_segment(buffer, x, y, row.right(), glyph, Style::default().fg(color));
+        put_segment(
+            buffer,
+            x.saturating_add(1),
+            y,
+            row.right(),
+            &item.title,
+            Style::default().fg(if focused {
+                palette.text
+            } else {
+                palette.subtext0
+            }),
+        );
+        hits.work_items.push(WorkItemHit {
+            rect: row,
+            item_id: item.item_id.clone(),
+        });
+        y += 1;
+        let Some((workspace_index, workspace)) = workspace.filter(|_| focused) else {
+            continue;
+        };
+        let rows = super::render::sidebar::workspace_rows(
+            workspace,
+            workspace.agent_status,
+            true,
+            &config.spaces,
+        );
+        let height = (rows.len().max(1) as u16).min(area.bottom().saturating_sub(y));
+        let rect = Rect::new(area.x, y, width, height);
+        buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+        super::render::sidebar::render_workspace_rows(
+            buffer,
+            rect,
+            workspace.agent_status,
+            config.status_indicators,
+            &WorkspaceEntry {
+                index: workspace_index,
+                indented: true,
+                last_child: true,
+            },
+            rows,
+            true,
+            false,
+            false,
+            false,
+            palette,
+        );
+        hits.workspaces.push(WorkspaceHit {
+            rect,
+            endpoint_id: endpoint_id.clone(),
+            workspace_id: workspace.workspace_id.clone(),
+            indented: true,
+            group_toggle: None,
+        });
+        y += height;
+    }
+    if y < area.bottom() {
+        hits.inbox.pick_next = Rect::new(area.x, y, width, 1);
+        put_text(
+            buffer,
+            area.x,
+            y,
+            width,
+            " + Pick next task…",
+            Style::default().fg(palette.overlay0),
+        );
+        y += 1;
     }
     // Blank separator before the spaces list.
     let used = (y + 1).min(area.bottom()) - area.y;
@@ -467,6 +610,7 @@ fn inbox_order(projection: &EndpointWorkItemsProjection) -> Vec<WorkItemInfo> {
     let (mut items, hidden): (Vec<WorkItemInfo>, Vec<WorkItemInfo>) = projection
         .items
         .iter()
+        .filter(|item| !item.is_pick_next)
         .cloned()
         .partition(|item| !is_hidden(item));
     items.extend(hidden);
@@ -492,6 +636,42 @@ impl ClientShellState {
     fn local_items_in_inbox_order(&self) -> Option<Vec<WorkItemInfo>> {
         let snapshot = self.snapshot.as_deref()?;
         active_projection(&self.work_items, &self.active_endpoint_id, snapshot).map(inbox_order)
+    }
+
+    /// The "Pick next task" dialog: the provider (preselecting the last one used) and
+    /// optional context, pre-filled with the last text sent to that provider.
+    pub(super) fn open_pick_next_overlay(&mut self) {
+        let Some(projection) = self.snapshot.as_deref().and_then(|snapshot| {
+            active_projection(&self.work_items, &self.active_endpoint_id, snapshot)
+        }) else {
+            self.set_endpoint_error("No work item sources are configured.");
+            return;
+        };
+        let sources: Vec<(String, String)> = projection
+            .sources
+            .iter()
+            .map(|source| (source.source_id.clone(), source.label.clone()))
+            .collect();
+        let selected = projection
+            .pick_next
+            .last_source_id
+            .as_deref()
+            .and_then(|last| sources.iter().position(|(source_id, _)| source_id == last))
+            .unwrap_or(0);
+        let last_context = projection.pick_next.last_context.clone();
+        let text = sources
+            .get(selected)
+            .and_then(|(source_id, _)| last_context.get(source_id))
+            .map_or("", String::as_str);
+        self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+            title: "pick next task",
+            input: TextEditor::new(text, true),
+            target: ClientRenameTarget::PickNext {
+                sources,
+                selected,
+                last_context,
+            },
+        }));
     }
 
     pub(super) fn open_inbox_overlay(&mut self) {
@@ -822,6 +1002,11 @@ impl ClientShellState {
         point: (u16, u16),
         outcome: &mut ClientShellInput,
     ) -> bool {
+        if super::contains(self.hits.inbox.pick_next, point) {
+            self.open_pick_next_overlay();
+            outcome.repaint = true;
+            return true;
+        }
         if super::contains(self.hits.inbox.badge, point) {
             self.open_inbox_overlay();
             outcome.repaint = true;
@@ -1132,6 +1317,43 @@ impl ClientShellState {
             );
         }
     }
+}
+
+/// Switches the "Pick next" dialog to the provider `step` places away, pre-filling
+/// that provider's last context. Returns whether anything changed.
+pub(super) fn cycle_pick_next_provider(rename: &mut ClientRenameOverlay, step: isize) -> bool {
+    let ClientRenameTarget::PickNext {
+        sources, selected, ..
+    } = &rename.target
+    else {
+        return false;
+    };
+    if sources.len() < 2 {
+        return false;
+    }
+    let next = (*selected as isize + step).rem_euclid(sources.len() as isize) as usize;
+    select_pick_next_provider(rename, next)
+}
+
+/// Selects provider `index` in the "Pick next" dialog. Returns whether it changed.
+pub(super) fn select_pick_next_provider(rename: &mut ClientRenameOverlay, index: usize) -> bool {
+    let ClientRenameTarget::PickNext {
+        sources,
+        selected,
+        last_context,
+    } = &mut rename.target
+    else {
+        return false;
+    };
+    if index == *selected || index >= sources.len() {
+        return false;
+    }
+    *selected = index;
+    let text = last_context
+        .get(&sources[index].0)
+        .map_or("", String::as_str);
+    rename.input = TextEditor::new(text, true);
+    true
 }
 
 /// Moves the highlight to the previous or next enabled choice, if any.

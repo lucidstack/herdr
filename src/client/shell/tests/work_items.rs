@@ -44,6 +44,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         ],
         default_choice_id: Some("github".into()),
         provisioning: None,
+        is_pick_next: false,
     }
 }
 
@@ -57,6 +58,7 @@ pub(super) fn projection(revision: u64, items: Vec<WorkItemInfo>) -> EndpointWor
             error: None,
         }],
         items,
+        pick_next: Default::default(),
     }
 }
 

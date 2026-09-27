@@ -1110,6 +1110,66 @@ fn thread_brief(repo: &str, item: &WorkItem, detail: &GithubIssueDetail) -> Stri
     )
 }
 
+/// Brief for the shared "Pick next" discovery workspace: read-only investigation of the
+/// tracker, ending in a recommendation the user confirms before anything is added or chosen.
+fn pick_next_brief(repos: &[GithubRepoConfig], context: &str) -> String {
+    let clones = if repos.is_empty() {
+        "(no repositories are mapped to a local clone; use gh directly for detail)".to_string()
+    } else {
+        repos
+            .iter()
+            .map(|repo| format!("- {} ({}, remote {})", repo.path, repo.name, repo.remote))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let queries = if repos.is_empty() {
+        "  herdr work-item search github \"is:open is:pr author:@me\"".to_string()
+    } else {
+        repos
+            .iter()
+            .map(|repo| {
+                format!(
+                    "  herdr work-item search github \"repo:{} is:open\"",
+                    repo.name
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let context_line = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nWhat I'm after: {}\n", context.trim())
+    };
+    format!(
+        "Help me pick what to work on next.\n\
+         {context_line}\n\
+         Read the Herdr skill first (`herdr --skill`) for the general agent workflow; it does \
+         not know this fork's work-item commands, so use these instead:\n\
+         - `herdr work-item search github \"<query>\"` — GitHub search syntax, e.g.:\n\
+         {queries}\n\
+         - `herdr work-item show github <owner>/<repo>#<number>` — one ticket's full detail.\n\
+         - `herdr work-item list` — the current inbox, with each item's id and choice ids.\n\
+         - `herdr work-item add github <owner>/<repo>#<number>` — brings a ticket into the \
+         inbox (only after I confirm, see below).\n\
+         - `herdr work-item choose <item-id> <choice-id>` — acts on an inbox item (only after \
+         I confirm; take the choice id from `herdr work-item list`, never guess it).\n\
+         \n\
+         This is read-only investigation: only `search`/`show`, and reading these local clones \
+         with `git -C <path> ...` to see who else is working on related code and spot overlap:\n\
+         {clones}\n\
+         Make no tracker writes and no code changes.\n\
+         \n\
+         Recommend one pick and up to two alternatives. For each: why now, who else works on \
+         related tickets, and any overlap risk. Then stop and ask me which one, if any.\n\
+         \n\
+         Only once I confirm a pick in this chat: run `herdr work-item add github <key>`, then \
+         `herdr work-item choose <item-id> <choice-id>` defaulting to the local choice (an \
+         agent-led one only if I ask); take ids from `herdr work-item list`, never guess them. \
+         Do not assign the ticket to me or move it — I'll be reminded about that separately.",
+    )
+}
+
 /// Lower-case words of `title` joined by `-`, at most about 40 characters.
 pub(super) fn slug(title: &str) -> String {
     let mut slug = String::new();
@@ -1545,6 +1605,12 @@ impl WorkItemSource for GithubSource {
     }
 
     fn choices(&self, item: &WorkItem) -> ItemChoices {
+        if item.is_pick_next {
+            return ItemChoices {
+                choices: Vec::new(),
+                default_choice_id: None,
+            };
+        }
         let event = Event::of(&item.external_id);
         if event == Event::ReadyToMerge {
             return merge_choices(item, item_detail::<GithubDetail>(item).as_ref());
@@ -1926,6 +1992,45 @@ impl WorkItemSource for GithubSource {
                 .collect(),
             source_item,
         }))
+    }
+
+    fn pick_next_plan(
+        &self,
+        context: &str,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        // The agent you work issues with; the first mapped repo picks the block.
+        let first_repo = self
+            .config
+            .repos
+            .first()
+            .map_or("", |repo| repo.name.as_str());
+        let config = self.branch_workflow(Event::Assigned, first_repo);
+        if config.agent.is_empty() {
+            return Err(
+                "No agent configured for GitHub; set work_items.github.<block>.agent".into(),
+            );
+        }
+        let directory =
+            crate::worktree::default_checkout_path(worktree_directory, "pick-next", "github");
+        Ok(ProvisionPlan {
+            source: WorkspaceSource::Scratch(directory),
+            workspace_label: format!("Pick next \u{b7} {}", self.label()),
+            agent_name_hint: "pick-next-github".into(),
+            brief: pick_next_brief(&self.config.repos, context),
+            layout: WorkspaceLayout {
+                agent: config.agent.clone(),
+                agent_args: config.agent_args.clone(),
+                editor_command: config.editor_command.clone(),
+                lazygit_command: config.lazygit_command.clone(),
+                diff_command: String::new(),
+                review_command: String::new(),
+            },
+            delete_branch: false,
+        })
     }
 }
 
@@ -2534,6 +2639,7 @@ mod tests {
             action_error: None,
             waiting: false,
             manual: false,
+            is_pick_next: false,
         }
     }
 

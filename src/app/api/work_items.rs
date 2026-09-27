@@ -1,6 +1,6 @@
 use crate::api::schema::{
     ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams,
-    WorkItemLinkParams, WorkItemTarget,
+    WorkItemLinkParams, WorkItemPickNextStartParams, WorkItemTarget,
 };
 use crate::app::App;
 
@@ -24,6 +24,7 @@ impl App {
             ResponseResult::WorkItemList {
                 items: self.work_items.projection_items(),
                 sources: self.work_items.source_infos(),
+                pick_next: self.work_items.pick_next_info(),
             },
         )
     }
@@ -152,6 +153,20 @@ impl App {
         match self.work_items.unhide(&params.item_id) {
             Ok(()) => encode_success(id, ResponseResult::Ok {}),
             Err(_) => not_found(id, &params.item_id),
+        }
+    }
+
+    pub(super) fn handle_work_item_pick_next_start(
+        &mut self,
+        id: String,
+        params: WorkItemPickNextStartParams,
+    ) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        match self.start_pick_next(&params.source_id, &params.context) {
+            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Err((code, message)) => encode_error(id, code, message),
         }
     }
 }

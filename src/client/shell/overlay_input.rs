@@ -901,6 +901,11 @@ impl ClientShellState {
             self.save_rename_overlay(outcome);
             return;
         }
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            let step = if key.code == KeyCode::Tab { 1 } else { -1 };
+            outcome.repaint |= super::work_items::cycle_pick_next_provider(rename, step);
+            return;
+        }
         if key.code == KeyCode::Esc {
             self.overlay = None;
             outcome.repaint = true;
@@ -986,6 +991,16 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::PickNext {
+                sources, selected, ..
+            } => sources.get(selected).map(|(source_id, _)| {
+                crate::api::schema::Method::WorkItemPickNextStart(
+                    crate::api::schema::WorkItemPickNextStartParams {
+                        source_id: source_id.clone(),
+                        context: trimmed.to_owned(),
+                    },
+                )
+            }),
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

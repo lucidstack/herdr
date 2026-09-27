@@ -548,6 +548,12 @@
           "description": "Open the work item inbox."
         },
         {
+          "key": "keys.pick_next",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the \"Pick next task\" dialog. Unset by default."
+        },
+        {
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",

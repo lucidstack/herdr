@@ -20,7 +20,7 @@ use crate::events::AppEvent;
 use crate::work_items::provision::{
     self, AgentAttempt, BriefConfirmation, PendingResponse, SourceReady,
 };
-use crate::work_items::source::WorkspaceSource;
+use crate::work_items::source::{DownloadSpec, WorkspaceSource};
 use crate::work_items::{
     OwnedWorktree, PendingRemoval, StorePolicy, WorkItemNotice, WorkItemsEvent,
 };
@@ -481,6 +481,87 @@ impl App {
         Ok(())
     }
 
+    /// Starts or reuses `source_id`'s shared "Pick next" discovery workspace: a scratch
+    /// workspace briefed to investigate the tracker read-only and recommend what to work on
+    /// next. Reusing an open workspace focuses it and sends `context` as a follow-up brief.
+    pub(super) fn start_pick_next(
+        &mut self,
+        source_id: &str,
+        context: &str,
+    ) -> Result<(), (&'static str, String)> {
+        let Some(source) = self.work_items.source(source_id).cloned() else {
+            return Err((
+                "work_item_source_not_found",
+                format!("unknown work item source {source_id}"),
+            ));
+        };
+        let key = self
+            .work_items
+            .ensure_pick_next_item(source_id, source.label())
+            .key;
+        self.work_items
+            .set_pick_next_context(&key, source_id, context);
+        let open_workspace = self.work_items.get(&key).and_then(|item| {
+            let workspace_id = item.workspace_id.clone()?;
+            let ws_idx = self.parse_workspace_id(&workspace_id)?;
+            Some((workspace_id, ws_idx))
+        });
+        if let Some((workspace_id, ws_idx)) = open_workspace {
+            if !context.trim().is_empty() {
+                if let Some(pane) = self
+                    .first_agent_target_in_workspace(ws_idx)
+                    .and_then(|target| self.public_pane_id(ws_idx, target.pane_id))
+                {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.handle_deferred_agent_api_request(
+                        Request {
+                            id: "work-items".into(),
+                            method: Method::AgentPrompt(AgentPromptParams {
+                                target: pane,
+                                text: context.to_string(),
+                                wait: None,
+                            }),
+                        },
+                        tx,
+                    );
+                    self.work_items.start_follow_up(&key, rx);
+                }
+            }
+            let _ = self.work_items_api(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }));
+            if let Some(pane) = self
+                .first_agent_target_in_workspace(ws_idx)
+                .and_then(|target| self.public_pane_id(ws_idx, target.pane_id))
+            {
+                let _ = self.work_items_api(Method::PaneFocus(PaneTarget { pane_id: pane }));
+            }
+            let _ = self.work_items.mark_seen(&key);
+            self.work_items.request_focus();
+            self.request_work_items_render();
+            return Ok(());
+        }
+        if self.work_items.has_job(&key) {
+            return Err(("work_item_busy", "Pick next is already starting".into()));
+        }
+        let plan = source
+            .pick_next_plan(context, &self.state.worktree_directory)
+            .map_err(|message| ("work_item_unavailable", message))?;
+        let workspace_source = plan.source.clone();
+        let job_id = self
+            .work_items
+            .start_job(&key, plan)
+            .map_err(|_| ("work_item_not_found", format!("unknown work item {key}")))?;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = provision::prepare_source(&workspace_source);
+            send_event(
+                &event_tx,
+                WorkItemsEvent::CheckoutFinished { job_id, result },
+            );
+        });
+        self.request_work_items_render();
+        Ok(())
+    }
+
     /// Validates and starts local provisioning for `key`. Errors are `(code, message)`.
     pub(super) fn start_work_item_provisioning(
         &mut self,
@@ -652,8 +733,12 @@ impl App {
                     ),
                 }
             }
-            (WorkspaceSource::Download(spec), SourceReady::Downloaded) => {
-                let cwd = spec.directory.display().to_string();
+            (
+                WorkspaceSource::Download(DownloadSpec { directory, .. }),
+                SourceReady::Downloaded,
+            )
+            | (WorkspaceSource::Scratch(directory), SourceReady::ScratchReady) => {
+                let cwd = directory.display().to_string();
                 match self.work_items_api(Method::WorkspaceCreate(WorkspaceCreateParams {
                     source_workspace_id: None,
                     cwd: Some(cwd.clone()),
@@ -780,6 +865,19 @@ impl App {
         if let Some(job) = self.work_items.job_mut(job_id) {
             job.agent_pane_id = Some(root_pane.pane_id);
         }
+        // "Pick next" has no checklist dialog to open its workspace from: go straight there.
+        let discovery = self
+            .work_items
+            .job(job_id)
+            .and_then(|job| self.work_items.get(&job.key))
+            .is_some_and(|item| item.is_pick_next);
+        if discovery {
+            let _ = self.work_items_api(Method::WorkspaceFocus(WorkspaceTarget {
+                workspace_id: workspace.workspace_id.clone(),
+            }));
+            self.work_items.request_focus();
+            self.request_work_items_render();
+        }
         self.start_work_item_agent(job_id, now);
         self.work_items.finish_job_if_done(job_id);
     }
@@ -817,6 +915,7 @@ impl App {
                 "diff",
                 layout.diff_command.replace("{file}", &download.file_name),
             )],
+            WorkspaceSource::Scratch(_) => Vec::new(),
         };
         for (label, command) in tools {
             if command.is_empty() {
@@ -2082,5 +2181,75 @@ mod tests {
             .insert(plugin.plugin_id.clone(), plugin);
         assert_eq!(app.resolve_plugin_command(command), None);
         assert_eq!(app.resolve_plugin_command(""), None);
+    }
+
+    #[tokio::test]
+    async fn pick_next_provisions_a_scratch_workspace_and_reuses_it_on_repeat() {
+        use crate::work_items::source::{ProvisionPlan, WorkspaceLayout, WorkspaceSource};
+
+        let mut app = test_app();
+        let source = FakeSource::with_items(Vec::new());
+        app.work_items = WorkItems::for_test(vec![source.clone()], Instant::now());
+        let directory =
+            std::env::temp_dir().join(format!("herdr-pick-next-test-{}", std::process::id()));
+        *source
+            .scripted_pick_next_plan
+            .lock()
+            .expect("fake source lock") = Some(ProvisionPlan {
+            source: WorkspaceSource::Scratch(directory.clone()),
+            workspace_label: "Pick next \u{b7} Fake".into(),
+            agent_name_hint: "pick-next-fake".into(),
+            brief: "investigate".into(),
+            layout: WorkspaceLayout {
+                agent: String::new(),
+                agent_args: Vec::new(),
+                editor_command: String::new(),
+                lazygit_command: String::new(),
+                diff_command: String::new(),
+                review_command: String::new(),
+            },
+            delete_branch: false,
+        });
+
+        assert!(app.start_pick_next("fake", "look into the backlog").is_ok());
+        run_until(&mut app, |app| {
+            list(app)
+                .iter()
+                .any(|item| item.is_pick_next && item.workspace_id.is_some())
+        });
+        let _ = std::fs::remove_dir_all(&directory);
+        let item = list(&mut app)
+            .into_iter()
+            .find(|item| item.is_pick_next)
+            .expect("pick-next row");
+        assert_eq!(item.context, "look into the backlog");
+        assert_eq!(
+            source
+                .pick_next_contexts
+                .lock()
+                .expect("fake source lock")
+                .as_slice(),
+            ["look into the backlog"]
+        );
+
+        // Picking again reuses the same workspace instead of provisioning a new one.
+        let workspace_id = item.workspace_id.clone();
+        assert!(app.start_pick_next("fake", "").is_ok());
+        assert_eq!(
+            list(&mut app)
+                .into_iter()
+                .find(|item| item.is_pick_next)
+                .unwrap()
+                .workspace_id,
+            workspace_id
+        );
+        assert_eq!(
+            source
+                .pick_next_contexts
+                .lock()
+                .expect("fake source lock")
+                .len(),
+            1
+        );
     }
 }

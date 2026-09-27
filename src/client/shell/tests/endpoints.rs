@@ -626,6 +626,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         choices: Vec::new(),
         default_choice_id: None,
         provisioning: None,
+        is_pick_next: false,
     };
     let projection = |boot: &str, items| EndpointWorkItemsProjection {
         boot_id: boot.into(),
@@ -636,6 +637,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
             error: None,
         }],
         items,
+        pick_next: Default::default(),
     };
     let (mut state, remote) = state_with_remote();
     let local_boot = snapshot().boot_id;

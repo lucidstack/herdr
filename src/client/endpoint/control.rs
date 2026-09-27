@@ -181,8 +181,14 @@ mod tests {
     #[test]
     fn work_items_projection_decodes() {
         let crate::protocol::ServerMessage::EndpointControl { kind, data } =
-            crate::protocol::work_items::projection_message("boot", 2, Vec::new(), Vec::new())
-                .unwrap()
+            crate::protocol::work_items::projection_message(
+                "boot",
+                2,
+                Vec::new(),
+                Vec::new(),
+                Default::default(),
+            )
+            .unwrap()
         else {
             panic!("expected endpoint control");
         };

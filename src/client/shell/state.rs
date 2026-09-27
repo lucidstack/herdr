@@ -325,6 +325,14 @@ pub(super) enum ClientRenameTarget {
     Pane {
         pane_id: String,
     },
+    /// "Pick next task": the text is optional context for the discovery agent.
+    PickNext {
+        /// `(source_id, label)` of every configured source, in projection order.
+        sources: Vec<(String, String)>,
+        selected: usize,
+        /// The last context sent to each source, to pre-fill on switching provider.
+        last_context: std::collections::HashMap<String, String>,
+    },
 }
 
 #[derive(Debug)]

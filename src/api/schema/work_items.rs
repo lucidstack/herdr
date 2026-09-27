@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -39,6 +41,16 @@ pub struct WorkItemTicketTarget {
     pub source_id: String,
     /// Ticket key in the tracker's form, e.g. `TECH-123` or `owner/repo#12`.
     pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemPickNextStartParams {
+    /// Configured source whose "Pick next" discovery workspace is started or reused.
+    pub source_id: String,
+    /// Optional context for the agent; sent as the initial brief, or as a follow-up brief
+    /// when a discovery workspace is already open. May be empty.
+    #[serde(default)]
+    pub context: String,
 }
 
 /// One ticket as its tracker reports it, whether or not it is in the inbox.
@@ -174,6 +186,10 @@ pub struct WorkItemInfo {
     pub default_choice_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioning: Option<WorkItemProvisioningInfo>,
+    /// A provider's "Pick next" discovery row rather than a tracked ticket. `context` holds
+    /// the last text sent to it.
+    #[serde(default)]
+    pub is_pick_next: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -182,4 +198,14 @@ pub struct WorkItemSourceInfo {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Persisted "Pick next" memory, so the dialog can pre-fill without depending on item
+/// recency: which provider was used last, and each provider's last context text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemPickNextInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_source_id: Option<String>,
+    #[serde(default)]
+    pub last_context: HashMap<String, String>,
 }

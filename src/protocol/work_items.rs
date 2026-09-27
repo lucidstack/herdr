@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::ServerMessage;
-use crate::api::schema::{WorkItemInfo, WorkItemSourceInfo};
+use crate::api::schema::{WorkItemInfo, WorkItemPickNextInfo, WorkItemSourceInfo};
 
 pub const WORK_ITEMS_PROJECTION_KIND: &str = "endpoint.work-items.v1";
 
@@ -27,6 +27,8 @@ pub struct EndpointWorkItemsProjection {
     pub sources: Vec<WorkItemSourceInfo>,
     #[serde(default)]
     pub items: Vec<WorkItemInfo>,
+    #[serde(default)]
+    pub pick_next: WorkItemPickNextInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,12 +43,14 @@ pub fn projection_message(
     revision: u64,
     sources: Vec<WorkItemSourceInfo>,
     items: Vec<WorkItemInfo>,
+    pick_next: WorkItemPickNextInfo,
 ) -> serde_json::Result<ServerMessage> {
     let projection = EndpointWorkItemsProjection {
         boot_id: boot_id.to_owned(),
         revision,
         sources,
         items,
+        pick_next,
     };
     Ok(ServerMessage::EndpointControl {
         kind: WORK_ITEMS_PROJECTION_KIND.into(),
@@ -73,9 +77,14 @@ mod tests {
             label: "GitHub".into(),
             error: Some("offline".into()),
         }];
-        let ServerMessage::EndpointControl { kind, data } =
-            projection_message("boot", 3, sources.clone(), Vec::new()).unwrap()
-        else {
+        let ServerMessage::EndpointControl { kind, data } = projection_message(
+            "boot",
+            3,
+            sources.clone(),
+            Vec::new(),
+            WorkItemPickNextInfo::default(),
+        )
+        .unwrap() else {
             panic!("expected endpoint control");
         };
         assert_eq!(kind, WORK_ITEMS_PROJECTION_KIND);
@@ -87,6 +96,7 @@ mod tests {
                 revision: 3,
                 sources,
                 items: Vec::new(),
+                pick_next: WorkItemPickNextInfo::default(),
             }
         );
     }
