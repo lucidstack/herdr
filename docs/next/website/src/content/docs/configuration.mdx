@@ -38,6 +38,25 @@ Herdr shows first-run setup when `onboarding` is missing or true. Continuing fro
 onboarding = false
 ```
 
+## Per-session config
+
+A named session can have its own config on top of `config.toml`, for example to keep work and personal Herdr apart. `herdr --session work` reads `~/.config/herdr/work.toml` (next to `config.toml`) when it exists:
+
+```toml
+# ~/.config/herdr/work.toml
+[ui.sidebar]
+sections = ["inbox", "agents"]
+
+[work_items.github]
+repos = [{ name = "acme/app", path = "~/src/app" }]
+```
+
+- Tables merge key by key, all the way down. Plain values and whole arrays, arrays of tables such as `[[keys.command]]` included, replace the base value. To switch something off, use its own setting (`enabled = false`, an empty list, `sections`).
+- The default session reads `config.toml` alone, and `config` is not a session layer. `HERDR_CONFIG_PATH` selects exactly one file, with no layering.
+- Client and server each layer their own machine's files: over SSH, your laptop's `work.toml` decides the sidebar and keys, and the remote's decides work-item sources and sounds.
+- Launching or attaching prints which files the session uses, `herdr session list` shows each session's layer (`config_layer` in `--json`), and `herdr config check --session work` validates the combined config. Problems in the layer name `work.toml`.
+- `herdr server reload-config` rereads both files.
+
 ## Reload config
 
 Reload a running server after editing `config.toml`:

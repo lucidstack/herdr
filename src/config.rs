@@ -13,8 +13,9 @@ mod write;
 
 pub use self::{
     io::{
-        config_diagnostic_summary, config_dir, config_path, load_live_config,
-        remove_keybinding_config_sections, remove_section_key, state_dir, upsert_section_bool,
+        config_diagnostic_summary, config_dir, config_path, display_config_path, load_live_config,
+        remove_keybinding_config_sections, remove_section_key, session_layer_notice,
+        session_layer_path, session_layer_path_for, state_dir, upsert_section_bool,
         upsert_section_value,
     },
     keybinds::{
