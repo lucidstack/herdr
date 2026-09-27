@@ -125,6 +125,16 @@ pub(crate) struct WorkItems {
     /// Work items moved focus to a workspace outside an API request, e.g. a new
     /// "Pick next" workspace; the server moves its shell clients there too.
     focus_requested: bool,
+    /// Mapped local clones, reachable from the inbox even without an item.
+    repositories: Vec<Repository>,
+}
+
+/// A mapped local clone and the Git key that recognises workspaces on its main checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Repository {
+    pub info: crate::api::schema::WorkItemRepositoryInfo,
+    /// `None` when the path is not a Git repository: it then never has a home.
+    pub repo_key: Option<String>,
 }
 
 impl std::fmt::Debug for WorkItems {
@@ -156,6 +166,41 @@ fn build_sources(config: &WorkItemsConfig) -> Vec<Arc<dyn WorkItemSource>> {
     sources
 }
 
+/// The local clones mapped by enabled sources, one per path, in configuration order.
+fn build_repositories(config: &WorkItemsConfig) -> Vec<Repository> {
+    let github = config
+        .github
+        .as_ref()
+        .filter(|github| github.enabled)
+        .into_iter()
+        .flat_map(|github| github.repos.iter().map(|repo| repo.path.as_str()));
+    let jira = config
+        .jira
+        .as_ref()
+        .filter(|jira| jira.enabled)
+        .into_iter()
+        .flat_map(|jira| jira.projects.iter().map(|project| project.path.as_str()));
+    let mut seen = HashSet::new();
+    github
+        .chain(jira)
+        .filter(|path| !path.trim().is_empty())
+        .map(crate::worktree::expand_tilde_absolute_path)
+        .filter(|path| seen.insert(crate::worktree::canonical_or_original(path)))
+        .map(|path| Repository {
+            // Once per config load, not per projection: this asks Git.
+            repo_key: crate::workspace::git_space_metadata(&path).map(|space| space.key),
+            info: crate::api::schema::WorkItemRepositoryInfo {
+                label: path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
+                path: path.display().to_string(),
+                workspace_id: None,
+            },
+        })
+        .collect()
+}
+
 impl WorkItems {
     pub(crate) fn disabled() -> Self {
         Self {
@@ -176,6 +221,7 @@ impl WorkItems {
             follow_ups: Vec::new(),
             pick_next: PickNextState::default(),
             focus_requested: false,
+            repositories: Vec::new(),
         }
     }
 
@@ -188,6 +234,7 @@ impl WorkItems {
         let mut items = Self::disabled();
         items.config = config.clone();
         items.sources = build_sources(config);
+        items.repositories = build_repositories(config);
         if items.sources.is_empty() {
             return items;
         }
@@ -245,6 +292,7 @@ impl WorkItems {
         }
         self.config = config.clone();
         self.sources = build_sources(config);
+        self.repositories = build_repositories(config);
         self.polls_in_flight.clear();
         if self.sources.is_empty() {
             self.next_poll.clear();
@@ -851,6 +899,33 @@ impl WorkItems {
             .collect()
     }
 
+    pub(crate) fn repository_infos(&self) -> Vec<crate::api::schema::WorkItemRepositoryInfo> {
+        self.repositories
+            .iter()
+            .map(|repository| repository.info.clone())
+            .collect()
+    }
+
+    /// Records each repository's home, the workspace `home_of` finds for its Git key.
+    /// Cheap enough for every loop turn: it allocates only when a home changes.
+    pub(crate) fn update_repository_homes<'a>(
+        &mut self,
+        home_of: impl Fn(&str) -> Option<&'a str>,
+    ) -> bool {
+        let mut changed = false;
+        for repository in &mut self.repositories {
+            let home = repository.repo_key.as_deref().and_then(&home_of);
+            if repository.info.workspace_id.as_deref() != home {
+                repository.info.workspace_id = home.map(str::to_string);
+                changed = true;
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        changed
+    }
+
     pub(crate) fn source_infos(&self) -> Vec<WorkItemSourceInfo> {
         self.sources
             .iter()
@@ -889,6 +964,46 @@ impl WorkItems {
 mod tests {
     use super::test_support::{source_item, FakeSource};
     use super::*;
+
+    #[test]
+    fn repositories_come_from_enabled_sources_once_per_path() {
+        let config: WorkItemsConfig = toml::from_str(
+            r#"
+[github]
+repos = [
+    { name = "o/app", path = "/src/app" },
+    { name = "o/api", path = "/src/api" },
+]
+
+[jira]
+site = "example.atlassian.net"
+email = "me@example.com"
+projects = [
+    { key = "APP", path = "/src/app" },
+    { key = "OPS", path = "/src/ops" },
+]
+"#,
+        )
+        .expect("config");
+        let paths = |config: &WorkItemsConfig| -> Vec<(String, String)> {
+            build_repositories(config)
+                .into_iter()
+                .map(|repository| (repository.info.path, repository.info.label))
+                .collect()
+        };
+        assert_eq!(
+            paths(&config),
+            [
+                ("/src/app", "app"),
+                ("/src/api", "api"),
+                ("/src/ops", "ops")
+            ]
+            .map(|(path, label)| (path.to_string(), label.to_string()))
+        );
+        let mut jira_off = config.clone();
+        jira_off.jira.as_mut().expect("jira").enabled = false;
+        assert_eq!(paths(&jira_off).len(), 2);
+    }
 
     fn poll(items: &mut WorkItems, ids: &[&str]) -> Vec<WorkItemNotice> {
         items

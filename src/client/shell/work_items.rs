@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::api::schema::{
     Method, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemInfo,
-    WorkItemLinkParams, WorkItemPhase, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
+    WorkItemLinkParams, WorkItemPhase, WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget,
+    WorkspaceTarget,
 };
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -65,6 +66,8 @@ pub(super) struct InboxHits {
     pub(super) badge: Rect,
     /// The "+ Pick next task…" row; opens the "Pick next" dialog.
     pub(super) pick_next: Rect,
+    /// Repository rows, with their index in the projection's `repositories`.
+    pub(super) repositories: Vec<(Rect, usize)>,
     /// Items drawn in the last frame.
     pub(super) shown: usize,
     /// Items not hidden by dismissing or snoozing.
@@ -180,7 +183,7 @@ pub(super) fn render_items_section<'a>(
     buffer: &mut Buffer,
     area: Rect,
     projection: &'a EndpointWorkItemsProjection,
-    snapshot: &ClientShellSnapshot,
+    snapshot: &'a ClientShellSnapshot,
     config: &ClientShellConfig,
     view: &ClientWorkItems,
     endpoint_id: &ClientEndpointId,
@@ -249,8 +252,31 @@ pub(super) fn render_items_section<'a>(
             _ => 1,
         })
         .sum();
+    let item_workspace_ids: Vec<&str> = visible
+        .iter()
+        .filter_map(|item| item.workspace_id.as_deref())
+        .collect();
+    let repositories = repository_homes(projection, snapshot, &item_workspace_ids);
+    let nested_rows = |workspace: &ClientShellWorkspace| {
+        super::render::sidebar::workspace_rows(
+            workspace,
+            workspace.agent_status,
+            true,
+            &config.spaces,
+        )
+        .len()
+        .max(1) as u16
+    };
+    let repository_rows: u16 = u16::from(!repositories.is_empty())
+        + repositories
+            .iter()
+            .map(|(_, home)| match home {
+                Some((_, workspace)) if workspace.focused => 1 + nested_rows(workspace),
+                _ => 1,
+            })
+            .sum::<u16>();
     // Tickets keep at least one row below the header; the footer gives way first.
-    let footer_rows = discovery_rows + 1;
+    let footer_rows = discovery_rows + repository_rows + 1;
     let items_limit = limit
         .saturating_sub(footer_rows)
         .max(area.y.saturating_add(2).min(limit));
@@ -413,6 +439,60 @@ pub(super) fn render_items_section<'a>(
             y += nested_height;
         }
     }
+    if !repositories.is_empty() && y < area.bottom() {
+        put_text(
+            buffer,
+            area.x,
+            y,
+            width,
+            " repositories",
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::BOLD),
+        );
+        y += 1;
+    }
+    for (index, (repository, home)) in repositories.into_iter().enumerate() {
+        if let Some((_, workspace)) = home {
+            nested_workspace_ids.push(workspace.workspace_id.as_str());
+        }
+        if y >= area.bottom() {
+            continue;
+        }
+        let row = Rect::new(area.x, y, width, 1);
+        let focused = home.is_some_and(|(_, workspace)| workspace.focused);
+        // Open: its agent status and branch; closed: a dim dot, one click from opening.
+        let (glyph, color, branch) = match home {
+            Some((_, workspace)) => (
+                status_icon(workspace.agent_status, config.status_indicators),
+                status_color(workspace.agent_status, palette),
+                workspace.branch.as_deref(),
+            ),
+            None => ("·", palette.overlay0, None),
+        };
+        render_footer_row(
+            buffer,
+            row,
+            (glyph, color),
+            &repository.label,
+            branch,
+            focused,
+            palette,
+        );
+        hits.inbox.repositories.push((row, index));
+        y += 1;
+        if let Some((workspace_index, workspace)) = home.filter(|_| focused) {
+            y += render_nested_workspace(
+                buffer,
+                Rect::new(area.x, y, width, area.bottom().saturating_sub(y)),
+                workspace_index,
+                workspace,
+                config,
+                endpoint_id,
+                hits,
+            );
+        }
+    }
     for (item, workspace) in discovery {
         if let Some(workspace_id) = item.workspace_id.as_deref() {
             nested_workspace_ids.push(workspace_id);
@@ -422,11 +502,8 @@ pub(super) fn render_items_section<'a>(
         }
         let row = Rect::new(area.x, y, width, 1);
         let focused = workspace.is_some_and(|(_, workspace)| workspace.focused);
-        if focused {
-            buffer.set_style(row, Style::default().bg(palette.active_row_bg));
-        }
         // Starting: the provisioning spinner; open: the agent's status, like a space.
-        let (glyph, color) = match workspace {
+        let glyph = match workspace {
             Some((_, workspace)) => (
                 status_icon(workspace.agent_status, config.status_indicators),
                 status_color(workspace.agent_status, palette),
@@ -436,62 +513,23 @@ pub(super) fn render_items_section<'a>(
                 palette.yellow,
             ),
         };
-        let x = put_segment(buffer, row.x, y, row.right(), " ", Style::default());
-        let x = put_segment(buffer, x, y, row.right(), glyph, Style::default().fg(color));
-        put_segment(
-            buffer,
-            x.saturating_add(1),
-            y,
-            row.right(),
-            &item.title,
-            Style::default().fg(if focused {
-                palette.text
-            } else {
-                palette.subtext0
-            }),
-        );
+        render_footer_row(buffer, row, glyph, &item.title, None, focused, palette);
         hits.work_items.push(WorkItemHit {
             rect: row,
             item_id: item.item_id.clone(),
         });
         y += 1;
-        let Some((workspace_index, workspace)) = workspace.filter(|_| focused) else {
-            continue;
-        };
-        let rows = super::render::sidebar::workspace_rows(
-            workspace,
-            workspace.agent_status,
-            true,
-            &config.spaces,
-        );
-        let height = (rows.len().max(1) as u16).min(area.bottom().saturating_sub(y));
-        let rect = Rect::new(area.x, y, width, height);
-        buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-        super::render::sidebar::render_workspace_rows(
-            buffer,
-            rect,
-            workspace.agent_status,
-            config.status_indicators,
-            &WorkspaceEntry {
-                index: workspace_index,
-                indented: true,
-                last_child: true,
-            },
-            rows,
-            true,
-            false,
-            false,
-            false,
-            palette,
-        );
-        hits.workspaces.push(WorkspaceHit {
-            rect,
-            endpoint_id: endpoint_id.clone(),
-            workspace_id: workspace.workspace_id.clone(),
-            indented: true,
-            group_toggle: None,
-        });
-        y += height;
+        if let Some((workspace_index, workspace)) = workspace.filter(|_| focused) {
+            y += render_nested_workspace(
+                buffer,
+                Rect::new(area.x, y, width, area.bottom().saturating_sub(y)),
+                workspace_index,
+                workspace,
+                config,
+                endpoint_id,
+                hits,
+            );
+        }
     }
     if y < area.bottom() {
         hits.inbox.pick_next = Rect::new(area.x, y, width, 1);
@@ -509,6 +547,135 @@ pub(super) fn render_items_section<'a>(
     let used = (y + 1).min(area.bottom()) - area.y;
     hits.inbox.area = Rect::new(area.x, area.y, width, used);
     (used, nested_workspace_ids)
+}
+
+/// One inbox row below the tickets: a status glyph, a title and an optional dim detail
+/// (e.g. a branch), highlighted while its workspace is focused.
+fn render_footer_row(
+    buffer: &mut Buffer,
+    row: Rect,
+    (glyph, color): (&str, ratatui::style::Color),
+    title: &str,
+    detail: Option<&str>,
+    focused: bool,
+    palette: &Palette,
+) {
+    if focused {
+        buffer.set_style(row, Style::default().bg(palette.active_row_bg));
+    }
+    let x = put_segment(buffer, row.x, row.y, row.right(), " ", Style::default());
+    let x = put_segment(
+        buffer,
+        x,
+        row.y,
+        row.right(),
+        glyph,
+        Style::default().fg(color),
+    );
+    let x = put_segment(
+        buffer,
+        x.saturating_add(1),
+        row.y,
+        row.right(),
+        title,
+        Style::default().fg(if focused {
+            palette.text
+        } else {
+            palette.subtext0
+        }),
+    );
+    if let Some(detail) = detail {
+        put_segment(
+            buffer,
+            x.saturating_add(1),
+            row.y,
+            row.right(),
+            detail,
+            Style::default().fg(palette.overlay0),
+        );
+    }
+}
+
+/// The focused workspace nested under its inbox row, at the top of `area`. Returns the
+/// rows it used.
+fn render_nested_workspace(
+    buffer: &mut Buffer,
+    area: Rect,
+    workspace_index: usize,
+    workspace: &ClientShellWorkspace,
+    config: &ClientShellConfig,
+    endpoint_id: &ClientEndpointId,
+    hits: &mut ShellHitMap,
+) -> u16 {
+    let rows = super::render::sidebar::workspace_rows(
+        workspace,
+        workspace.agent_status,
+        true,
+        &config.spaces,
+    );
+    let height = (rows.len().max(1) as u16).min(area.height);
+    let rect = Rect::new(area.x, area.y, area.width, height);
+    buffer.set_style(rect, Style::default().bg(config.palette.active_row_bg));
+    super::render::sidebar::render_workspace_rows(
+        buffer,
+        rect,
+        workspace.agent_status,
+        config.status_indicators,
+        &WorkspaceEntry {
+            index: workspace_index,
+            indented: true,
+            last_child: true,
+        },
+        rows,
+        true,
+        false,
+        false,
+        false,
+        &config.palette,
+    );
+    hits.workspaces.push(WorkspaceHit {
+        rect,
+        endpoint_id: endpoint_id.clone(),
+        workspace_id: workspace.workspace_id.clone(),
+        indented: true,
+        group_toggle: None,
+    });
+    height
+}
+
+/// Each mapped repository with its home: the open workspace on its main checkout, unless
+/// a ticket already shows that workspace.
+fn repository_homes<'a>(
+    projection: &'a EndpointWorkItemsProjection,
+    snapshot: &'a ClientShellSnapshot,
+    item_workspace_ids: &[&str],
+) -> Vec<(
+    &'a WorkItemRepositoryInfo,
+    Option<(usize, &'a ClientShellWorkspace)>,
+)> {
+    projection
+        .repositories
+        .iter()
+        .map(|repository| {
+            let home = repository_home(repository, snapshot).filter(|(_, workspace)| {
+                !item_workspace_ids.contains(&workspace.workspace_id.as_str())
+            });
+            (repository, home)
+        })
+        .collect()
+}
+
+/// The open workspace on `repository`'s main checkout, as the server reports it.
+fn repository_home<'a>(
+    repository: &WorkItemRepositoryInfo,
+    snapshot: &'a ClientShellSnapshot,
+) -> Option<(usize, &'a ClientShellWorkspace)> {
+    let workspace_id = repository.workspace_id.as_deref()?;
+    snapshot
+        .workspaces
+        .iter()
+        .enumerate()
+        .find(|(_, workspace)| workspace.workspace_id == workspace_id)
 }
 
 fn render_item_rows(
@@ -642,6 +809,33 @@ impl ClientShellState {
     fn local_items_in_inbox_order(&self) -> Option<Vec<WorkItemInfo>> {
         let snapshot = self.snapshot.as_deref()?;
         active_projection(&self.work_items, &self.active_endpoint_id, snapshot).map(inbox_order)
+    }
+
+    /// A repository row: its main checkout's open workspace, or a new one there on
+    /// whatever is checked out.
+    fn open_repository(&mut self, index: usize, outcome: &mut ClientShellInput) {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            return;
+        };
+        let Some(repository) =
+            active_projection(&self.work_items, &self.active_endpoint_id, snapshot)
+                .and_then(|projection| projection.repositories.get(index))
+        else {
+            return;
+        };
+        let method = match repository_home(repository, snapshot) {
+            Some((_, workspace)) => Method::WorkspaceFocus(WorkspaceTarget {
+                workspace_id: workspace.workspace_id.clone(),
+            }),
+            None => Method::WorkspaceCreate(crate::api::schema::WorkspaceCreateParams {
+                source_workspace_id: None,
+                cwd: Some(repository.path.clone()),
+                focus: true,
+                label: None,
+                env: Default::default(),
+            }),
+        };
+        self.push_endpoint_method(method, outcome);
     }
 
     /// The "Pick next task" dialog: the provider (preselecting the last one used) and
@@ -1008,6 +1202,18 @@ impl ClientShellState {
         point: (u16, u16),
         outcome: &mut ClientShellInput,
     ) -> bool {
+        if let Some(index) = self
+            .hits
+            .inbox
+            .repositories
+            .iter()
+            .find(|(rect, _)| super::contains(*rect, point))
+            .map(|(_, index)| *index)
+        {
+            self.open_repository(index, outcome);
+            outcome.repaint = true;
+            return true;
+        }
         if super::contains(self.hits.inbox.pick_next, point) {
             self.open_pick_next_overlay();
             outcome.repaint = true;

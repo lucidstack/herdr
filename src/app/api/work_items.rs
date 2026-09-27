@@ -25,6 +25,7 @@ impl App {
                 items: self.work_items.projection_items(),
                 sources: self.work_items.source_infos(),
                 pick_next: self.work_items.pick_next_info(),
+                repositories: self.work_items.repository_infos(),
             },
         )
     }

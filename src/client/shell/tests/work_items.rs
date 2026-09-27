@@ -60,6 +60,7 @@ pub(super) fn projection(revision: u64, items: Vec<WorkItemInfo>) -> EndpointWor
         }],
         items,
         pick_next: Default::default(),
+        repositories: Vec::new(),
     }
 }
 

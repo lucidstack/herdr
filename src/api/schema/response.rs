@@ -19,8 +19,8 @@ use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::work_items::{
-    WorkItemInfo, WorkItemPickNextInfo, WorkItemSourceInfo, WorkItemTicketComment,
-    WorkItemTicketInfo,
+    WorkItemInfo, WorkItemPickNextInfo, WorkItemRepositoryInfo, WorkItemSourceInfo,
+    WorkItemTicketComment, WorkItemTicketInfo,
 };
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
@@ -286,6 +286,8 @@ pub enum ResponseResult {
         sources: Vec<WorkItemSourceInfo>,
         #[serde(default)]
         pick_next: WorkItemPickNextInfo,
+        #[serde(default)]
+        repositories: Vec<WorkItemRepositoryInfo>,
     },
     WorkItemSearch {
         tickets: Vec<WorkItemTicketInfo>,

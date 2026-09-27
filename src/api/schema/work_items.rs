@@ -197,6 +197,19 @@ pub struct WorkItemInfo {
     pub start_reminder: Option<String>,
 }
 
+/// A local clone mapped by a work-item source (`[work_items.github] repos`,
+/// `[work_items.jira] projects`), offered as a way to reach its main checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemRepositoryInfo {
+    /// Absolute path of the clone on the server's machine.
+    pub path: String,
+    /// Short name, e.g. the directory name.
+    pub label: String,
+    /// The open workspace on the clone's main checkout (its "home"), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItemSourceInfo {
     pub source_id: String,
