@@ -290,6 +290,7 @@ pub(super) fn render_expanded(
             state.work_items,
             state.active_endpoint_id,
             hits,
+            true,
         );
         workspace_area.y += used;
         workspace_area.height -= used;
