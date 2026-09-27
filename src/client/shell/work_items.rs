@@ -27,6 +27,21 @@ pub(crate) struct ClientWorkItems {
     pub(super) expanded: bool,
     /// Visible items skipped at the top of the inbox.
     pub(super) scroll: usize,
+    /// The inbox just emptied: its header sparkles until then.
+    pub(super) celebrate_until: Option<Instant>,
+}
+
+/// How long the header sparkles after the last ticket leaves the inbox.
+const CELEBRATION: Duration = Duration::from_secs(4);
+/// Header frames while celebrating, alternating on the spinner clock.
+const CELEBRATION_FRAMES: [&str; 2] = ["✦ inbox zero ✦ ", "✧ inbox zero ✧ "];
+
+fn listed_count(projection: &EndpointWorkItemsProjection) -> usize {
+    projection
+        .items
+        .iter()
+        .filter(|item| is_listed(item))
+        .count()
 }
 
 impl ClientWorkItems {
@@ -304,10 +319,15 @@ pub(super) fn render_items_section<'a>(
     let unseen = visible.iter().filter(|item| !item.seen).count();
     let (status, color) = if unseen > 0 {
         (format!("{unseen} new "), palette.teal)
+    } else if visible.is_empty() && view.celebrate_until.is_some() {
+        (
+            CELEBRATION_FRAMES[(view.spinner_frame / 2) % CELEBRATION_FRAMES.len()].to_string(),
+            palette.green,
+        )
     } else if hidden > 0 {
         (format!("{hidden} hidden "), palette.overlay0)
     } else if visible.is_empty() {
-        ("none ".to_string(), palette.overlay0)
+        ("all clear ".to_string(), palette.green)
     } else {
         (String::new(), palette.overlay0)
     };
@@ -796,10 +816,23 @@ impl ClientShellState {
         endpoint_id: &ClientEndpointId,
         projection: EndpointWorkItemsProjection,
     ) -> bool {
+        let listed_before = self
+            .work_items
+            .by_endpoint
+            .get(endpoint_id)
+            .filter(|current| current.boot_id == projection.boot_id)
+            .map(listed_count);
+        let listed_after = listed_count(&projection);
         if !self.work_items.store(endpoint_id, projection) {
             return false;
         }
         if *endpoint_id == self.active_endpoint_id {
+            // Celebrate the last ticket leaving, not an inbox that starts out empty.
+            if listed_after > 0 {
+                self.work_items.celebrate_until = None;
+            } else if listed_before.is_some_and(|before| before > 0) {
+                self.work_items.celebrate_until = Some(Instant::now() + CELEBRATION);
+            }
             self.refresh_work_item_overlay();
             self.refresh_inbox_overlay();
         }
@@ -1068,7 +1101,15 @@ impl ClientShellState {
             }
             _ => false,
         };
-        if !sidebar_animates && !overlay_animates {
+        let celebrating = match self.work_items.celebrate_until {
+            Some(until) if now >= until => {
+                self.work_items.celebrate_until = None;
+                // Settle into the calm header straight away.
+                return true;
+            }
+            until => until.is_some(),
+        };
+        if !sidebar_animates && !overlay_animates && !celebrating {
             self.work_items.spinner_last_tick = None;
             return false;
         }
