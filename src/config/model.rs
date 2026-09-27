@@ -372,6 +372,8 @@ pub struct KeysConfig {
     pub goto: BindingConfig,
     /// Open the work item inbox. Default: "prefix+i"
     pub inbox: BindingConfig,
+    /// Open the "Pick next task" dialog. Unset by default.
+    pub pick_next: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,
     /// Move workspace selection down in navigate mode. Default: "down".
@@ -506,6 +508,8 @@ pub(crate) struct KeysConfigOverlay {
     goto: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inbox: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pick_next: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     navigate_workspace_up: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -644,6 +648,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(workspace_picker);
         apply_field!(goto);
         apply_field!(inbox);
+        apply_field!(pick_next);
         apply_field!(navigate_workspace_up);
         apply_field!(navigate_workspace_down);
         apply_field!(navigate_pane_left);
@@ -750,6 +755,7 @@ impl KeysConfig {
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
         copy_effective_action_field!(inbox, keybinds.inbox);
+        copy_effective_action_field!(pick_next, keybinds.pick_next);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
         copy_effective_action_field!(navigate_workspace_down, keybinds.navigate.workspace_down);
         copy_effective_action_field!(navigate_pane_left, keybinds.navigate.pane_left);
@@ -1124,6 +1130,7 @@ impl Default for KeysConfig {
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
             inbox: BindingConfig::one("prefix+i"),
+            pick_next: BindingConfig::empty(),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),
             navigate_pane_left: BindingConfig::one("h"),

@@ -1725,6 +1725,17 @@ impl ClientShellState {
                     rename.input.clear();
                     outcome.repaint = true;
                 }
+            } else if let Some(index) = self
+                .hits
+                .overlay_choice_rows
+                .iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .map(|(_, index)| *index)
+                .filter(|_| matches!(self.overlay, Some(ClientShellOverlay::Rename(_))))
+            {
+                if let Some(ClientShellOverlay::Rename(rename)) = self.overlay.as_mut() {
+                    outcome.repaint |= super::work_items::select_pick_next_provider(rename, index);
+                }
             } else {
                 self.overlay = None;
                 outcome.repaint = true;

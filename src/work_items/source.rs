@@ -86,6 +86,9 @@ pub(crate) enum WorkspaceSource {
     Worktree(WorktreeSpec),
     /// No checkout: only a downloaded file for reading.
     Download(DownloadSpec),
+    /// No checkout and no file: an empty directory for an agent that only reads the
+    /// tracker and other clones, e.g. "Pick next" discovery.
+    Scratch(PathBuf),
 }
 
 /// Tabs and agent of a provisioned workspace.
@@ -146,6 +149,14 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// Blocking; background thread only. Fetches one ticket by its tracker key (e.g.
     /// `TECH-123` or `owner/repo#12`); `None` when the key does not exist.
     fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String>;
+    /// Pure: plan for this provider's shared "Pick next" discovery workspace (a scratch
+    /// directory; no checkout), briefed with `context` (may be empty) to investigate the
+    /// tracker read-only and recommend what to work on next.
+    fn pick_next_plan(
+        &self,
+        context: &str,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String>;
     /// Blocking; background thread only. Carries out a choice whose action is `Perform`
     /// and returns a one-line result for the user.
     fn perform(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {

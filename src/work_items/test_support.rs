@@ -28,6 +28,10 @@ pub(crate) struct FakeSource {
     pub fetch_ticket: Mutex<Option<TicketDetail>>,
     /// Makes `fetch` fail with this message instead.
     pub fetch_error: Mutex<Option<String>>,
+    /// Plan returned by `pick_next_plan`; `None` makes it unavailable.
+    pub scripted_pick_next_plan: Mutex<Option<ProvisionPlan>>,
+    /// Every `context` passed to `pick_next_plan`, in call order.
+    pub pick_next_contexts: Mutex<Vec<String>>,
 }
 
 impl FakeSource {
@@ -42,6 +46,8 @@ impl FakeSource {
             search_error: Mutex::new(None),
             fetch_ticket: Mutex::new(None),
             fetch_error: Mutex::new(None),
+            scripted_pick_next_plan: Mutex::new(None),
+            pick_next_contexts: Mutex::new(Vec::new()),
         })
     }
 
@@ -183,5 +189,21 @@ impl WorkItemSource for FakeSource {
             Some(error) => Err(error),
             None => Ok(self.fetch_ticket.lock().expect("fake source lock").clone()),
         }
+    }
+
+    fn pick_next_plan(
+        &self,
+        context: &str,
+        _worktree_directory: &std::path::Path,
+    ) -> Result<ProvisionPlan, String> {
+        self.pick_next_contexts
+            .lock()
+            .expect("fake source lock")
+            .push(context.to_string());
+        self.scripted_pick_next_plan
+            .lock()
+            .expect("fake source lock")
+            .clone()
+            .ok_or_else(|| "no pick-next plan scripted".to_string())
     }
 }

@@ -621,6 +621,65 @@ fn brief(item: &WorkItem, detail: &JiraDetail, agent_starts: bool, branch: &str)
     )
 }
 
+/// Brief for the shared "Pick next" discovery workspace: read-only investigation of the
+/// tracker, ending in a recommendation the user confirms before anything is added or chosen.
+fn pick_next_brief(projects: &[JiraProjectConfig], context: &str) -> String {
+    let clones = if projects.is_empty() {
+        "(no projects are mapped to a local clone; use the Jira issue text for detail)".to_string()
+    } else {
+        projects
+            .iter()
+            .map(|project| format!("- {} ({})", project.path, project.key))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let keys: Vec<&str> = projects
+        .iter()
+        .map(|project| project.key.as_str())
+        .collect();
+    let query = if keys.is_empty() {
+        "assignee = currentUser() AND sprint in openSprints() ORDER BY status, updated DESC"
+            .to_string()
+    } else {
+        format!(
+            "project in ({}) AND sprint in openSprints() ORDER BY status, assignee",
+            keys.join(", ")
+        )
+    };
+    let context_line = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nWhat I'm after: {}\n", context.trim())
+    };
+    format!(
+        "Help me pick what to work on next.\n\
+         {context_line}\n\
+         Read the Herdr skill first (`herdr --skill`) for the general agent workflow; it does \
+         not know this fork's work-item commands, so use these instead:\n\
+         - `herdr work-item search jira \"<JQL>\"`, e.g.:\n\
+         \x20 herdr work-item search jira \"{query}\"\n\
+         - `herdr work-item show jira <KEY>` — one issue's full detail.\n\
+         - `herdr work-item list` — the current inbox, with each item's id and choice ids.\n\
+         - `herdr work-item add jira <KEY>` — brings an issue into the inbox (only after I \
+         confirm, see below).\n\
+         - `herdr work-item choose <item-id> <choice-id>` — acts on an inbox item (only after \
+         I confirm; take the choice id from `herdr work-item list`, never guess it).\n\
+         \n\
+         This is read-only investigation: only `search`/`show`, and reading these local clones \
+         with `git -C <path> ...` to see who else is working on related code and spot overlap:\n\
+         {clones}\n\
+         Make no tracker writes and no code changes.\n\
+         \n\
+         Recommend one pick and up to two alternatives. For each: why now, who else works on \
+         related tickets, and any overlap risk. Then stop and ask me which one, if any.\n\
+         \n\
+         Only once I confirm a pick in this chat: run `herdr work-item add jira <key>`, then \
+         `herdr work-item choose <item-id> <choice-id>` defaulting to the local choice (an \
+         agent-led one only if I ask); take ids from `herdr work-item list`, never guess them. \
+         Do not assign the issue to me or move it — I'll be reminded about that separately.",
+    )
+}
+
 impl WorkItemSource for JiraSource {
     fn id(&self) -> &str {
         SOURCE_ID
@@ -776,6 +835,12 @@ impl WorkItemSource for JiraSource {
     }
 
     fn choices(&self, item: &WorkItem) -> ItemChoices {
+        if item.is_pick_next {
+            return ItemChoices {
+                choices: Vec::new(),
+                default_choice_id: None,
+            };
+        }
         let project = project_key(&item.external_id);
         let unmapped = self
             .project(project)
@@ -1009,6 +1074,45 @@ impl WorkItemSource for JiraSource {
             source_item,
         }))
     }
+
+    fn pick_next_plan(
+        &self,
+        context: &str,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        // The agent you work issues with; the first mapped project picks the block.
+        let first_project = self
+            .config
+            .projects
+            .first()
+            .map_or("", |project| project.key.as_str());
+        let config = self.workflow(first_project);
+        if config.agent.is_empty() {
+            return Err(
+                "No agent configured for Jira; set work_items.jira.issues.<block>.agent".into(),
+            );
+        }
+        let directory =
+            crate::worktree::default_checkout_path(worktree_directory, "pick-next", "jira");
+        Ok(ProvisionPlan {
+            source: WorkspaceSource::Scratch(directory),
+            workspace_label: format!("Pick next \u{b7} {}", self.label()),
+            agent_name_hint: "pick-next-jira".into(),
+            brief: pick_next_brief(&self.config.projects, context),
+            layout: WorkspaceLayout {
+                agent: config.agent.clone(),
+                agent_args: config.agent_args.clone(),
+                editor_command: config.editor_command.clone(),
+                lazygit_command: config.lazygit_command.clone(),
+                diff_command: String::new(),
+                review_command: String::new(),
+            },
+            delete_branch: false,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1058,6 +1162,7 @@ mod tests {
             action_error: None,
             waiting: false,
             manual: false,
+            is_pick_next: false,
         }
     }
 

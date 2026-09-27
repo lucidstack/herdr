@@ -47,6 +47,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "work_item.hide",
     "work_item.link",
     "work_item.mark_seen",
+    "work_item.pick_next_start",
     "work_item.unhide",
     "workspace.close",
     "workspace.create",
@@ -321,6 +322,10 @@ mod tests {
         assert_eq!(
             actual.remove("work_item.unhide").as_deref(),
             Some("8b5220f5f5b2f3dfb238dc4ca0cbd8f1aac5861985f2a8afe6294ede2b2ab3cb")
+        );
+        assert_eq!(
+            actual.remove("work_item.pick_next_start").as_deref(),
+            Some("69815e02e2976cc6f9808ac614f487736e9eab895b93912532afe1f00e50fdbd")
         );
 
         assert_eq!(

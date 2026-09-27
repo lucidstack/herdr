@@ -106,6 +106,7 @@ mod tests {
             choices: Vec::new(),
             default_choice_id: None,
             provisioning: None,
+            is_pick_next: false,
         }
     }
 

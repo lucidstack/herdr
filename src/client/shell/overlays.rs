@@ -638,17 +638,51 @@ fn render_rename_overlay(
 ) -> Option<OverlayRender> {
     let q = popup(b.area, 56, 7)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
-    put_text(
-        b,
-        i.x,
-        i.y,
-        i.width,
-        v.title,
-        Style::default()
-            .fg(p.text)
-            .bg(p.panel_bg)
-            .add_modifier(Modifier::BOLD),
-    );
+    let pick_next = match &v.target {
+        ClientRenameTarget::PickNext {
+            sources, selected, ..
+        } => Some((sources, *selected)),
+        _ => None,
+    };
+    let title_style = Style::default()
+        .fg(p.text)
+        .bg(p.panel_bg)
+        .add_modifier(Modifier::BOLD);
+    let mut provider_rows = Vec::new();
+    match pick_next {
+        // The provider line doubles as the title; one provider needs no choice.
+        Some((sources, selected)) => {
+            let mut x = put_segment(b, i.x, i.y, i.right(), "pick next task ", title_style);
+            for (index, (_, label)) in sources.iter().enumerate() {
+                let chip = format!(" {label} ");
+                let style = if index == selected {
+                    Style::default()
+                        .fg(contrast(p))
+                        .bg(p.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.subtext0).bg(p.surface0)
+                };
+                let start = x;
+                x = put_segment(b, x, i.y, i.right(), &chip, style);
+                provider_rows.push((Rect::new(start, i.y, x.saturating_sub(start), 1), index));
+                x = put_segment(b, x, i.y, i.right(), " ", Style::default().bg(p.panel_bg));
+            }
+            put_text(
+                b,
+                i.x,
+                i.y + 1,
+                i.width,
+                if sources.len() > 1 {
+                    "optional context · tab switches provider"
+                } else {
+                    "optional context for the agent"
+                },
+                Style::default().fg(p.overlay0).bg(p.panel_bg),
+            );
+        }
+        None => put_text(b, i.x, i.y, i.width, v.title, title_style),
+    }
     let input = Rect::new(i.x, i.y + 2, i.width, 1);
     b.set_style(input, Style::default().fg(p.text).bg(p.surface0));
     let cursor = text_editor::render(
@@ -657,14 +691,19 @@ fn render_rename_overlay(
         &v.input,
         Style::default().fg(p.text).bg(p.surface0),
     );
-    let rs = row(i, &[8, 10, 12], 2, 3);
+    let save_width = if pick_next.is_some() { 9 } else { 8 };
+    let rs = row(i, &[save_width, 10, 12], 2, 3);
     let [save, clear, cancel] = rs.as_slice() else {
         return None;
     };
     button(
         b,
         *save,
-        " ↵ save ",
+        if pick_next.is_some() {
+            " ↵ start "
+        } else {
+            " ↵ save "
+        },
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)
@@ -686,6 +725,7 @@ fn render_rename_overlay(
         navigator_rows: Vec::new(),
         worktree_search: Rect::default(),
         worktree_rows: Vec::new(),
+        menu_rows: provider_rows,
         cursor,
         ..OverlayRender::default()
     })

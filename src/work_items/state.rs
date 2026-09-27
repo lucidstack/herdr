@@ -48,6 +48,10 @@ pub(crate) struct WorkItem {
     /// the ordinary query returns it too.
     #[serde(default)]
     pub manual: bool,
+    /// A provider's "Pick next" discovery row, not a tracked ticket. `context` holds the
+    /// last text sent to it; never touched or removed by polling.
+    #[serde(default)]
+    pub is_pick_next: bool,
     #[serde(skip)]
     pub prepare_in_flight: bool,
     #[serde(skip)]
@@ -62,6 +66,9 @@ pub(crate) struct WorkItem {
     #[serde(skip)]
     pub action_error: Option<String>,
 }
+
+/// External id of a provider's "Pick next" discovery row.
+pub(crate) const PICK_NEXT_EXTERNAL_ID: &str = "pick-next";
 
 pub(crate) fn item_key(source_id: &str, external_id: &str) -> String {
     format!("{source_id}:{external_id}")
@@ -95,6 +102,40 @@ impl WorkItem {
             action_error: None,
             waiting: false,
             manual: false,
+            is_pick_next: false,
+        }
+    }
+
+    /// A provider's "Pick next" discovery row. `label` is the source's own label, e.g.
+    /// "GitHub"; `context` starts empty until first used.
+    fn new_pick_next(source_id: &str, label: &str) -> Self {
+        Self {
+            key: item_key(source_id, PICK_NEXT_EXTERNAL_ID),
+            source_id: source_id.to_string(),
+            external_id: PICK_NEXT_EXTERNAL_ID.to_string(),
+            title: format!("Pick next \u{b7} {label}"),
+            context: String::new(),
+            author: None,
+            url: String::new(),
+            updated_at: "0".to_string(),
+            detail: None,
+            summary: None,
+            prepare_error: None,
+            phase: WorkItemPhase::Pending,
+            seen: true,
+            resolved: false,
+            workspace_id: None,
+            dismissed: false,
+            snoozed_until: None,
+            prepared_for: None,
+            prepare_in_flight: false,
+            provisioning: None,
+            resolve_error: None,
+            action_in_flight: false,
+            action_error: None,
+            waiting: false,
+            manual: false,
+            is_pick_next: true,
         }
     }
 
@@ -132,6 +173,7 @@ impl WorkItem {
             choices: choices.choices,
             default_choice_id: choices.default_choice_id,
             provisioning: self.provisioning.clone(),
+            is_pick_next: self.is_pick_next,
         }
     }
 
@@ -193,6 +235,26 @@ impl WorkItemsState {
         (work_item, true)
     }
 
+    /// The key of `source_id`'s "Pick next" discovery row, creating it if it does not exist
+    /// yet. Returns the item and whether it was newly created.
+    pub(crate) fn ensure_pick_next(&mut self, source_id: &str, label: &str) -> (WorkItem, bool) {
+        let key = item_key(source_id, PICK_NEXT_EXTERNAL_ID);
+        if let Some(existing) = self.get(&key) {
+            return (existing.clone(), false);
+        }
+        let item = WorkItem::new_pick_next(source_id, label);
+        self.items.push(item.clone());
+        (item, true)
+    }
+
+    /// Records the text last sent to a "Pick next" discovery row and bumps its recency.
+    pub(crate) fn set_pick_next_context(&mut self, key: &str, context: &str, now: u64) {
+        if let Some(item) = self.get_mut(key) {
+            item.context = context.to_string();
+            item.updated_at = now.to_string();
+        }
+    }
+
     pub(crate) fn source_error(&self, source_id: &str) -> Option<&str> {
         self.source_errors.get(source_id).map(String::as_str)
     }
@@ -250,6 +312,10 @@ impl WorkItemsState {
         let newly_resolved = &mut self.newly_resolved;
         self.items.retain_mut(|item| {
             if item.source_id != source_id || present.contains(&item.key) {
+                return true;
+            }
+            // A discovery row, not a tracked ticket: never touched by polling.
+            if item.is_pick_next {
                 return true;
             }
             // Exempt until the tracker reports it done (checked on preparation) or the user
@@ -802,5 +868,43 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn ensure_pick_next_creates_the_row_once_and_reuses_it() {
+        let mut state = WorkItemsState::default();
+        let (first, inserted) = state.ensure_pick_next("gh", "GitHub");
+        assert!(inserted);
+        assert!(first.is_pick_next);
+        assert_eq!(first.title, "Pick next \u{b7} GitHub");
+        let (second, inserted_again) = state.ensure_pick_next("gh", "GitHub");
+        assert!(!inserted_again);
+        assert_eq!(second.key, first.key);
+        assert_eq!(
+            state
+                .items()
+                .iter()
+                .filter(|item| item.key == first.key)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn pick_next_row_survives_a_poll_with_no_matching_items() {
+        let mut state = WorkItemsState::default();
+        state.ensure_pick_next("gh", "GitHub");
+        state.apply_poll("gh", Ok(Vec::new()));
+        assert!(state.get("gh:pick-next").is_some());
+    }
+
+    #[test]
+    fn setting_pick_next_context_records_it_and_bumps_recency() {
+        let mut state = WorkItemsState::default();
+        state.ensure_pick_next("gh", "GitHub");
+        state.set_pick_next_context("gh:pick-next", "fix the login bug", 100);
+        let item = state.get("gh:pick-next").expect("item");
+        assert_eq!(item.context, "fix the login bug");
+        assert_eq!(item.updated_at, "100");
     }
 }

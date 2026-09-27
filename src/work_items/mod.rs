@@ -78,6 +78,16 @@ pub(crate) struct OwnedWorktree {
     pub delete_branch: bool,
 }
 
+/// Persisted "Pick next" memory: which provider was used last, and each provider's last
+/// context text, so the dialog can pre-fill without depending on item recency.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PickNextState {
+    #[serde(default)]
+    pub last_source_id: Option<String>,
+    #[serde(default)]
+    pub last_context: HashMap<String, String>,
+}
+
 /// A workspace being removed because its item resolved.
 #[derive(Debug)]
 pub(crate) struct PendingRemoval {
@@ -111,6 +121,10 @@ pub(crate) struct WorkItems {
     removals: Vec<PendingRemoval>,
     /// Follow-up briefs sent to an item's agent, waiting for the `agent.prompt` response.
     follow_ups: Vec<(String, std::sync::mpsc::Receiver<String>)>,
+    pick_next: PickNextState,
+    /// Work items moved focus to a workspace outside an API request, e.g. a new
+    /// "Pick next" workspace; the server moves its shell clients there too.
+    focus_requested: bool,
 }
 
 impl std::fmt::Debug for WorkItems {
@@ -160,6 +174,8 @@ impl WorkItems {
             pending_resolutions: Vec::new(),
             removals: Vec::new(),
             follow_ups: Vec::new(),
+            pick_next: PickNextState::default(),
+            focus_requested: false,
         }
     }
 
@@ -191,6 +207,7 @@ impl WorkItems {
                 let stored = store::load(&store.path);
                 self.state = WorkItemsState::from_items(stored.items);
                 self.owned_worktrees = stored.worktrees;
+                self.pick_next = stored.pick_next;
             }
             if store.persist {
                 self.store = StoreWriter::spawn(store.path.clone());
@@ -496,6 +513,46 @@ impl WorkItems {
         item
     }
 
+    /// The key of `source_id`'s "Pick next" discovery row, creating it if it does not exist
+    /// yet.
+    pub(crate) fn ensure_pick_next_item(&mut self, source_id: &str, label: &str) -> WorkItem {
+        let (item, inserted) = self.state.ensure_pick_next(source_id, label);
+        if inserted {
+            self.changed();
+        }
+        item
+    }
+
+    /// Records the text last sent to `source_id`'s "Pick next" discovery row, and that
+    /// `source_id` was used last, as explicit persisted state (not derived from item
+    /// recency), so the dialog can pre-fill correctly across restarts.
+    pub(crate) fn set_pick_next_context(&mut self, key: &str, source_id: &str, context: &str) {
+        self.state.set_pick_next_context(key, context, unix_now());
+        self.pick_next.last_source_id = Some(source_id.to_string());
+        self.pick_next
+            .last_context
+            .insert(source_id.to_string(), context.to_string());
+        self.changed();
+    }
+
+    /// Records that work items focused a workspace on their own.
+    pub(crate) fn request_focus(&mut self) {
+        self.focus_requested = true;
+    }
+
+    /// Whether work items focused a workspace since the last call.
+    pub(crate) fn take_focus_request(&mut self) -> bool {
+        std::mem::take(&mut self.focus_requested)
+    }
+
+    /// Persisted "Pick next" memory for the dialog to pre-fill from.
+    pub(crate) fn pick_next_info(&self) -> crate::api::schema::WorkItemPickNextInfo {
+        crate::api::schema::WorkItemPickNextInfo {
+            last_source_id: self.pick_next.last_source_id.clone(),
+            last_context: self.pick_next.last_context.clone(),
+        }
+    }
+
     /// The projected info for one item, if it exists.
     pub(crate) fn item_info(&self, key: &str) -> Option<WorkItemInfo> {
         let item = self.state.get(key)?;
@@ -759,7 +816,7 @@ impl WorkItems {
     fn changed(&mut self) {
         self.revision += 1;
         if let Some(store) = &self.store {
-            store.save(self.state.items(), &self.owned_worktrees);
+            store.save(self.state.items(), &self.owned_worktrees, &self.pick_next);
         }
     }
 

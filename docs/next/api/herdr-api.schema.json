@@ -1265,6 +1265,11 @@
               "description": "Hidden until the source requests the item again.",
               "type": "boolean"
             },
+            "is_pick_next": {
+              "default": false,
+              "description": "A provider's \"Pick next\" discovery row rather than a tracked ticket. `context` holds\nthe last text sent to it.",
+              "type": "boolean"
+            },
             "item_id": {
               "type": "string"
             },
@@ -4790,6 +4795,23 @@
           ],
           "type": "object"
         },
+        "WorkItemPickNextStartParams": {
+          "properties": {
+            "context": {
+              "default": "",
+              "description": "Optional context for the agent; sent as the initial brief, or as a follow-up brief\nwhen a discovery workspace is already open. May be empty.",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "Configured source whose \"Pick next\" discovery workspace is started or reused.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id"
+          ],
+          "type": "object"
+        },
         "WorkItemSearchParams": {
           "properties": {
             "query": {
@@ -5733,6 +5755,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemTicketTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.pick_next_start",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemPickNextStartParams"
             }
           },
           "required": [
@@ -11077,6 +11115,12 @@
                   },
                   "type": "array"
                 },
+                "pick_next": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemPickNextInfo",
+                  "default": {
+                    "last_context": {}
+                  }
+                },
                 "sources": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/WorkItemSourceInfo"
@@ -11466,6 +11510,11 @@
               "description": "Hidden until the source requests the item again.",
               "type": "boolean"
             },
+            "is_pick_next": {
+              "default": false,
+              "description": "A provider's \"Pick next\" discovery row rather than a tracked ticket. `context` holds\nthe last text sent to it.",
+              "type": "boolean"
+            },
             "item_id": {
               "type": "string"
             },
@@ -11561,6 +11610,25 @@
               "type": "string"
             }
           ]
+        },
+        "WorkItemPickNextInfo": {
+          "description": "Persisted \"Pick next\" memory, so the dialog can pre-fill without depending on item\nrecency: which provider was used last, and each provider's last context text.",
+          "properties": {
+            "last_context": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "last_source_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
         },
         "WorkItemProvisioningInfo": {
           "properties": {

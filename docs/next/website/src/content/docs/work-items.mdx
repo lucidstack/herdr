@@ -116,6 +116,14 @@ Issues of a mapped project can be worked on locally on a new branch from `base_b
 
 When an item no longer applies (the review is submitted, the checks pass, the issue is closed), it leaves the inbox. If it has a workspace, it stays marked **✓** until you close the workspace, unless its workflow says `on_resolved = "remove"`. Removal never discards uncommitted changes: a dirty worktree is kept and the item says so.
 
+### Picking what to work on next
+
+Click **+ Pick next task…** at the bottom of the inbox (or bind `keys.pick_next`, unbound by default) when you are not sure what to take next. Choose the tracker, with Tab or a click when several are configured, and optionally say what you are after. Herdr opens a scratch workspace, **Pick next · Jira** for example, with the agent from your workflow and briefs it to investigate read-only: `herdr work-item search` and `show`, plus your mapped clones through `git -C`. It recommends one ticket and up to two alternatives, with why now, who works on related tickets and any overlap, then asks you.
+
+Talk it through in its pane. Once you confirm a pick, the agent adds the ticket to the inbox with `herdr work-item add` and chooses it (the local choice unless you ask for another), so its workspace is set up as usual. It never assigns or transitions the ticket.
+
+Each tracker keeps one discovery workspace. It sits under its own row at the bottom of the inbox rather than in the spaces list, collapsed to the agent's status unless focused. Picking again while it is open focuses it and sends your new context as a follow-up. The dialog remembers the tracker you used last and the last text for each. Close the workspace when you are done.
+
 ## Scripts and plugins
 
 Every item change is published as an event: `work_item.created`, `work_item.updated` and `work_item.resolved`, each carrying the item. Plugins can react to them with `[[events]]` hooks, and scripts can subscribe through the [socket API](/docs/socket-api/). Items restored at start-up are not reported as created.

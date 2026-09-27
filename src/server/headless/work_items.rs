@@ -13,6 +13,7 @@ impl HeadlessServer {
         };
         let (changed, notices) = self.app.handle_work_items_event(*event);
         self.send_work_item_notices(notices);
+        self.follow_work_items_focus();
         changed
     }
 
@@ -21,7 +22,16 @@ impl HeadlessServer {
         let changed = self.app.run_work_items_tasks(now);
         let notices = self.app.work_items.take_notices();
         self.send_work_item_notices(notices);
+        self.follow_work_items_focus();
         changed
+    }
+
+    /// Work items focused a workspace outside an API request (a new "Pick next"
+    /// workspace): move shell clients there, as a public `workspace.focus` would.
+    fn follow_work_items_focus(&mut self) {
+        if self.app.work_items.take_focus_request() {
+            self.focus_all_shell_clients_on_default_target();
+        }
     }
 
     fn send_work_item_notices(&mut self, notices: Vec<crate::work_items::WorkItemNotice>) {
@@ -44,6 +54,7 @@ impl HeadlessServer {
             app.work_items.revision(),
             app.work_items.source_infos(),
             app.work_items.projection_items(),
+            app.work_items.pick_next_info(),
         )
         .map_err(|err| err.to_string())?;
         Self::frame_server_message(&message).map_err(|err| err.to_string())

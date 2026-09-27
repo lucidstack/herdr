@@ -92,6 +92,8 @@ pub(crate) enum SourceReady {
     ExistingWorktree { path: PathBuf, branch: String },
     /// The download workspace's file is in place.
     Downloaded,
+    /// The empty scratch directory exists.
+    ScratchReady,
 }
 
 fn step(
@@ -114,6 +116,7 @@ pub(crate) fn initial_progress(plan: &ProvisionPlan) -> WorkItemProvisioningInfo
     let first_label = match &plan.source {
         WorkspaceSource::Worktree(_) => "Worktree created",
         WorkspaceSource::Download(_) => "Diff downloaded",
+        WorkspaceSource::Scratch(_) => "Scratch directory ready",
     };
     let agent_brief = if plan.layout.agent.is_empty() {
         step(
@@ -444,6 +447,9 @@ pub(crate) fn prepare_source(source: &WorkspaceSource) -> Result<SourceReady, St
     match source {
         WorkspaceSource::Worktree(spec) => prepare_worktree(spec),
         WorkspaceSource::Download(spec) => download(spec).map(|()| SourceReady::Downloaded),
+        WorkspaceSource::Scratch(directory) => std::fs::create_dir_all(directory)
+            .map(|()| SourceReady::ScratchReady)
+            .map_err(|err| format!("{}: {err}", directory.display())),
     }
 }
 

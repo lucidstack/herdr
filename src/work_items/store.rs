@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use super::state::WorkItem;
-use super::OwnedWorktree;
+use super::{OwnedWorktree, PickNextState};
 
 const STORE_VERSION: u32 = 1;
 
@@ -18,6 +18,8 @@ struct StoreFile {
     /// Review worktrees created for items, kept so their branches can be cleaned up.
     #[serde(default)]
     worktrees: Vec<OwnedWorktree>,
+    #[serde(default)]
+    pick_next: PickNextState,
 }
 
 #[derive(Serialize)]
@@ -25,6 +27,7 @@ struct StoreFileRef<'a> {
     version: u32,
     items: &'a [WorkItem],
     worktrees: &'a [OwnedWorktree],
+    pick_next: &'a PickNextState,
 }
 
 /// Persisted work-item state.
@@ -32,6 +35,7 @@ struct StoreFileRef<'a> {
 pub(crate) struct Stored {
     pub items: Vec<WorkItem>,
     pub worktrees: Vec<OwnedWorktree>,
+    pub pick_next: PickNextState,
 }
 
 pub(crate) fn load(path: &Path) -> Stored {
@@ -47,6 +51,7 @@ pub(crate) fn load(path: &Path) -> Stored {
         Ok(file) if file.version == STORE_VERSION => Stored {
             items: file.items,
             worktrees: file.worktrees,
+            pick_next: file.pick_next,
         },
         Ok(file) => {
             warn!(
@@ -93,11 +98,17 @@ impl StoreWriter {
         }
     }
 
-    pub(crate) fn save(&self, items: &[WorkItem], worktrees: &[OwnedWorktree]) {
+    pub(crate) fn save(
+        &self,
+        items: &[WorkItem],
+        worktrees: &[OwnedWorktree],
+        pick_next: &PickNextState,
+    ) {
         match serde_json::to_string(&StoreFileRef {
             version: STORE_VERSION,
             items,
             worktrees,
+            pick_next,
         }) {
             Ok(json) => {
                 let _ = self.tx.send(json);
@@ -160,6 +171,7 @@ mod tests {
             action_error: None,
             waiting: true,
             manual: true,
+            is_pick_next: false,
         }
     }
 
@@ -176,12 +188,19 @@ mod tests {
     fn round_trip_keeps_persisted_fields_and_drops_transient_ones() {
         let path = temp_path("round-trip");
         let original = item();
+        let pick_next = PickNextState {
+            last_source_id: Some("gh".into()),
+            last_context: [("gh".to_string(), "look into the backlog".to_string())]
+                .into_iter()
+                .collect(),
+        };
         write_atomically(
             &path,
             &serde_json::to_string(&StoreFileRef {
                 version: STORE_VERSION,
                 items: std::slice::from_ref(&original),
                 worktrees: &[worktree()],
+                pick_next: &pick_next,
             })
             .expect("serialises"),
         )
@@ -201,6 +220,7 @@ mod tests {
             Stored {
                 items: vec![expected],
                 worktrees: vec![worktree()],
+                pick_next,
             }
         );
     }
@@ -214,6 +234,7 @@ mod tests {
                 version: STORE_VERSION + 1,
                 items: &[item()],
                 worktrees: &[],
+                pick_next: &PickNextState::default(),
             })
             .expect("serialises"),
         )
