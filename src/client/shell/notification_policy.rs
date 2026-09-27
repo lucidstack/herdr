@@ -102,6 +102,42 @@ impl ClientShellState {
         event: SemanticNotification,
         now: std::time::Instant,
     ) -> (Vec<ClientShellNotificationEffect>, bool) {
+        self.queue_pending_notification(endpoint_id, event, false, now)
+    }
+
+    /// A work-item inbox notice, decoded locally from an `endpoint.work-items.notice.v1`
+    /// control message rather than the wire `SemanticNotification`; routed through the
+    /// same toast/sound pipeline, but with its sound resolved via `Sound::Inbox` so
+    /// `[ui.sound] inbox_path` / `inbox_enabled` govern it independently of the agent
+    /// request sound.
+    pub(crate) fn receive_inbox_notification(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        title: String,
+        body: Option<String>,
+        now: std::time::Instant,
+    ) -> (Vec<ClientShellNotificationEffect>, bool) {
+        let event = SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title,
+            body,
+            sound: Some(SemanticNotificationSound::Request),
+            agent: None,
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            position: None,
+        };
+        self.queue_pending_notification(endpoint_id, event, true, now)
+    }
+
+    fn queue_pending_notification(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        event: SemanticNotification,
+        is_inbox: bool,
+        now: std::time::Instant,
+    ) -> (Vec<ClientShellNotificationEffect>, bool) {
         let delay = if event.kind == SemanticNotificationKind::Custom {
             0
         } else {
@@ -139,6 +175,7 @@ impl ClientShellState {
             deadline,
             expires_at: now.checked_add(COMPLETION_EVIDENCE_GRACE).unwrap_or(now),
             validate_state,
+            is_inbox,
         });
         let (effects, repaint) = self.tick_notifications(now);
         (effects, repaint || cleared_visible)
@@ -198,11 +235,16 @@ impl ClientShellState {
                 let suppress_sound =
                     pending.event.kind == SemanticNotificationKind::Finished && suppress_external;
                 if !suppress_sound {
-                    effects.push(ClientShellNotificationEffect::Sound {
-                        sound: match sound {
+                    let sound = if pending.is_inbox {
+                        crate::sound::Sound::Inbox
+                    } else {
+                        match sound {
                             SemanticNotificationSound::Done => crate::sound::Sound::Done,
                             SemanticNotificationSound::Request => crate::sound::Sound::Request,
-                        },
+                        }
+                    };
+                    effects.push(ClientShellNotificationEffect::Sound {
+                        sound,
                         agent: pending.event.agent.clone(),
                     });
                 }

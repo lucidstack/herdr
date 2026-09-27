@@ -100,7 +100,9 @@ use std::fs;
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
         crate::sound::Sound::Done => "agent done",
-        crate::sound::Sound::Request => "agent attention",
+        // The legacy `herdr notify` CLI protocol only ever names an agent sound;
+        // inbox notices never reach this path, but the enum is shared.
+        crate::sound::Sound::Request | crate::sound::Sound::Inbox => "agent attention",
     }
 }
 

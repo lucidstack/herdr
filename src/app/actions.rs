@@ -1828,7 +1828,11 @@ impl AppState {
         let known_agent = change.known_agent.or(change.previous_known_agent);
         let kind = client_notification_kind.unwrap_or(match sound {
             Some(crate::sound::Sound::Request) => ToastKind::NeedsAttention,
-            Some(crate::sound::Sound::Done) | None => ToastKind::Finished,
+            // Agent state transitions never produce an inbox sound; keep this
+            // arm exhaustive alongside `Done`/`None` rather than panicking.
+            Some(crate::sound::Sound::Done | crate::sound::Sound::Inbox) | None => {
+                ToastKind::Finished
+            }
         });
         let workspace_id = self.workspaces[ws_idx].id.clone();
 

@@ -34,6 +34,8 @@ pub enum Sound {
     Done,
     /// Agent needs input (transitioned to Blocked).
     Request,
+    /// A work-item inbox notice (arrival, resolution, or re-requested review).
+    Inbox,
 }
 
 /// Play a notification sound in a background thread.
@@ -56,7 +58,9 @@ pub fn play(sound: Sound, config: &crate::config::SoundConfig) {
 
         let data = match sound {
             Sound::Done => SOUND_DONE,
-            Sound::Request => SOUND_REQUEST,
+            // No distinct built-in inbox sound: unset `inbox_path` keeps today's
+            // request sound so the default behaviour is unchanged.
+            Sound::Request | Sound::Inbox => SOUND_REQUEST,
         };
 
         if let Err(err) = play_bytes(data) {

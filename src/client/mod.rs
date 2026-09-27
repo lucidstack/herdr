@@ -2045,6 +2045,32 @@ async fn run_client_loop(
                                 }
                                 continue;
                             }
+                            Ok(endpoint::EndpointControlMessage::WorkItemNotice(notice)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    let (effects, frame) = {
+                                        let (effects, repaint) = shell.receive_inbox_notification(
+                                            &endpoint_id,
+                                            notice.title,
+                                            notice.body,
+                                            std::time::Instant::now(),
+                                        );
+                                        let frame = repaint
+                                            .then(|| {
+                                                shell.compose(
+                                                    state.reported_size.0,
+                                                    state.reported_size.1,
+                                                )
+                                            })
+                                            .flatten();
+                                        (effects, frame)
+                                    };
+                                    handle_shell_notification_effects(effects, &state.sound_config);
+                                    if let Some(frame) = frame {
+                                        state.present_frame(frame);
+                                    }
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::Ignored) => {
                                 debug!(%kind, "ignoring unknown endpoint control message");
                                 continue;

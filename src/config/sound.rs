@@ -19,6 +19,13 @@ pub struct SoundConfig {
     /// Optional mp3 file path for "request" notifications.
     /// Relative paths are resolved from the config file's directory.
     pub request_path: Option<PathBuf>,
+    /// Optional mp3 file path for work-item inbox notices. Falls back to the
+    /// "request" sound (`request_path`, then `path`, then built-in) when unset.
+    /// Relative paths are resolved from the config file's directory.
+    pub inbox_path: Option<PathBuf>,
+    /// Play a sound for work-item inbox notices. `enabled = false` silences
+    /// every sound regardless of this setting.
+    pub inbox_enabled: bool,
     pub agents: AgentSoundOverrides,
 }
 
@@ -67,10 +74,21 @@ impl SoundConfig {
         !matches!(self.agents.for_agent(agent), AgentSoundSetting::Off)
     }
 
+    /// Whether a work-item inbox notice should play a sound. Independent of
+    /// per-agent overrides, which do not apply to inbox notices.
+    pub fn inbox_allowed(&self) -> bool {
+        self.enabled && self.inbox_enabled
+    }
+
     pub fn path_for(&self, sound: crate::sound::Sound) -> Option<PathBuf> {
         let path = match sound {
             crate::sound::Sound::Done => self.done_path.as_ref().or(self.path.as_ref()),
             crate::sound::Sound::Request => self.request_path.as_ref().or(self.path.as_ref()),
+            crate::sound::Sound::Inbox => self
+                .inbox_path
+                .as_ref()
+                .or(self.request_path.as_ref())
+                .or(self.path.as_ref()),
         }?;
 
         Some(resolve_config_relative_path(path))
@@ -82,6 +100,7 @@ impl SoundConfig {
             ("ui.sound.path", self.path.as_ref()),
             ("ui.sound.done_path", self.done_path.as_ref()),
             ("ui.sound.request_path", self.request_path.as_ref()),
+            ("ui.sound.inbox_path", self.inbox_path.as_ref()),
         ] {
             let Some(path) = path else {
                 continue;
@@ -158,6 +177,8 @@ impl Default for SoundConfig {
             path: None,
             done_path: None,
             request_path: None,
+            inbox_path: None,
+            inbox_enabled: true,
             agents: AgentSoundOverrides::default(),
         }
     }
@@ -240,6 +261,25 @@ claude = "on"
     }
 
     #[test]
+    fn inbox_sound_plays_by_default() {
+        assert!(SoundConfig::default().inbox_allowed());
+    }
+
+    #[test]
+    fn inbox_enabled_false_silences_only_inbox_not_agent_sounds() {
+        let config: Config = toml::from_str("[ui.sound]\ninbox_enabled = false\n").unwrap();
+        assert!(!config.ui.sound.inbox_allowed());
+        assert!(config.ui.sound.allows(None));
+    }
+
+    #[test]
+    fn global_disabled_silences_inbox_too() {
+        let config: Config = toml::from_str("[ui.sound]\nenabled = false\n").unwrap();
+        assert!(!config.ui.sound.inbox_allowed());
+        assert!(!config.ui.sound.allows(None));
+    }
+
+    #[test]
     fn sound_path_resolution_prefers_specific_over_global() {
         let config: Config = toml::from_str(
             r#"
@@ -258,6 +298,35 @@ done_path = "sounds/done.mp3"
         assert_eq!(
             config.ui.sound.path_for(crate::sound::Sound::Request),
             Some(config_root.join("sounds/all.mp3"))
+        );
+        assert_eq!(
+            config.ui.sound.path_for(crate::sound::Sound::Inbox),
+            Some(config_root.join("sounds/all.mp3"))
+        );
+    }
+
+    #[test]
+    fn inbox_path_falls_back_to_the_request_sound() {
+        let config_root = config_path().parent().unwrap().to_path_buf();
+        let inbox = |toml: &str| {
+            toml::from_str::<Config>(toml)
+                .unwrap()
+                .ui
+                .sound
+                .path_for(crate::sound::Sound::Inbox)
+        };
+        assert_eq!(inbox(""), None);
+        assert_eq!(
+            inbox("[ui.sound]\npath = \"sounds/all.mp3\"\n"),
+            Some(config_root.join("sounds/all.mp3"))
+        );
+        assert_eq!(
+            inbox("[ui.sound]\npath = \"sounds/all.mp3\"\nrequest_path = \"sounds/request.mp3\"\n"),
+            Some(config_root.join("sounds/request.mp3"))
+        );
+        assert_eq!(
+            inbox("[ui.sound]\nrequest_path = \"sounds/request.mp3\"\ninbox_path = \"sounds/inbox.mp3\"\n"),
+            Some(config_root.join("sounds/inbox.mp3"))
         );
     }
 

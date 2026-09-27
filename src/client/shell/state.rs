@@ -763,6 +763,10 @@ pub(super) struct ClientPendingNotification {
     pub(super) deadline: std::time::Instant,
     pub(super) expires_at: std::time::Instant,
     pub(super) validate_state: bool,
+    /// Set for a work-item inbox notice constructed locally from an
+    /// `endpoint.work-items.notice.v1` control message rather than decoded from
+    /// the wire `SemanticNotification`; routes its sound through `Sound::Inbox`.
+    pub(super) is_inbox: bool,
 }
 
 pub(super) struct ClientVisibleNotification {
