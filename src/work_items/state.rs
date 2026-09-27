@@ -43,6 +43,11 @@ pub(crate) struct WorkItem {
     /// The item waits on someone else, e.g. reviewers asked to review again.
     #[serde(default)]
     pub waiting: bool,
+    /// Added by hand (`work_item.add`), not by the source's own query. Exempt from poll
+    /// resolution until the tracker reports it done or the user dismisses it; cleared once
+    /// the ordinary query returns it too.
+    #[serde(default)]
+    pub manual: bool,
     #[serde(skip)]
     pub prepare_in_flight: bool,
     #[serde(skip)]
@@ -89,6 +94,7 @@ impl WorkItem {
             action_in_flight: false,
             action_error: None,
             waiting: false,
+            manual: false,
         }
     }
 
@@ -174,6 +180,19 @@ impl WorkItemsState {
         self.items.iter_mut().find(|item| item.key == key)
     }
 
+    /// Inserts `item` as a hand-added ticket unless its key is already in the inbox.
+    /// Returns the item (existing or newly inserted) and whether it was newly inserted.
+    pub(crate) fn insert_manual(&mut self, source_id: &str, item: SourceItem) -> (WorkItem, bool) {
+        let key = item_key(source_id, &item.external_id);
+        if let Some(existing) = self.get(&key) {
+            return (existing.clone(), false);
+        }
+        let mut work_item = WorkItem::new(source_id, item);
+        work_item.manual = true;
+        self.items.push(work_item.clone());
+        (work_item, true)
+    }
+
     pub(crate) fn source_error(&self, source_id: &str) -> Option<&str> {
         self.source_errors.get(source_id).map(String::as_str)
     }
@@ -220,6 +239,8 @@ impl WorkItemsState {
                 item.snoozed_until = None;
                 arrivals.push(key);
             }
+            // The ordinary query now vouches for it too: it stops being exempt.
+            item.manual = false;
             if item.workspace_id.is_none() && item.phase == WorkItemPhase::Local {
                 item.phase = WorkItemPhase::Pending;
             }
@@ -229,6 +250,11 @@ impl WorkItemsState {
         let newly_resolved = &mut self.newly_resolved;
         self.items.retain_mut(|item| {
             if item.source_id != source_id || present.contains(&item.key) {
+                return true;
+            }
+            // Exempt until the tracker reports it done (checked on preparation) or the user
+            // dismisses it.
+            if item.manual {
                 return true;
             }
             if item.workspace_id.is_some() {
@@ -276,6 +302,7 @@ impl WorkItemsState {
         updated_at: &str,
         prepared: PreparedItem,
     ) -> (bool, bool) {
+        let done = prepared.done;
         let Some(item) = self.get_mut(key) else {
             return (false, false);
         };
@@ -290,7 +317,15 @@ impl WorkItemsState {
         }
         item.prepared_for = Some(updated_at.to_string());
         item.prepare_in_flight = false;
-        (*item != before, review_arrived)
+        let newly_done = item.manual && done && !item.resolved;
+        if newly_done {
+            item.resolved = true;
+        }
+        let changed = *item != before;
+        if newly_done {
+            self.newly_resolved.push(key.to_string());
+        }
+        (changed, review_arrived)
     }
 
     pub(crate) fn mark_seen(&mut self, key: &str) -> Result<bool, NotFound> {
@@ -590,6 +625,7 @@ mod tests {
             summary: None,
             error: None,
             waiting,
+            done: false,
         };
         state.apply_prepared("gh:pr", "t1", prepared(true));
         state.mark_seen("gh:pr").expect("item");
@@ -612,6 +648,7 @@ mod tests {
             detail: Some(serde_json::json!({})),
             summary: None,
             error: error.map(str::to_string),
+            done: false,
         };
         state.apply_prepared("gh:ok", "2026-01-01T00:00:00Z", prepared(None));
         state.apply_prepared(
@@ -700,5 +737,70 @@ mod tests {
             .map(|item| item.key.as_str())
             .collect();
         assert_eq!(keys, vec!["gh:new", "gh:old", "gh:seen"]);
+    }
+
+    #[test]
+    fn hand_added_item_survives_a_poll_that_does_not_return_it() {
+        let mut state = WorkItemsState::default();
+        state.insert_manual("gh", polled("added", "t1"));
+        state.apply_poll("gh", Ok(Vec::new()));
+        assert!(state.get("gh:added").is_some());
+    }
+
+    #[test]
+    fn hand_added_item_becomes_ordinary_once_the_query_returns_it() {
+        let mut state = WorkItemsState::default();
+        state.insert_manual("gh", polled("added", "t1"));
+        // The ordinary query now finds it too.
+        state.apply_poll("gh", Ok(vec![polled("added", "t2")]));
+        // A later poll that drops it now removes it, as for any ordinary item.
+        state.apply_poll("gh", Ok(Vec::new()));
+        assert!(state.get("gh:added").is_none());
+    }
+
+    #[test]
+    fn hand_added_item_resolves_once_preparation_reports_it_done() {
+        let mut state = WorkItemsState::default();
+        state.insert_manual("gh", polled("added", "t1"));
+        let prepared = PreparedItem {
+            waiting: false,
+            detail: None,
+            summary: None,
+            error: None,
+            done: true,
+        };
+        state.apply_prepared("gh:added", "t1", prepared);
+        assert!(state.get("gh:added").expect("item").resolved);
+        assert_eq!(state.take_newly_resolved(), vec!["gh:added".to_string()]);
+    }
+
+    #[test]
+    fn ordinary_item_ignores_a_done_preparation() {
+        let mut state = state_with("gh", &["a"]);
+        let prepared = PreparedItem {
+            waiting: false,
+            detail: None,
+            summary: None,
+            error: None,
+            done: true,
+        };
+        state.apply_prepared("gh:a", "2026-01-01T00:00:00Z", prepared);
+        assert!(!state.get("gh:a").expect("item").resolved);
+    }
+
+    #[test]
+    fn adding_an_already_present_ticket_returns_the_existing_item() {
+        let mut state = state_with("gh", &["a"]);
+        let (item, inserted) = state.insert_manual("gh", polled("a", "2026-01-01T00:00:00Z"));
+        assert!(!inserted);
+        assert!(!item.manual);
+        assert_eq!(
+            state
+                .items()
+                .iter()
+                .filter(|item| item.key == "gh:a")
+                .count(),
+            1
+        );
     }
 }

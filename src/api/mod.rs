@@ -43,6 +43,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkItemHide(_)
             | Method::WorkItemUnhide(_)
             | Method::WorkItemLink(_)
+            | Method::WorkItemAdd(_)
             | Method::TabCreate(_)
             | Method::TabFocus(_)
             | Method::TabRename(_)

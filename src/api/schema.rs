@@ -115,6 +115,12 @@ pub enum Method {
     WorkItemUnhide(WorkItemTarget),
     #[serde(rename = "work_item.link")]
     WorkItemLink(WorkItemLinkParams),
+    #[serde(rename = "work_item.search")]
+    WorkItemSearch(WorkItemSearchParams),
+    #[serde(rename = "work_item.show")]
+    WorkItemShow(WorkItemTicketTarget),
+    #[serde(rename = "work_item.add")]
+    WorkItemAdd(WorkItemTicketTarget),
     #[serde(rename = "tab.create")]
     TabCreate(TabCreateParams),
     #[serde(rename = "tab.list")]

@@ -18,7 +18,9 @@ use super::plugins::{
 use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
-use super::work_items::{WorkItemInfo, WorkItemSourceInfo};
+use super::work_items::{
+    WorkItemInfo, WorkItemSourceInfo, WorkItemTicketComment, WorkItemTicketInfo,
+};
 use super::workspaces::WorkspaceInfo;
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
@@ -281,6 +283,19 @@ pub enum ResponseResult {
     WorkItemList {
         items: Vec<WorkItemInfo>,
         sources: Vec<WorkItemSourceInfo>,
+    },
+    WorkItemSearch {
+        tickets: Vec<WorkItemTicketInfo>,
+    },
+    WorkItemTicket {
+        ticket: WorkItemTicketInfo,
+        /// Issue or pull request body as plain text.
+        description: String,
+        /// Oldest first.
+        comments: Vec<WorkItemTicketComment>,
+    },
+    WorkItemAdded {
+        item: WorkItemInfo,
     },
     Ok {},
 }

@@ -4790,6 +4790,23 @@
           ],
           "type": "object"
         },
+        "WorkItemSearchParams": {
+          "properties": {
+            "query": {
+              "description": "Query in the tracker's own syntax: GitHub search syntax or JQL.",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "Configured source to search, e.g. `github` or `jira`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "query"
+          ],
+          "type": "object"
+        },
         "WorkItemTarget": {
           "properties": {
             "item_id": {
@@ -4798,6 +4815,22 @@
           },
           "required": [
             "item_id"
+          ],
+          "type": "object"
+        },
+        "WorkItemTicketTarget": {
+          "properties": {
+            "key": {
+              "description": "Ticket key in the tracker's form, e.g. `TECH-123` or `owner/repo#12`.",
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "key"
           ],
           "type": "object"
         },
@@ -5652,6 +5685,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemLinkParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.search",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemSearchParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.show",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemTicketTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemTicketTarget"
             }
           },
           "required": [
@@ -11016,6 +11097,70 @@
             },
             {
               "properties": {
+                "tickets": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkItemTicketInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "work_item_search",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "tickets"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "comments": {
+                  "description": "Oldest first.",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkItemTicketComment"
+                  },
+                  "type": "array"
+                },
+                "description": {
+                  "description": "Issue or pull request body as plain text.",
+                  "type": "string"
+                },
+                "ticket": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemTicketInfo"
+                },
+                "type": {
+                  "const": "work_item_ticket",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "ticket",
+                "description",
+                "comments"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
+                },
+                "type": {
+                  "const": "work_item_added",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "ok",
                   "type": "string"
@@ -11507,6 +11652,61 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "WorkItemTicketComment": {
+          "properties": {
+            "author": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "author",
+            "body"
+          ],
+          "type": "object"
+        },
+        "WorkItemTicketInfo": {
+          "description": "One ticket as its tracker reports it, whether or not it is in the inbox.",
+          "properties": {
+            "assignee": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "done": {
+              "default": false,
+              "description": "Whether the tracker considers the ticket finished (closed, merged, done).",
+              "type": "boolean"
+            },
+            "key": {
+              "type": "string"
+            },
+            "status": {
+              "description": "The tracker's status name, e.g. `In Progress`, `open` or `merged`.",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "title",
+            "status",
+            "updated_at",
+            "url"
+          ],
+          "type": "object"
         },
         "WorkspaceInfo": {
           "properties": {

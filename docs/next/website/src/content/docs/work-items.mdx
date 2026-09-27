@@ -131,4 +131,21 @@ herdr work-item unhide 'jira:APP-7'
 herdr work-item link 'jira:APP-7' w3
 ```
 
+### Read, search and add tickets on demand
+
+Beyond the sidebar's own queries, `search` and `show` read any ticket through a configured source's credentials, and `add` brings one into the inbox by hand:
+
+```bash
+herdr work-item search github 'is:open author:me'
+herdr work-item search jira 'project = APP AND text ~ "login bug"'
+herdr work-item show github acme/app#42
+herdr work-item show jira APP-7
+herdr work-item add github acme/app#42
+herdr work-item add jira APP-7
+```
+
+`search` takes GitHub search syntax for the `github` source and JQL for `jira`, and returns each match's key, title, status, assignee and update time. `show` returns one ticket's full details: description, status, assignee and comments (the pull request or issue body for GitHub).
+
+`add` fetches the ticket and inserts it into the inbox as an ordinary item, so `choose` works on it exactly as if the sidebar's own query had found it. It survives later polls even when the ordinary query does not return it: the item stays in the inbox until the tracker reports the ticket done (checked whenever it is next prepared) or you dismiss it. If a later poll does return it — for example once it is assigned to you — it becomes an ordinary item from then on, indistinguishable from one the sidebar found itself. Adding a key already in the inbox is a no-op; it returns the existing item.
+
 Item state lives in `work-items.json` in the session directory. Remove a review worktree through its right-click menu, or with `herdr worktree remove`, so the hooks run and the review branch is cleaned up.

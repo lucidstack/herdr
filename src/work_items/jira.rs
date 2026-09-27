@@ -19,8 +19,8 @@ use super::github::{one_line, slug, truncate_chars};
 use super::process::{failure_detail, run_with_input, run_with_timeout};
 use super::provision::find_existing_work;
 use super::source::{
-    ItemChoices, PreparedItem, ProvisionPlan, SourceItem, WorkItemSource, WorkspaceLayout,
-    WorkspaceSource, WorktreeSpec,
+    ItemChoices, PreparedItem, ProvisionPlan, SourceItem, TicketDetail, WorkItemSource,
+    WorkspaceLayout, WorkspaceSource, WorktreeSpec,
 };
 use super::state::WorkItem;
 
@@ -66,9 +66,11 @@ struct SearchFields {
     #[serde(default)]
     updated: String,
     #[serde(default)]
-    status: Option<Named>,
+    status: Option<StatusField>,
     #[serde(default)]
     reporter: Option<Person>,
+    #[serde(default)]
+    assignee: Option<Person>,
 }
 
 #[derive(Deserialize)]
@@ -76,7 +78,21 @@ struct Named {
     name: String,
 }
 
+/// Jira's status field, with the category used to tell finished statuses apart.
 #[derive(Deserialize)]
+struct StatusField {
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "statusCategory", default)]
+    status_category: Option<StatusCategory>,
+}
+
+#[derive(Deserialize)]
+struct StatusCategory {
+    key: String,
+}
+
+#[derive(Clone, Deserialize)]
 struct Person {
     #[serde(rename = "displayName", default)]
     display_name: String,
@@ -90,17 +106,23 @@ struct IssueResponse {
 #[derive(Deserialize)]
 struct IssueFields {
     #[serde(default)]
+    summary: String,
+    #[serde(default)]
     description: Option<serde_json::Value>,
     #[serde(default)]
     issuetype: Option<Named>,
     #[serde(default)]
     priority: Option<Named>,
     #[serde(default)]
-    status: Option<Named>,
+    status: Option<StatusField>,
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
     comment: Option<CommentPage>,
+    #[serde(default)]
+    updated: String,
+    #[serde(default)]
+    assignee: Option<Person>,
 }
 
 #[derive(Deserialize)]
@@ -392,18 +414,30 @@ impl JiraSource {
         })
     }
 
-    /// A REST call under `/rest/api/3`.
-    fn api(&self, method: &str, path: &str, body: Option<&str>) -> Result<Vec<u8>, String> {
+    /// A REST call under `/rest/api/3`, exposing the status code so callers can tell a
+    /// missing resource apart from other failures.
+    fn api_with_status(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(u16, Vec<u8>), String> {
         let base = self.api_base()?;
         let (status, response) = self.http(method, &format!("{base}/rest/api/3/{path}"), body)?;
-        if (200..300).contains(&status) {
-            return Ok(response);
-        }
         if matches!(status, 401 | 403) {
             // The token may have been rotated; find the base again next time.
             if let Ok(mut cached) = self.api_base.lock() {
                 *cached = None;
             }
+        }
+        Ok((status, response))
+    }
+
+    /// A REST call under `/rest/api/3`.
+    fn api(&self, method: &str, path: &str, body: Option<&str>) -> Result<Vec<u8>, String> {
+        let (status, response) = self.api_with_status(method, path, body)?;
+        if (200..300).contains(&status) {
+            return Ok(response);
         }
         Err(http_error(status, &response))
     }
@@ -488,6 +522,46 @@ fn parse_search(
         })
         .collect();
     Ok((items, next))
+}
+
+/// Search results as tickets, independent of the continuous poll.
+fn parse_ticket_search(
+    bytes: &[u8],
+    browse_url: impl Fn(&str) -> String,
+) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
+    let response: SearchResponse =
+        serde_json::from_slice(bytes).map_err(|err| format!("unexpected Jira response: {err}"))?;
+    Ok(response
+        .issues
+        .into_iter()
+        .map(|issue| {
+            let status = issue
+                .fields
+                .status
+                .as_ref()
+                .map(|status| status.name.clone())
+                .unwrap_or_default();
+            let done = issue
+                .fields
+                .status
+                .as_ref()
+                .and_then(|status| status.status_category.as_ref())
+                .is_some_and(|category| category.key.eq_ignore_ascii_case("done"));
+            crate::api::schema::WorkItemTicketInfo {
+                key: issue.key.clone(),
+                title: issue.fields.summary,
+                status,
+                done,
+                assignee: issue
+                    .fields
+                    .assignee
+                    .map(|person| person.display_name)
+                    .filter(|name| !name.is_empty()),
+                updated_at: issue.fields.updated,
+                url: browse_url(&issue.key),
+            }
+        })
+        .collect())
 }
 
 fn brief(item: &WorkItem, detail: &JiraDetail, agent_starts: bool, branch: &str) -> String {
@@ -613,9 +687,15 @@ impl WorkItemSource for JiraSource {
                     detail: None,
                     summary: None,
                     error: Some(error),
+                    done: false,
                 }
             }
         };
+        let done = fields
+            .status
+            .as_ref()
+            .and_then(|status| status.status_category.as_ref())
+            .is_some_and(|category| category.key.eq_ignore_ascii_case("done"));
         let mut error = None;
         let project = self.project(project_key(&item.external_id));
         let base_branch = match project {
@@ -646,7 +726,11 @@ impl WorkItemSource for JiraSource {
                 .unwrap_or_default(),
             issue_type: name(fields.issuetype),
             priority: name(fields.priority),
-            status: name(fields.status),
+            status: fields
+                .status
+                .as_ref()
+                .map(|status| status.name.clone())
+                .unwrap_or_default(),
             labels: fields.labels,
             comments: fields
                 .comment
@@ -687,6 +771,7 @@ impl WorkItemSource for JiraSource {
             detail: serde_json::to_value(&detail).ok(),
             summary: Some(summary),
             error,
+            done,
         }
     }
 
@@ -830,6 +915,100 @@ impl WorkItemSource for JiraSource {
             Some(format!("{} · {}", item.external_id, item.title)),
         )
     }
+
+    fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        let body = serde_json::json!({
+            "jql": query,
+            "maxResults": PAGE_SIZE,
+            "fields": ["summary", "status", "updated", "assignee"],
+        });
+        // Single page: an on-demand lookup, not the continuous poll.
+        let response = self.api("POST", "search/jql", Some(&body.to_string()))?;
+        parse_ticket_search(&response, |key| self.browse_url(key))
+    }
+
+    fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        let fields = "summary,description,issuetype,priority,status,labels,comment,updated,\
+                      assignee";
+        let (status, body) =
+            self.api_with_status("GET", &format!("issue/{key}?fields={fields}"), None)?;
+        if status == 404 {
+            return Ok(None);
+        }
+        if !(200..300).contains(&status) {
+            return Err(http_error(status, &body));
+        }
+        let issue: IssueResponse = serde_json::from_slice(&body)
+            .map_err(|err| format!("unexpected Jira response: {err}"))?;
+        let fields = issue.fields;
+        let status_name = fields
+            .status
+            .as_ref()
+            .map(|status| status.name.clone())
+            .unwrap_or_default();
+        let done = fields
+            .status
+            .as_ref()
+            .and_then(|status| status.status_category.as_ref())
+            .is_some_and(|category| category.key.eq_ignore_ascii_case("done"));
+        let assignee = fields
+            .assignee
+            .clone()
+            .map(|person| person.display_name)
+            .filter(|name| !name.is_empty());
+        let description = fields
+            .description
+            .as_ref()
+            .map(adf_text)
+            .unwrap_or_default();
+        let comments = fields
+            .comment
+            .map(|page| page.comments)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|comment| crate::api::schema::WorkItemTicketComment {
+                author: comment
+                    .author
+                    .map(|person| person.display_name)
+                    .unwrap_or_else(|| "unknown".into()),
+                body: comment.body.as_ref().map(adf_text).unwrap_or_default(),
+            })
+            .collect();
+        let context = if status_name.is_empty() {
+            key.to_string()
+        } else {
+            format!("{key} · {status_name}")
+        };
+        let ticket = crate::api::schema::WorkItemTicketInfo {
+            key: key.to_string(),
+            title: fields.summary.clone(),
+            status: status_name,
+            done,
+            assignee: assignee.clone(),
+            updated_at: fields.updated.clone(),
+            url: self.browse_url(key),
+        };
+        let source_item = SourceItem {
+            external_id: key.to_string(),
+            title: fields.summary,
+            context,
+            author: assignee,
+            url: self.browse_url(key),
+            updated_at: fields.updated,
+        };
+        Ok(Some(TicketDetail {
+            ticket,
+            description,
+            comments,
+            source_item,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -878,6 +1057,7 @@ mod tests {
             action_in_flight: false,
             action_error: None,
             waiting: false,
+            manual: false,
         }
     }
 

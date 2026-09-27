@@ -27,7 +27,7 @@ use crate::config::WorkItemsConfig;
 
 pub(crate) use changes::{ItemChange, ItemChanges};
 use provision::ProvisionJob;
-pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
+pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, TicketDetail, WorkItemSource};
 use state::{NotFound, WorkItem, WorkItemsState};
 use store::StoreWriter;
 
@@ -57,6 +57,14 @@ pub(crate) enum WorkItemsEvent {
     Performed {
         key: String,
         result: Result<String, String>,
+    },
+    /// A `work_item.add` fetch finished; the item is inserted only now that it succeeded,
+    /// so its API response carries the resulting item.
+    TicketFetchedForAdd {
+        id: String,
+        source_id: String,
+        result: Result<Box<TicketDetail>, String>,
+        respond_to: std::sync::mpsc::Sender<String>,
     },
 }
 
@@ -329,15 +337,7 @@ impl WorkItems {
                     })
                     .into_iter()
                     .collect();
-                for key in self.state.take_newly_resolved() {
-                    if self
-                        .state
-                        .get(&key)
-                        .is_some_and(|item| source.remove_on_resolved(item))
-                    {
-                        self.pending_resolutions.push(key);
-                    }
-                }
+                self.queue_resolutions();
                 if changed {
                     self.changed();
                 }
@@ -350,6 +350,7 @@ impl WorkItems {
             } => {
                 let (changed, review_arrived) =
                     self.state.apply_prepared(&key, &updated_at, prepared);
+                self.queue_resolutions();
                 if changed {
                     self.changed();
                 }
@@ -370,6 +371,25 @@ impl WorkItems {
                 let notices: Vec<WorkItemNotice> =
                     self.finish_action(&key, result, now).into_iter().collect();
                 (!notices.is_empty(), notices)
+            }
+            // Handled by the app driver, which owns the response channel.
+            WorkItemsEvent::TicketFetchedForAdd { .. } => (false, Vec::new()),
+        }
+    }
+
+    /// Queues workspace removal for items that just resolved, when their source wants that.
+    fn queue_resolutions(&mut self) {
+        for key in self.state.take_newly_resolved() {
+            let should_remove = self
+                .state
+                .get(&key)
+                .and_then(|item| {
+                    self.source(&item.source_id)
+                        .map(|source| source.remove_on_resolved(item))
+                })
+                .unwrap_or(false);
+            if should_remove {
+                self.pending_resolutions.push(key);
             }
         }
     }
@@ -463,6 +483,30 @@ impl WorkItems {
             self.changed();
         }
         Ok(())
+    }
+
+    /// Inserts a fetched ticket into the inbox as a hand-added item, exempt from poll
+    /// resolution until the tracker reports it done or the user dismisses it. A ticket
+    /// already in the inbox is returned unchanged.
+    pub(crate) fn add_ticket(&mut self, source_id: &str, item: SourceItem) -> WorkItem {
+        let (item, inserted) = self.state.insert_manual(source_id, item);
+        if inserted {
+            self.changed();
+        }
+        item
+    }
+
+    /// The projected info for one item, if it exists.
+    pub(crate) fn item_info(&self, key: &str) -> Option<WorkItemInfo> {
+        let item = self.state.get(key)?;
+        let choices = self
+            .source(&item.source_id)
+            .map(|source| source.choices(item))
+            .unwrap_or(source::ItemChoices {
+                choices: Vec::new(),
+                default_choice_id: None,
+            });
+        Some(item.info(choices))
     }
 
     pub(crate) fn workspace_closed(&mut self, workspace_id: &str) {

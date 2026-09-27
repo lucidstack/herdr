@@ -17,8 +17,8 @@ use crate::config::{
 
 use super::process::{failure_detail, run_with_timeout};
 use super::source::{
-    DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, WorkItemSource,
-    WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+    DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, TicketDetail,
+    WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
 };
 use super::state::WorkItem;
 
@@ -198,6 +198,12 @@ struct SearchItem {
     user: Option<SearchUser>,
     #[serde(default)]
     repository_url: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+    #[serde(default)]
+    assignees: Vec<SearchUser>,
 }
 
 #[derive(Deserialize)]
@@ -295,11 +301,23 @@ pub(crate) struct GithubIssueComment {
 struct RestIssue {
     number: u64,
     #[serde(default)]
+    title: String,
+    #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
+    html_url: String,
     #[serde(default)]
     labels: Vec<RestLabel>,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
+    #[serde(default)]
+    assignee: Option<SearchUser>,
+    #[serde(default)]
+    assignees: Vec<SearchUser>,
 }
 
 #[derive(Deserialize)]
@@ -519,6 +537,21 @@ impl GithubSource {
         command.args(args);
         match run_with_timeout(command, GH_TIMEOUT) {
             Ok(output) if output.status.success() => Ok(output.stdout),
+            Ok(output) => Err(gh_error(&output)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err("GitHub CLI not found; install gh or set work_items.github.gh_path".into())
+            }
+            Err(err) => Err(format!("gh failed: {err}")),
+        }
+    }
+
+    /// Like `run_gh`, but a 404 from GitHub becomes `Ok(None)` instead of an error.
+    fn run_gh_optional(&self, args: &[&str]) -> Result<Option<Vec<u8>>, String> {
+        let mut command = self.gh();
+        command.args(args);
+        match run_with_timeout(command, GH_TIMEOUT) {
+            Ok(output) if output.status.success() => Ok(Some(output.stdout)),
+            Ok(output) if String::from_utf8_lossy(&output.stderr).contains("404") => Ok(None),
             Ok(output) => Err(gh_error(&output)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 Err("GitHub CLI not found; install gh or set work_items.github.gh_path".into())
@@ -1322,6 +1355,47 @@ fn parse_search(bytes: &[u8], event: Event) -> Result<Vec<SourceItem>, String> {
         .collect())
 }
 
+/// Raw search results as tickets, independent of any configured query's event mapping.
+fn parse_ticket_search(
+    bytes: &[u8],
+) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
+    let response: SearchResponse =
+        serde_json::from_slice(bytes).map_err(|err| format!("unexpected gh api output: {err}"))?;
+    Ok(response
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let repo = item.repository_url.as_deref().and_then(|url| {
+                let mut segments = url.trim_end_matches('/').rsplit('/');
+                let name = segments.next()?;
+                let owner = segments.next()?;
+                (!name.is_empty() && !owner.is_empty()).then(|| format!("{owner}/{name}"))
+            })?;
+            let merged = item
+                .pull_request
+                .as_ref()
+                .and_then(|pull_request| pull_request.get("merged_at"))
+                .is_some_and(|value| !value.is_null());
+            let state = item.state.unwrap_or_default();
+            let status = if merged {
+                "merged".to_string()
+            } else {
+                state.clone()
+            };
+            let done = merged || state.eq_ignore_ascii_case("closed");
+            Some(crate::api::schema::WorkItemTicketInfo {
+                key: format!("{repo}#{}", item.number),
+                title: item.title,
+                status,
+                done,
+                assignee: item.assignees.first().map(|user| user.login.clone()),
+                updated_at: item.updated_at,
+                url: item.html_url,
+            })
+        })
+        .collect())
+}
+
 impl WorkItemSource for GithubSource {
     fn id(&self) -> &str {
         SOURCE_ID
@@ -1365,6 +1439,7 @@ impl WorkItemSource for GithubSource {
                 detail: None,
                 summary: None,
                 error: Some(format!("unrecognised pull request id {}", item.external_id)),
+                done: false,
             };
         };
         let event = Event::of(&item.external_id);
@@ -1392,6 +1467,7 @@ impl WorkItemSource for GithubSource {
                     detail: None,
                     summary: None,
                     error: Some(error),
+                    done: false,
                 }
             }
         };
@@ -1464,6 +1540,7 @@ impl WorkItemSource for GithubSource {
             summary: Some(summary),
             error: (!errors.is_empty()).then(|| errors.join("; ")),
             waiting: waiting.is_some(),
+            done: false,
         }
     }
 
@@ -1744,6 +1821,111 @@ impl WorkItemSource for GithubSource {
             title.into(),
             Some(format!("{} · {}", item.context, item.title)),
         )
+    }
+
+    fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        let limit = self
+            .config
+            .max_results
+            .clamp(1, MAX_SEARCH_RESULTS)
+            .min(SEARCH_PAGE_SIZE);
+        let query_arg = format!("q={query}");
+        let per_page_arg = format!("per_page={limit}");
+        // Single page: an on-demand lookup, not the continuous poll.
+        let stdout = self.run_gh(&[
+            "api",
+            "--method",
+            "GET",
+            "search/issues",
+            "-f",
+            &query_arg,
+            "-f",
+            &per_page_arg,
+            "-f",
+            "sort=updated",
+            "-f",
+            "order=desc",
+        ])?;
+        parse_ticket_search(&stdout)
+    }
+
+    fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        let Some((repo, number)) = parse_external_id(key) else {
+            return Err(format!(
+                "unrecognised GitHub ticket key {key}; use owner/repo#number"
+            ));
+        };
+        let Some(stdout) =
+            self.run_gh_optional(&["api", &format!("repos/{repo}/issues/{number}")])?
+        else {
+            return Ok(None);
+        };
+        let issue: RestIssue = serde_json::from_slice(&stdout)
+            .map_err(|err| format!("unexpected gh api output: {err}"))?;
+        let comments_stdout = self.run_gh(&[
+            "api",
+            "--method",
+            "GET",
+            &format!("repos/{repo}/issues/{number}/comments"),
+            "-f",
+            "per_page=100",
+        ])?;
+        let comments: Vec<RestIssueComment> = serde_json::from_slice(&comments_stdout)
+            .map_err(|err| format!("unexpected gh api output: {err}"))?;
+        let merged = issue
+            .pull_request
+            .as_ref()
+            .and_then(|pull_request| pull_request.get("merged_at"))
+            .is_some_and(|value| !value.is_null());
+        let status = if merged {
+            "merged".to_string()
+        } else {
+            issue.state.clone()
+        };
+        let done = merged || issue.state.eq_ignore_ascii_case("closed");
+        let assignee = issue
+            .assignees
+            .first()
+            .or(issue.assignee.as_ref())
+            .map(|user| user.login.clone());
+        let ticket_key = format!("{repo}#{number}");
+        let ticket = crate::api::schema::WorkItemTicketInfo {
+            key: ticket_key.clone(),
+            title: issue.title.clone(),
+            status,
+            done,
+            assignee: assignee.clone(),
+            updated_at: issue.updated_at.clone(),
+            url: issue.html_url.clone(),
+        };
+        let source_item = SourceItem {
+            external_id: format!("{}{ticket_key}", Event::Assigned.id_prefix()),
+            title: issue.title,
+            context: format!("#{number} {repo}"),
+            author: assignee,
+            url: issue.html_url,
+            updated_at: issue.updated_at,
+        };
+        Ok(Some(TicketDetail {
+            ticket,
+            description: issue.body.unwrap_or_default(),
+            comments: comments
+                .into_iter()
+                .map(|comment| crate::api::schema::WorkItemTicketComment {
+                    author: comment
+                        .user
+                        .map_or_else(|| "unknown".into(), |user| user.login),
+                    body: comment.body,
+                })
+                .collect(),
+            source_item,
+        }))
     }
 }
 
@@ -2047,9 +2229,16 @@ impl GithubSource {
                     detail: None,
                     summary: None,
                     error: Some(error),
+                    done: false,
                 }
             }
         };
+        let merged = issue
+            .pull_request
+            .as_ref()
+            .and_then(|pull_request| pull_request.get("merged_at"))
+            .is_some_and(|value| !value.is_null());
+        let done = merged || issue.state.eq_ignore_ascii_case("closed");
         let mut errors = Vec::new();
         let comments = self
             .run_gh(&[
@@ -2115,6 +2304,7 @@ impl GithubSource {
             detail: serde_json::to_value(&detail).ok(),
             summary: Some(summary),
             error: (!errors.is_empty()).then(|| errors.join("; ")),
+            done,
         }
     }
 
@@ -2231,6 +2421,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ticket_search_reports_status_done_and_assignee() {
+        let json = br#"{"items":[
+            {"number":12,"title":"Fix it","html_url":"https://github.com/o/r/pull/12",
+             "updated_at":"2026-01-02T00:00:00Z","state":"open",
+             "repository_url":"https://api.github.com/repos/o/r",
+             "assignees":[{"login":"alice"}]},
+            {"number":3,"title":"Ship it","html_url":"https://github.com/o/r/pull/3",
+             "updated_at":"2026-01-01T00:00:00Z","state":"closed",
+             "pull_request":{"merged_at":"2026-01-01T00:00:00Z"},
+             "repository_url":"https://api.github.com/repos/o/r"}]}"#;
+        let tickets = parse_ticket_search(json).expect("parses");
+        assert_eq!(
+            tickets,
+            vec![
+                crate::api::schema::WorkItemTicketInfo {
+                    key: "o/r#12".into(),
+                    title: "Fix it".into(),
+                    status: "open".into(),
+                    done: false,
+                    assignee: Some("alice".into()),
+                    updated_at: "2026-01-02T00:00:00Z".into(),
+                    url: "https://github.com/o/r/pull/12".into(),
+                },
+                crate::api::schema::WorkItemTicketInfo {
+                    key: "o/r#3".into(),
+                    title: "Ship it".into(),
+                    status: "merged".into(),
+                    done: true,
+                    assignee: None,
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    url: "https://github.com/o/r/pull/3".into(),
+                },
+            ]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn unauthenticated_gh_is_reported_with_the_login_hint() {
@@ -2306,6 +2533,7 @@ mod tests {
             action_in_flight: false,
             action_error: None,
             waiting: false,
+            manual: false,
         }
     }
 
@@ -3053,6 +3281,71 @@ printf ']}}'
         let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         assert_eq!(items.len(), 120);
         assert_eq!(items[119].external_id, "o/r#120");
+    }
+
+    /// A `gh` stand-in for `api repos/o/r/issues/N` and its `/comments`, one fixed issue.
+    #[cfg(unix)]
+    fn fake_gh_issue(name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-fake-gh-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("gh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$*" in
+  *"repos/o/r/issues/5/comments"*)
+    printf '[{"body":"first","user":{"login":"carol"}}]'
+    ;;
+  *"repos/o/r/issues/5"*)
+    printf '{"number":5,"title":"Ship it","body":"Do the thing","state":"closed",
+             "updated_at":"2026-01-01T00:00:00Z","html_url":"https://github.com/o/r/issues/5",
+             "assignees":[{"login":"alice"}]}'
+    ;;
+  *"repos/o/r/issues/404"*)
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_returns_the_ticket_with_its_description_and_comments() {
+        let gh = fake_gh_issue("fetch-found");
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            gh_path: gh.display().to_string(),
+            ..GithubWorkItemsConfig::default()
+        });
+        let detail = source.fetch("o/r#5").expect("fetch").expect("found");
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        assert_eq!(detail.ticket.key, "o/r#5");
+        assert_eq!(detail.ticket.title, "Ship it");
+        assert_eq!(detail.ticket.status, "closed");
+        assert!(detail.ticket.done);
+        assert_eq!(detail.ticket.assignee.as_deref(), Some("alice"));
+        assert_eq!(detail.description, "Do the thing");
+        assert_eq!(detail.comments.len(), 1);
+        assert_eq!(detail.comments[0].author, "carol");
+        assert_eq!(detail.source_item.external_id, "assigned:o/r#5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_returns_none_for_a_missing_ticket() {
+        let gh = fake_gh_issue("fetch-missing");
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            gh_path: gh.display().to_string(),
+            ..GithubWorkItemsConfig::default()
+        });
+        let result = source.fetch("o/r#404").expect("fetch");
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        assert!(result.is_none());
     }
 
     #[test]

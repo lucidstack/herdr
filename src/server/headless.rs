@@ -2983,6 +2983,19 @@ impl HeadlessServer {
             );
             return changed | (deferred_changed && !read_only);
         }
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::WorkItemSearch(_)
+                | api::schema::Method::WorkItemShow(_)
+                | api::schema::Method::WorkItemAdd(_)
+        ) {
+            // Each fetches over the network on a background thread and replies later; the
+            // eventual `work_item.add` mutation is applied and rendered when its result event
+            // arrives, not synchronously here.
+            self.app
+                .handle_deferred_work_item_api_request(msg.request, msg.respond_to);
+            return changed;
+        }
         if self.foreground_client_id.is_some_and(|client_id| {
             self.clients
                 .get(&client_id)

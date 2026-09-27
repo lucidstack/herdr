@@ -1,6 +1,6 @@
 use crate::api::schema::{
     EmptyParams, Method, WorkItemChooseParams, WorkItemHideParams, WorkItemLinkParams,
-    WorkItemTarget,
+    WorkItemSearchParams, WorkItemTarget, WorkItemTicketTarget,
 };
 
 // Output is the JSON API response, like the other socket commands.
@@ -81,6 +81,36 @@ pub(super) fn run_work_item_command(args: &[String]) -> std::io::Result<i32> {
             ),
             _ => usage("herdr work-item unhide ITEM_ID"),
         },
+        "search" => match rest {
+            [source_id, query] => send(
+                "cli:work-item:search",
+                Method::WorkItemSearch(WorkItemSearchParams {
+                    source_id: source_id.clone(),
+                    query: query.clone(),
+                }),
+            ),
+            _ => usage("herdr work-item search SOURCE QUERY"),
+        },
+        "show" => match rest {
+            [source_id, key] => send(
+                "cli:work-item:show",
+                Method::WorkItemShow(WorkItemTicketTarget {
+                    source_id: source_id.clone(),
+                    key: key.clone(),
+                }),
+            ),
+            _ => usage("herdr work-item show SOURCE KEY"),
+        },
+        "add" => match rest {
+            [source_id, key] => send(
+                "cli:work-item:add",
+                Method::WorkItemAdd(WorkItemTicketTarget {
+                    source_id: source_id.clone(),
+                    key: key.clone(),
+                }),
+            ),
+            _ => usage("herdr work-item add SOURCE KEY"),
+        },
         "help" | "--help" | "-h" => {
             print_work_item_help();
             Ok(0)
@@ -127,6 +157,11 @@ fn print_work_item_help() {
     eprintln!("  herdr work-item snooze ITEM_ID [--for DURATION]   (default 1h; e.g. 30m, 2h, 1d)");
     eprintln!("  herdr work-item unhide ITEM_ID");
     eprintln!("  herdr work-item link ITEM_ID WORKSPACE_ID");
+    eprintln!(
+        "  herdr work-item search SOURCE QUERY   (JQL for jira, GitHub search syntax for github)"
+    );
+    eprintln!("  herdr work-item show SOURCE KEY       (e.g. jira TECH-123, github o/r#12)");
+    eprintln!("  herdr work-item add SOURCE KEY        (fetches the ticket into the inbox)");
 }
 
 #[cfg(test)]
