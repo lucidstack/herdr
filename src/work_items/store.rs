@@ -159,6 +159,7 @@ mod tests {
             action_in_flight: false,
             action_error: None,
             waiting: true,
+            manual: true,
         }
     }
 

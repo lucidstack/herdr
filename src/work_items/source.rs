@@ -25,6 +25,19 @@ pub(crate) struct PreparedItem {
     pub error: Option<String>,
     /// The item waits on someone else, e.g. reviewers asked to review again.
     pub waiting: bool,
+    /// Whether the tracker reports this ticket finished (closed, merged, done…). Only acted
+    /// on for hand-added items; ignored for others.
+    pub done: bool,
+}
+
+/// One ticket's full detail, plus enough to insert it into the inbox like a polled arrival.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TicketDetail {
+    pub ticket: crate::api::schema::WorkItemTicketInfo,
+    pub description: String,
+    /// Oldest first.
+    pub comments: Vec<crate::api::schema::WorkItemTicketComment>,
+    pub source_item: SourceItem,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +140,12 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn remove_on_resolved(&self, item: &WorkItem) -> bool;
     /// Pure: notification text when an item arrives or is requested again.
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>);
+    /// Blocking; background thread only. Searches the tracker with its own query syntax
+    /// (JQL for Jira, GitHub search syntax for GitHub), read-only.
+    fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String>;
+    /// Blocking; background thread only. Fetches one ticket by its tracker key (e.g.
+    /// `TECH-123` or `owner/repo#12`); `None` when the key does not exist.
+    fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String>;
     /// Blocking; background thread only. Carries out a choice whose action is `Perform`
     /// and returns a one-line result for the user.
     fn perform(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {

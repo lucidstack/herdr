@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::source::ItemChoices;
+use super::source::{ItemChoices, TicketDetail};
 use super::state::WorkItem;
 use super::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
-use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
+use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemTicketInfo};
 
 /// Scripted source: each poll returns the current `items`.
 #[derive(Default)]
@@ -20,6 +20,14 @@ pub(crate) struct FakeSource {
     pub remove_on_resolved: std::sync::atomic::AtomicBool,
     /// Result of the "do" choice; `None` makes it succeed.
     pub perform_error: Mutex<Option<String>>,
+    /// Returned by `search`, regardless of the query.
+    pub search_results: Mutex<Vec<WorkItemTicketInfo>>,
+    /// Makes `search` fail with this message instead.
+    pub search_error: Mutex<Option<String>>,
+    /// Returned by `fetch`, regardless of the key; `None` means "not found".
+    pub fetch_ticket: Mutex<Option<TicketDetail>>,
+    /// Makes `fetch` fail with this message instead.
+    pub fetch_error: Mutex<Option<String>>,
 }
 
 impl FakeSource {
@@ -30,6 +38,10 @@ impl FakeSource {
             plan: Mutex::new(None),
             remove_on_resolved: std::sync::atomic::AtomicBool::new(false),
             perform_error: Mutex::new(None),
+            search_results: Mutex::new(Vec::new()),
+            search_error: Mutex::new(None),
+            fetch_ticket: Mutex::new(None),
+            fetch_error: Mutex::new(None),
         })
     }
 
@@ -77,6 +89,7 @@ impl WorkItemSource for FakeSource {
             detail: None,
             summary: Some("+1 −0 across 1 file".into()),
             error: None,
+            done: false,
         }
     }
 
@@ -152,5 +165,23 @@ impl WorkItemSource for FakeSource {
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {
         ("Arrived".into(), Some(item.title.clone()))
+    }
+
+    fn search(&self, _query: &str) -> Result<Vec<WorkItemTicketInfo>, String> {
+        match self.search_error.lock().expect("fake source lock").clone() {
+            Some(error) => Err(error),
+            None => Ok(self
+                .search_results
+                .lock()
+                .expect("fake source lock")
+                .clone()),
+        }
+    }
+
+    fn fetch(&self, _key: &str) -> Result<Option<TicketDetail>, String> {
+        match self.fetch_error.lock().expect("fake source lock").clone() {
+            Some(error) => Err(error),
+            None => Ok(self.fetch_ticket.lock().expect("fake source lock").clone()),
+        }
     }
 }

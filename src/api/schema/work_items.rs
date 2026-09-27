@@ -26,6 +26,43 @@ pub struct WorkItemHideParams {
     pub snooze_seconds: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemSearchParams {
+    /// Configured source to search, e.g. `github` or `jira`.
+    pub source_id: String,
+    /// Query in the tracker's own syntax: GitHub search syntax or JQL.
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemTicketTarget {
+    pub source_id: String,
+    /// Ticket key in the tracker's form, e.g. `TECH-123` or `owner/repo#12`.
+    pub key: String,
+}
+
+/// One ticket as its tracker reports it, whether or not it is in the inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemTicketInfo {
+    pub key: String,
+    pub title: String,
+    /// The tracker's status name, e.g. `In Progress`, `open` or `merged`.
+    pub status: String,
+    /// Whether the tracker considers the ticket finished (closed, merged, done).
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    pub updated_at: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemTicketComment {
+    pub author: String,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemPhase {

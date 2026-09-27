@@ -11,10 +11,11 @@ use super::{App, AppPolicy};
 use crate::api::schema::{
     AgentPromptParams, AgentStartParams, ErrorBody, ErrorResponse, Method, PaneInfo,
     PaneSendInputParams, PaneTarget, Request, ResponseResult, SuccessResponse, TabCreateParams,
-    TabInfo, TabRenameParams, WorkItemStep, WorkItemStepStatus, WorkspaceCloseParams,
-    WorkspaceCreateParams, WorkspaceInfo, WorkspaceTarget, WorktreeCreateParams,
-    WorktreeOpenParams, WorktreeRemoveParams,
+    TabInfo, TabRenameParams, WorkItemSearchParams, WorkItemStep, WorkItemStepStatus,
+    WorkItemTicketTarget, WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo,
+    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
+use crate::app::api::responses::{encode_error, encode_success};
 use crate::events::AppEvent;
 use crate::work_items::provision::{
     self, AgentAttempt, BriefConfirmation, PendingResponse, SourceReady,
@@ -188,6 +189,14 @@ impl App {
             WorkItemsEvent::CheckoutFinished { job_id, result } => {
                 self.work_item_source_ready(job_id, result, now);
             }
+            WorkItemsEvent::TicketFetchedForAdd {
+                id,
+                source_id,
+                result,
+                respond_to,
+            } => {
+                self.finish_work_item_add(id, &source_id, result, respond_to);
+            }
             event => {
                 let polled_source = match &event {
                     WorkItemsEvent::Polled {
@@ -234,6 +243,158 @@ impl App {
                 );
             }
         });
+    }
+
+    /// Handles `work_item.search`, `work_item.show` and `work_item.add`: each runs its
+    /// network fetch on a background thread and replies through `respond_to` once it
+    /// finishes, so it never blocks the app thread.
+    pub(crate) fn handle_deferred_work_item_api_request(
+        &mut self,
+        request: Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) -> bool {
+        match request.method {
+            Method::WorkItemSearch(params) => {
+                self.start_work_item_search(request.id, params, respond_to);
+            }
+            Method::WorkItemShow(params) => {
+                self.start_work_item_show(request.id, params, respond_to);
+            }
+            Method::WorkItemAdd(params) => {
+                self.start_work_item_add(request.id, params, respond_to);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn work_item_source_for(
+        &self,
+        source_id: &str,
+        id: &str,
+        respond_to: &std::sync::mpsc::Sender<String>,
+    ) -> Option<std::sync::Arc<dyn crate::work_items::WorkItemSource>> {
+        if !self.work_items.is_enabled() {
+            let _ = respond_to.send(encode_error(
+                id.to_string(),
+                "work_items_disabled",
+                "no work item sources are configured",
+            ));
+            return None;
+        }
+        let Some(source) = self.work_items.source(source_id).cloned() else {
+            let _ = respond_to.send(encode_error(
+                id.to_string(),
+                "work_item_source_not_found",
+                format!("unknown work item source {source_id}"),
+            ));
+            return None;
+        };
+        Some(source)
+    }
+
+    fn start_work_item_search(
+        &mut self,
+        id: String,
+        params: WorkItemSearchParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let Some(source) = self.work_item_source_for(&params.source_id, &id, &respond_to) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let response = match source.search(&params.query) {
+                Ok(tickets) => encode_success(id, ResponseResult::WorkItemSearch { tickets }),
+                Err(message) => encode_error(id, "work_item_search_failed", message),
+            };
+            let _ = respond_to.send(response);
+        });
+    }
+
+    fn start_work_item_show(
+        &mut self,
+        id: String,
+        params: WorkItemTicketTarget,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let Some(source) = self.work_item_source_for(&params.source_id, &id, &respond_to) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let response = match source.fetch(&params.key) {
+                Ok(Some(detail)) => encode_success(
+                    id,
+                    ResponseResult::WorkItemTicket {
+                        ticket: detail.ticket,
+                        description: detail.description,
+                        comments: detail.comments,
+                    },
+                ),
+                Ok(None) => encode_error(
+                    id,
+                    "work_item_ticket_not_found",
+                    format!("unknown ticket {}", params.key),
+                ),
+                Err(message) => encode_error(id, "work_item_show_failed", message),
+            };
+            let _ = respond_to.send(response);
+        });
+    }
+
+    /// Fetches the ticket on a background thread; the item is only inserted once that
+    /// succeeds, in `finish_work_item_add`.
+    fn start_work_item_add(
+        &mut self,
+        id: String,
+        params: WorkItemTicketTarget,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let Some(source) = self.work_item_source_for(&params.source_id, &id, &respond_to) else {
+            return;
+        };
+        let source_id = params.source_id.clone();
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let key = params.key.clone();
+            let result = source
+                .fetch(&params.key)
+                .and_then(|ticket| ticket.ok_or_else(|| format!("unknown ticket {key}")))
+                .map(Box::new);
+            send_event(
+                &event_tx,
+                WorkItemsEvent::TicketFetchedForAdd {
+                    id,
+                    source_id,
+                    result,
+                    respond_to,
+                },
+            );
+        });
+    }
+
+    /// Inserts the fetched ticket and replies with the resulting inbox item.
+    fn finish_work_item_add(
+        &mut self,
+        id: String,
+        source_id: &str,
+        result: Result<Box<crate::work_items::TicketDetail>, String>,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let response = match result {
+            Ok(detail) => {
+                let item = self.work_items.add_ticket(source_id, detail.source_item);
+                match self.work_items.item_info(&item.key) {
+                    Some(info) => encode_success(id, ResponseResult::WorkItemAdded { item: info }),
+                    None => encode_error(
+                        id,
+                        "work_item_not_found",
+                        format!("unknown work item {}", item.key),
+                    ),
+                }
+            }
+            Err(message) => encode_error(id, "work_item_add_failed", message),
+        };
+        let _ = respond_to.send(response);
     }
 
     /// Starts a `Perform` choice (e.g. a merge) on a background thread.
