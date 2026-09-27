@@ -475,11 +475,60 @@ impl Default for SpacesSidebarConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+/// A named region of the expanded sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarSection {
+    /// The active work-item source's inbox. Only shown when a source is configured.
+    Inbox,
+    /// The workspace list.
+    Spaces,
+    /// The agent panel.
+    Agents,
+}
+
+pub const DEFAULT_SIDEBAR_SECTIONS: [SidebarSection; 3] = [
+    SidebarSection::Inbox,
+    SidebarSection::Spaces,
+    SidebarSection::Agents,
+];
+
+fn default_sidebar_sections() -> Vec<SidebarSection> {
+    DEFAULT_SIDEBAR_SECTIONS.to_vec()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SidebarConfig {
+    /// Which sidebar sections appear and in what order. Omitted names are hidden;
+    /// listed ones share the height in list order.
+    #[serde(default = "default_sidebar_sections")]
+    pub sections: Vec<SidebarSection>,
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
+}
+
+impl Default for SidebarConfig {
+    fn default() -> Self {
+        Self {
+            sections: default_sidebar_sections(),
+            agents: AgentsSidebarConfig::default(),
+            spaces: SpacesSidebarConfig::default(),
+        }
+    }
+}
+
+impl SidebarConfig {
+    /// The configured sections, in order, with any repeated name collapsed to its
+    /// first occurrence.
+    pub fn ordered_sections(&self) -> Vec<SidebarSection> {
+        let mut seen = std::collections::HashSet::new();
+        self.sections
+            .iter()
+            .copied()
+            .filter(|section| seen.insert(*section))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -511,6 +560,51 @@ mod tests {
             ]
         );
         assert_eq!(config.spaces.row_gap, 0);
+    }
+
+    #[test]
+    fn default_sidebar_sections_are_inbox_spaces_agents_in_order() {
+        let config = crate::config::Config::default();
+        assert_eq!(
+            config.ui.sidebar.sections,
+            vec![
+                SidebarSection::Inbox,
+                SidebarSection::Spaces,
+                SidebarSection::Agents,
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_a_custom_sidebar_section_order() {
+        let config: crate::config::Config =
+            toml::from_str("[ui.sidebar]\nsections = [\"spaces\", \"agents\"]\n").unwrap();
+        assert_eq!(
+            config.ui.sidebar.sections,
+            vec![SidebarSection::Spaces, SidebarSection::Agents]
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_sidebar_section() {
+        let input = "[ui.sidebar]\nsections = [\"inbox\", \"recents\"]\n";
+        assert!(toml::from_str::<crate::config::Config>(input).is_err());
+    }
+
+    #[test]
+    fn ordered_sections_collapses_repeated_names_to_their_first_occurrence() {
+        let config = SidebarConfig {
+            sections: vec![
+                SidebarSection::Agents,
+                SidebarSection::Spaces,
+                SidebarSection::Agents,
+            ],
+            ..SidebarConfig::default()
+        };
+        assert_eq!(
+            config.ordered_sections(),
+            vec![SidebarSection::Agents, SidebarSection::Spaces]
+        );
     }
 
     #[test]

@@ -220,253 +220,341 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (mut workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
-    hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
-    let mut nested_workspace_ids = Vec::new();
-    if let Some(projection) = super::super::work_items::active_projection(
+
+    // The active machine's inbox needs a configured work-item source in addition
+    // to being listed; the other sections just need to be listed.
+    let inbox_projection = super::super::work_items::active_projection(
         state.work_items,
         state.active_endpoint_id,
         snapshot,
-    ) {
-        let (used, nested) = super::super::work_items::render_items_section(
-            buffer,
-            workspace_area,
-            projection,
-            snapshot,
-            config,
-            state.work_items,
-            state.active_endpoint_id,
-            hits,
-        );
-        workspace_area.y += used;
-        workspace_area.height -= used;
-        nested_workspace_ids = nested;
-    }
-    put_text(
-        buffer,
-        workspace_area.x,
-        workspace_area.y,
-        workspace_area.width,
-        " spaces",
-        Style::default()
-            .fg(palette.overlay0)
-            .add_modifier(Modifier::BOLD),
     );
-
-    let mut entries = workspace_entries(snapshot, state.collapsed_groups);
-    if !nested_workspace_ids.is_empty() {
-        entries.retain(|entry| {
-            !nested_workspace_ids.contains(&snapshot.workspaces[entry.index].workspace_id.as_str())
-        });
-    }
-    let body = Rect::new(
-        workspace_area.x,
-        workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
-        workspace_area.width,
-        workspace_area
-            .height
-            .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
-    );
-    hits.workspace_body = body;
-    let row_heights = entries
+    let visible_sections: Vec<crate::config::SidebarSection> = config
+        .sections
         .iter()
-        .map(|entry| {
-            snapshot
-                .workspaces
-                .get(entry.index)
-                .map(|workspace| {
-                    workspace_rows(
-                        workspace,
-                        displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
-                        entry.indented,
-                        &config.spaces,
-                    )
-                    .len()
-                    .max(1)
-                    .min(u16::MAX as usize) as u16
-                })
-                .unwrap_or(1)
+        .copied()
+        .filter(|section| {
+            *section != crate::config::SidebarSection::Inbox || inbox_projection.is_some()
         })
-        .collect::<Vec<_>>();
-    let gaps = entries
+        .collect();
+    let agents_position = visible_sections
         .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            entries
-                .get(index + 1)
-                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
-        })
-        .collect::<Vec<_>>();
-    let mut metrics = super::scroll::list_scroll_metrics(
-        &row_heights,
-        &gaps,
-        body.height,
-        *state.workspace_scroll,
-    );
-    if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
-        if let Some(target) = entries
-            .iter()
-            .position(|entry| snapshot.workspaces[entry.index].focused)
-        {
-            *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
-                &row_heights,
-                &gaps,
-                body.height,
-                *state.workspace_scroll,
-                target,
-            );
-            metrics = super::scroll::list_scroll_metrics(
-                &row_heights,
-                &gaps,
-                body.height,
-                *state.workspace_scroll,
-            );
+        .position(|section| matches!(section, crate::config::SidebarSection::Agents));
+    let flow_sections: Vec<crate::config::SidebarSection> = visible_sections
+        .iter()
+        .copied()
+        .filter(|section| !matches!(section, crate::config::SidebarSection::Agents))
+        .collect();
+
+    // Two zones share the sidebar body: "flow" (inbox and/or spaces, stacked) and
+    // "agents". Whichever of the two configured groups comes first in `sections`
+    // renders on top; the draggable divider between them only exists when both
+    // are present. Either group renders full-height alone, and an empty
+    // `sections` list leaves the body blank.
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    let (flow_area, agents_area) = match agents_position {
+        None => (content, Rect::default()),
+        Some(_) if flow_sections.is_empty() => (Rect::default(), content),
+        Some(position) => {
+            let agents_leads = position == 0;
+            hits.sidebar_section_divider =
+                crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+            let (top, bottom) =
+                crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
+            if agents_leads {
+                // The agents header carries its own top rule, which only separates
+                // it from a group above. Leading, it needs a rule below instead: the
+                // divider row (also the drag target) is the first row of the flow zone.
+                if !bottom.is_empty() {
+                    put_text(
+                        buffer,
+                        bottom.x,
+                        bottom.y,
+                        bottom.width,
+                        &"─".repeat(bottom.width as usize),
+                        Style::default().fg(palette.surface_dim),
+                    );
+                }
+                let flow = Rect::new(
+                    bottom.x,
+                    bottom.y.saturating_add(1),
+                    bottom.width,
+                    bottom.height.saturating_sub(1),
+                );
+                (flow, top)
+            } else {
+                (top, bottom)
+            }
+        }
+    };
+
+    // Within the flow zone, sections stack in list order and share the height:
+    // every section but the last gets a bounded budget (inbox's own budget when
+    // it is not last, or half of what remains for spaces), and the last one
+    // takes the full remainder. A lone flow section always gets the full zone.
+    let mut remaining = flow_area;
+    let mut nested_workspace_ids: Vec<&str> = Vec::new();
+    let mut spaces_area: Option<Rect> = None;
+    for (position, section) in flow_sections.iter().enumerate() {
+        let has_next_section = position + 1 < flow_sections.len();
+        match section {
+            crate::config::SidebarSection::Inbox => {
+                if let Some(projection) = inbox_projection {
+                    let (used, nested) = super::super::work_items::render_items_section(
+                        buffer,
+                        remaining,
+                        projection,
+                        snapshot,
+                        config,
+                        state.work_items,
+                        state.active_endpoint_id,
+                        hits,
+                        has_next_section,
+                    );
+                    remaining.y = remaining.y.saturating_add(used);
+                    remaining.height = remaining.height.saturating_sub(used);
+                    nested_workspace_ids = nested;
+                }
+            }
+            crate::config::SidebarSection::Spaces => {
+                let height = if has_next_section {
+                    remaining.height / 2
+                } else {
+                    remaining.height
+                };
+                spaces_area = Some(Rect::new(remaining.x, remaining.y, remaining.width, height));
+                remaining.y = remaining.y.saturating_add(height);
+                remaining.height = remaining.height.saturating_sub(height);
+            }
+            crate::config::SidebarSection::Agents => {}
         }
     }
-    hits.workspace_max_scroll = metrics.max_offset_from_bottom;
-    hits.workspace_scroll_metrics = Some(metrics);
-    *state.workspace_scroll = metrics
-        .max_offset_from_bottom
-        .saturating_sub(metrics.offset_from_bottom);
-    let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
-    let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
-    let mut y = body.y;
-    for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
-        let Some(workspace) = snapshot.workspaces.get(entry.index) else {
-            continue;
-        };
-        let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
-        let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
-        let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
-        if y.saturating_add(row_height) > body.bottom() {
-            break;
-        }
-        let rect = Rect::new(body.x, y, content_width, row_height);
-        let selected = state.selected_workspace_id.is_some_and(|target| {
-            target.matches(state.active_endpoint_id, &workspace.workspace_id)
-        });
-        let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
-        if selected {
-            buffer.set_style(rect, Style::default().bg(palette.selection_bg));
-        } else if dragged {
-            buffer.set_style(rect, Style::default().bg(palette.surface1));
-        } else if workspace.focused {
-            buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-        }
-        render_workspace_rows(
-            buffer,
-            rect,
-            status,
-            config.status_indicators,
-            entry,
-            rows,
-            workspace.focused,
-            selected,
-            state.selected_workspace_id.is_some(),
-            dragged,
-            palette,
-        );
-        let group_toggle = render_parent_group_toggle(
-            buffer,
-            rect,
-            snapshot,
-            entry.index,
-            state.collapsed_groups,
-            palette,
-        );
-        hits.workspaces.push(WorkspaceHit {
-            rect,
-            endpoint_id: ClientEndpointId::Local,
-            workspace_id: workspace.workspace_id.clone(),
-            indented: entry.indented,
-            group_toggle,
-        });
-        let gap = entries
-            .get(entry_position + 1)
-            .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
-        y = y.saturating_add(row_height + gap);
-    }
 
-    if show_scrollbar {
-        let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
-        hits.workspace_scrollbar = track;
-        super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
-    }
-
-    if let Some(row) = state.workspace_drop_indicator_row.filter(|row| {
-        *row >= workspace_area.y.saturating_add(1)
-            && *row < workspace_area.bottom().saturating_sub(1)
-    }) {
-        put_text(
-            buffer,
-            body.x,
-            row,
-            body.width,
-            &"─".repeat(body.width as usize),
-            Style::default().fg(palette.accent),
-        );
-    }
-
-    let footer_y = workspace_area.bottom().saturating_sub(1);
-    if config.mouse_capture {
-        hits.new_workspace = Rect::new(
-            workspace_area.x,
-            footer_y,
-            5.min(workspace_area.width),
-            u16::from(workspace_area.height > 0),
-        );
+    if let Some(workspace_area) = spaces_area {
         put_text(
             buffer,
             workspace_area.x,
-            footer_y,
+            workspace_area.y,
             workspace_area.width,
-            " new",
-            Style::default().fg(palette.overlay0),
+            " spaces",
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::BOLD),
         );
-        let attention = super::super::global_menu::global_menu_attention(snapshot);
-        let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
-        hits.global_launcher = Rect::new(
-            workspace_area.right().saturating_sub(launcher_width),
-            footer_y,
-            launcher_width,
-            1,
+
+        let mut entries = workspace_entries(snapshot, state.collapsed_groups);
+        if !nested_workspace_ids.is_empty() {
+            entries.retain(|entry| {
+                !nested_workspace_ids
+                    .contains(&snapshot.workspaces[entry.index].workspace_id.as_str())
+            });
+        }
+        let body = Rect::new(
+            workspace_area.x,
+            workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
+            workspace_area.width,
+            workspace_area
+                .height
+                .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
         );
-        if attention {
-            let start_x = workspace_area.right().saturating_sub(6);
+        hits.workspace_body = body;
+        let row_heights = entries
+            .iter()
+            .map(|entry| {
+                snapshot
+                    .workspaces
+                    .get(entry.index)
+                    .map(|workspace| {
+                        workspace_rows(
+                            workspace,
+                            displayed_workspace_status(snapshot, workspace, state.collapsed_groups),
+                            entry.indented,
+                            &config.spaces,
+                        )
+                        .len()
+                        .max(1)
+                        .min(u16::MAX as usize) as u16
+                    })
+                    .unwrap_or(1)
+            })
+            .collect::<Vec<_>>();
+        let gaps = entries
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                entries
+                    .get(index + 1)
+                    .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
+            })
+            .collect::<Vec<_>>();
+        let mut metrics = super::scroll::list_scroll_metrics(
+            &row_heights,
+            &gaps,
+            body.height,
+            *state.workspace_scroll,
+        );
+        if !body.is_empty() && std::mem::take(state.reveal_focused_workspace) {
+            if let Some(target) = entries
+                .iter()
+                .position(|entry| snapshot.workspaces[entry.index].focused)
+            {
+                *state.workspace_scroll = super::scroll::list_scroll_start_to_reveal(
+                    &row_heights,
+                    &gaps,
+                    body.height,
+                    *state.workspace_scroll,
+                    target,
+                );
+                metrics = super::scroll::list_scroll_metrics(
+                    &row_heights,
+                    &gaps,
+                    body.height,
+                    *state.workspace_scroll,
+                );
+            }
+        }
+        hits.workspace_max_scroll = metrics.max_offset_from_bottom;
+        hits.workspace_scroll_metrics = Some(metrics);
+        *state.workspace_scroll = metrics
+            .max_offset_from_bottom
+            .saturating_sub(metrics.offset_from_bottom);
+        let show_scrollbar = metrics.max_offset_from_bottom > 0 && body.width > 1;
+        let content_width = body.width.saturating_sub(u16::from(show_scrollbar));
+        let mut y = body.y;
+        for (entry_position, entry) in entries.iter().enumerate().skip(*state.workspace_scroll) {
+            let Some(workspace) = snapshot.workspaces.get(entry.index) else {
+                continue;
+            };
+            let status = displayed_workspace_status(snapshot, workspace, state.collapsed_groups);
+            let rows = workspace_rows(workspace, status, entry.indented, &config.spaces);
+            let row_height = (rows.len().max(1).min(u16::MAX as usize) as u16).min(body.height);
+            if y.saturating_add(row_height) > body.bottom() {
+                break;
+            }
+            let rect = Rect::new(body.x, y, content_width, row_height);
+            let selected = state.selected_workspace_id.is_some_and(|target| {
+                target.matches(state.active_endpoint_id, &workspace.workspace_id)
+            });
+            let dragged = state.dragged_workspace_id == Some(workspace.workspace_id.as_str());
+            if selected {
+                buffer.set_style(rect, Style::default().bg(palette.selection_bg));
+            } else if dragged {
+                buffer.set_style(rect, Style::default().bg(palette.surface1));
+            } else if workspace.focused {
+                buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
+            }
+            render_workspace_rows(
+                buffer,
+                rect,
+                status,
+                config.status_indicators,
+                entry,
+                rows,
+                workspace.focused,
+                selected,
+                state.selected_workspace_id.is_some(),
+                dragged,
+                palette,
+            );
+            let group_toggle = render_parent_group_toggle(
+                buffer,
+                rect,
+                snapshot,
+                entry.index,
+                state.collapsed_groups,
+                palette,
+            );
+            hits.workspaces.push(WorkspaceHit {
+                rect,
+                endpoint_id: ClientEndpointId::Local,
+                workspace_id: workspace.workspace_id.clone(),
+                indented: entry.indented,
+                group_toggle,
+            });
+            let gap = entries
+                .get(entry_position + 1)
+                .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap);
+            y = y.saturating_add(row_height + gap);
+        }
+
+        if show_scrollbar {
+            let track = Rect::new(body.right().saturating_sub(1), body.y, 1, body.height);
+            hits.workspace_scrollbar = track;
+            super::scroll::render_list_scrollbar(buffer, track, metrics, palette);
+        }
+
+        if let Some(row) = state.workspace_drop_indicator_row.filter(|row| {
+            *row >= workspace_area.y.saturating_add(1)
+                && *row < workspace_area.bottom().saturating_sub(1)
+        }) {
             put_text(
                 buffer,
-                start_x,
+                body.x,
+                row,
+                body.width,
+                &"─".repeat(body.width as usize),
+                Style::default().fg(palette.accent),
+            );
+        }
+
+        let footer_y = workspace_area.bottom().saturating_sub(1);
+        if config.mouse_capture {
+            hits.new_workspace = Rect::new(
+                workspace_area.x,
                 footer_y,
-                2,
-                "● ",
-                Style::default()
-                    .fg(palette.accent)
-                    .add_modifier(Modifier::BOLD),
+                5.min(workspace_area.width),
+                u16::from(workspace_area.height > 0),
             );
             put_text(
                 buffer,
-                start_x.saturating_add(2),
+                workspace_area.x,
                 footer_y,
-                4,
-                "menu",
+                workspace_area.width,
+                " new",
                 Style::default().fg(palette.overlay0),
             );
-        } else {
-            put_right_text(
-                buffer,
-                workspace_area,
+            let attention = super::super::global_menu::global_menu_attention(snapshot);
+            let launcher_width = if attention { 8 } else { 6 }.min(workspace_area.width);
+            hits.global_launcher = Rect::new(
+                workspace_area.right().saturating_sub(launcher_width),
                 footer_y,
-                "menu",
-                Style::default().fg(palette.overlay0),
+                launcher_width,
+                1,
             );
+            if attention {
+                let start_x = workspace_area.right().saturating_sub(6);
+                put_text(
+                    buffer,
+                    start_x,
+                    footer_y,
+                    2,
+                    "● ",
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                );
+                put_text(
+                    buffer,
+                    start_x.saturating_add(2),
+                    footer_y,
+                    4,
+                    "menu",
+                    Style::default().fg(palette.overlay0),
+                );
+            } else {
+                put_right_text(
+                    buffer,
+                    workspace_area,
+                    footer_y,
+                    "menu",
+                    Style::default().fg(palette.overlay0),
+                );
+            }
         }
     }
 
     super::render_agent_panel(
         buffer,
-        detail_area,
+        agents_area,
         snapshot,
         config,
         state.agent_scroll,

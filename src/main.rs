@@ -341,6 +341,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"
 
+# Sidebar sections and their order. Omitted names are hidden; listed ones share
+# the height in list order. "inbox" only appears when a work-item source is
+# configured.
+# [ui.sidebar]
+# sections = ["inbox", "spaces", "agents"]
+
 # Expanded agent rows. Built-ins are state_icon, state_text, machine, workspace, tab,
 # pane, agent, terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.

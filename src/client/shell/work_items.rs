@@ -177,6 +177,7 @@ pub(super) fn render_items_section<'a>(
     view: &ClientWorkItems,
     endpoint_id: &ClientEndpointId,
     hits: &mut ShellHitMap,
+    has_next_section: bool,
 ) -> (u16, Vec<&'a str>) {
     let mut nested_workspace_ids = Vec::new();
     if area.is_empty() {
@@ -189,8 +190,13 @@ pub(super) fn render_items_section<'a>(
         .filter(|item| !is_hidden(item))
         .collect();
     let hidden = projection.items.len() - visible.len();
-    // Expanded, the spaces list keeps its header and one row.
-    let budget = if view.expanded {
+    // With a following section (normally spaces), keep this to a share of the
+    // zone instead of consuming all of it; expanded keeps that follower to a
+    // header and one row. Alone, or last, there is nothing else to save room
+    // for, so use the full zone.
+    let budget = if !has_next_section {
+        area.height
+    } else if view.expanded {
         area.height.saturating_sub(3)
     } else {
         area.height / 2
