@@ -353,6 +353,28 @@ fn spinner_ticks_only_while_an_item_awaits_the_source() {
     assert!(state.tick_work_items(now));
 }
 
+#[test]
+fn emptying_the_inbox_sparkles_briefly_then_settles_on_all_clear() {
+    // An inbox that starts out empty just says so.
+    let mut state = shell_with(Vec::new());
+    let text = screen_text(&mut state);
+    assert!(text.contains("all clear"), "{text}");
+    assert!(!text.contains("inbox zero"), "{text}");
+
+    let mut state = shell_with(vec![item("7")]);
+    state.set_endpoint_work_items(&ClientEndpointId::Local, projection(2, Vec::new()));
+    let text = screen_text(&mut state);
+    assert!(text.contains("inbox zero"), "{text}");
+
+    // The sparkle animates on the spinner clock and ends on its own.
+    let now = std::time::Instant::now();
+    assert!(state.tick_work_items(now));
+    assert!(state.tick_work_items(now + std::time::Duration::from_secs(5)));
+    let text = screen_text(&mut state);
+    assert!(text.contains("all clear"), "{text}");
+    assert!(!state.tick_work_items(now + std::time::Duration::from_secs(6)));
+}
+
 fn provisioning_item(workspace_id: Option<&str>) -> WorkItemInfo {
     let mut provisioning = item("7");
     provisioning.seen = true;
