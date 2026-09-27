@@ -6,7 +6,7 @@ use crate::api::schema::{
 };
 use crate::protocol::work_items::EndpointWorkItemsProjection;
 
-fn item(id: &str) -> WorkItemInfo {
+pub(super) fn item(id: &str) -> WorkItemInfo {
     WorkItemInfo {
         item_id: format!("github:o/r#{id}"),
         source_id: "github".into(),
@@ -47,7 +47,7 @@ fn item(id: &str) -> WorkItemInfo {
     }
 }
 
-fn projection(revision: u64, items: Vec<WorkItemInfo>) -> EndpointWorkItemsProjection {
+pub(super) fn projection(revision: u64, items: Vec<WorkItemInfo>) -> EndpointWorkItemsProjection {
     EndpointWorkItemsProjection {
         boot_id: "boot-1".into(),
         revision,
@@ -60,7 +60,7 @@ fn projection(revision: u64, items: Vec<WorkItemInfo>) -> EndpointWorkItemsProje
     }
 }
 
-fn two_workspace_snapshot() -> ClientShellSnapshot {
+pub(super) fn two_workspace_snapshot() -> ClientShellSnapshot {
     let mut snapshot = snapshot();
     let mut second = snapshot.workspaces[0].clone();
     second.workspace_id = "ws_2".into();

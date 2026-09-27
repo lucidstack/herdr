@@ -1072,6 +1072,17 @@
           ]
         },
         {
+          "key": "ui.sidebar.sections",
+          "type": "array",
+          "default": "[\"inbox\", \"spaces\", \"agents\"]",
+          "description": "Which sidebar sections appear and in what order. Omitted names are hidden; listed ones share the height in list order. \"inbox\" only appears when a work-item source is configured.",
+          "values": [
+            "inbox",
+            "spaces",
+            "agents"
+          ]
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",

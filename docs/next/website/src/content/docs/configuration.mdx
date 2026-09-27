@@ -348,6 +348,17 @@ status_indicators = "symbols"
 
 The symbols are static, so this option does not enable spinner animation.
 
+### Sidebar sections
+
+The expanded desktop sidebar shows three sections: `inbox` (the active work-item source's pending items), `spaces` (the workspace list), and `agents` (the agent panel). Choose which appear and in what order:
+
+```toml
+[ui.sidebar]
+sections = ["inbox", "spaces", "agents"]
+```
+
+This is the default, matching today's layout. Omit a name to hide that section, for example `sections = ["inbox", "agents"]` to drop the spaces list in a work context and let the inbox use the height instead. `inbox` still only appears when a work-item source is configured, regardless of whether it is listed. Sections not linked to an inbox item stay reachable through the agent panel, the session navigator, and the next/previous workspace keys. Listed sections share the height in list order: the sidebar splits into an inbox/spaces group and an agent group (whichever comes first in the list renders on top, with a draggable divider when both are present), and within the inbox/spaces group each section but the last takes a bounded share, with the last section filling the rest. An unrecognized name is a configuration error.
+
 ### Sidebar row layouts
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
