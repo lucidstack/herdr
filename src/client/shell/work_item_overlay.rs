@@ -57,6 +57,15 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
             &format!(" {notice}"),
             Style::default().fg(p.peach).bg(p.panel_bg),
         );
+    } else if let Some(reminder) = &item.start_reminder {
+        put_text(
+            b,
+            i.x,
+            i.y + 2,
+            i.width,
+            &format!(" {reminder}"),
+            Style::default().fg(p.yellow).bg(p.panel_bg),
+        );
     } else if let Some(summary) = &item.summary {
         put_text(
             b,

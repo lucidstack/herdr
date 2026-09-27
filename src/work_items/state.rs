@@ -52,6 +52,9 @@ pub(crate) struct WorkItem {
     /// last text sent to it; never touched or removed by polling.
     #[serde(default)]
     pub is_pick_next: bool,
+    /// "Don't remind me for this ticket": no start reminder, whatever the tracker says.
+    #[serde(default)]
+    pub start_reminder_muted: bool,
     #[serde(skip)]
     pub prepare_in_flight: bool,
     #[serde(skip)]
@@ -65,6 +68,10 @@ pub(crate) struct WorkItem {
     /// Why the last such choice failed.
     #[serde(skip)]
     pub action_error: Option<String>,
+    /// The phase before a `Perform` choice started, restored once it finishes unless the
+    /// item is leaving (a merge keeps waiting for the source to drop it).
+    #[serde(skip)]
+    pub phase_before_action: Option<WorkItemPhase>,
 }
 
 /// External id of a provider's "Pick next" discovery row.
@@ -103,6 +110,8 @@ impl WorkItem {
             waiting: false,
             manual: false,
             is_pick_next: false,
+            start_reminder_muted: false,
+            phase_before_action: None,
         }
     }
 
@@ -136,6 +145,8 @@ impl WorkItem {
             waiting: false,
             manual: false,
             is_pick_next: true,
+            start_reminder_muted: false,
+            phase_before_action: None,
         }
     }
 
@@ -150,7 +161,8 @@ impl WorkItem {
         }
     }
 
-    pub(crate) fn info(&self, choices: ItemChoices) -> WorkItemInfo {
+    /// `reminder` is the start reminder line, already gated by workspace and mute.
+    pub(crate) fn info(&self, choices: ItemChoices, reminder: Option<String>) -> WorkItemInfo {
         WorkItemInfo {
             item_id: self.key.clone(),
             source_id: self.source_id.clone(),
@@ -174,6 +186,7 @@ impl WorkItem {
             default_choice_id: choices.default_choice_id,
             provisioning: self.provisioning.clone(),
             is_pick_next: self.is_pick_next,
+            start_reminder: reminder,
         }
     }
 

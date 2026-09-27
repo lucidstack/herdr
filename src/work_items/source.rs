@@ -119,6 +119,24 @@ pub(crate) struct ProvisionPlan {
     pub delete_branch: bool,
 }
 
+/// Choice that brings the tracker up to date with work already started, e.g. assigning
+/// the ticket and moving it to In Progress. Its action is `Perform`.
+pub(crate) const START_WORK_CHOICE_ID: &str = "start_work";
+/// Choice that stops the start reminder for one item. Handled by Herdr, not the source.
+pub(crate) const MUTE_START_REMINDER_CHOICE_ID: &str = "mute_start_reminder";
+
+/// The tracker has not caught up with work you started: the ticket is not assigned to
+/// you, or still in a to-do status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StartReminder {
+    /// One line for the item dialog, e.g. "You're working on this, but it isn't assigned
+    /// to you and is still To Do".
+    pub message: String,
+    /// The one-step fix, whose id is `START_WORK_CHOICE_ID`; disabled with a reason when
+    /// the source cannot carry it out.
+    pub choice: crate::api::schema::WorkItemChoiceInfo,
+}
+
 /// An external system that produces work items.
 pub(crate) trait WorkItemSource: Send + Sync {
     /// Stable identifier used as the item-key prefix, e.g. "github".
@@ -161,6 +179,11 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// and returns a one-line result for the user.
     fn perform(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {
         Err(format!("choice {choice_id} cannot be carried out here"))
+    }
+    /// Pure: whether the tracker lags behind work started on `item`. Only asked for items
+    /// with a workspace whose reminder is not muted.
+    fn start_reminder(&self, _item: &WorkItem) -> Option<StartReminder> {
+        None
     }
     /// Pure: text sent to the agent in the item's workspace for a choice whose action is
     /// `BriefAgent`.

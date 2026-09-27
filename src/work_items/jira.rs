@@ -19,8 +19,8 @@ use super::github::{one_line, slug, truncate_chars};
 use super::process::{failure_detail, run_with_input, run_with_timeout};
 use super::provision::find_existing_work;
 use super::source::{
-    ItemChoices, PreparedItem, ProvisionPlan, SourceItem, TicketDetail, WorkItemSource,
-    WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+    ItemChoices, PreparedItem, ProvisionPlan, SourceItem, StartReminder, TicketDetail,
+    WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec, START_WORK_CHOICE_ID,
 };
 use super::state::WorkItem;
 
@@ -43,6 +43,10 @@ pub(crate) struct JiraSource {
     build_error: Option<String>,
     /// API base that accepted the token: the site or the gateway.
     api_base: Mutex<Option<String>>,
+    /// The token owner's account id, to tell whether a ticket is assigned to you.
+    me: Mutex<Option<String>>,
+    /// Jira refused a change (assign or transition): the token is read-only.
+    write_denied: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +100,21 @@ struct StatusCategory {
 struct Person {
     #[serde(rename = "displayName", default)]
     display_name: String,
+    #[serde(rename = "accountId", default)]
+    account_id: String,
+}
+
+#[derive(Deserialize)]
+struct TransitionsResponse {
+    #[serde(default)]
+    transitions: Vec<RestTransition>,
+}
+
+#[derive(Deserialize)]
+struct RestTransition {
+    id: String,
+    #[serde(default)]
+    to: Option<StatusField>,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +188,23 @@ pub(crate) struct JiraDetail {
     pub existing_branch: Option<String>,
     #[serde(default)]
     pub existing_worktree: Option<String>,
+    /// Status category key: `new` (to do), `indeterminate` (in progress) or `done`. Empty
+    /// for details stored before it was recorded, which never remind.
+    #[serde(default)]
+    pub status_category: String,
+    /// Whether the issue is assigned to the token's owner; unknown for older details.
+    #[serde(default)]
+    pub assigned_to_me: Option<bool>,
+    /// Transitions into an in-progress status, fetched while the issue is still to do.
+    #[serde(default)]
+    pub in_progress_transitions: Vec<JiraTransition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct JiraTransition {
+    pub id: String,
+    /// Target status name, e.g. "In Progress".
+    pub to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,10 +289,84 @@ fn project_key(issue_key: &str) -> &str {
         .map_or(issue_key, |(project, _)| project)
 }
 
+const WRITE_SCOPE_HINT: &str =
+    "Jira refused the change; the API token needs write:jira-work to assign and start issues";
+
+/// What starting work on an issue changes in Jira.
+#[derive(Debug, PartialEq, Eq)]
+struct StartPlan {
+    assign: bool,
+    transition: Option<JiraTransition>,
+}
+
+/// The changes that bring `detail` up to date with work you started, or why they cannot
+/// be made from Herdr.
+fn start_plan(detail: &JiraDetail) -> Result<StartPlan, String> {
+    let transition = if detail.status_category == "new" {
+        match detail.in_progress_transitions.as_slice() {
+            [transition] => Some(transition.clone()),
+            [] => {
+                return Err("No transition leads to an in-progress status; move it in Jira".into())
+            }
+            several => {
+                return Err(format!(
+                    "{} transitions lead to an in-progress status; move it in Jira",
+                    several.len()
+                ))
+            }
+        }
+    } else {
+        None
+    };
+    Ok(StartPlan {
+        assign: detail.assigned_to_me == Some(false),
+        transition,
+    })
+}
+
 fn item_detail(item: &WorkItem) -> Option<JiraDetail> {
     item.detail
         .clone()
         .and_then(|value| serde_json::from_value(value).ok())
+}
+
+/// The reminder for an issue you work on while Jira lags behind: not assigned to you,
+/// or still in a to-do status.
+fn start_reminder_for(detail: &JiraDetail, write_denied: bool) -> Option<StartReminder> {
+    let unassigned = detail.assigned_to_me == Some(false);
+    let to_do = detail.status_category == "new";
+    let status = &detail.status;
+    let (message, label) = match (unassigned, to_do) {
+        (false, false) => return None,
+        (true, true) => (
+            format!("You're working on this, but it isn't assigned to you and is still {status}"),
+            "Assign to me and move to In Progress",
+        ),
+        (true, false) => (
+            "You're working on this, but it isn't assigned to you".to_string(),
+            "Assign to me",
+        ),
+        (false, true) => (
+            format!("You're working on this, but it is still {status}"),
+            "Move to In Progress",
+        ),
+    };
+    let disabled_reason = if write_denied {
+        Some(WRITE_SCOPE_HINT.to_string())
+    } else {
+        start_plan(detail).err()
+    };
+    Some(StartReminder {
+        message,
+        choice: WorkItemChoiceInfo {
+            choice_id: START_WORK_CHOICE_ID.into(),
+            label: label.into(),
+            description: Some("Updates the issue in Jira".into()),
+            action: WorkItemChoiceAction::Perform,
+            disabled_reason,
+            confirm: None,
+        },
+    })
 }
 
 impl JiraSource {
@@ -273,7 +383,90 @@ impl JiraSource {
             fallback: BranchWorkflowConfig::default(),
             build_error,
             api_base: Mutex::new(None),
+            me: Mutex::new(None),
+            write_denied: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// The token owner's account id, asked once.
+    fn my_account_id(&self) -> Result<String, String> {
+        if let Some(me) = self.me.lock().ok().and_then(|me| me.clone()) {
+            return Ok(me);
+        }
+        let me = serde_json::from_slice::<Person>(&self.api("GET", "myself", None)?)
+            .map_err(|err| format!("unexpected Jira response: {err}"))?
+            .account_id;
+        if me.is_empty() {
+            return Err("Jira did not say who the token belongs to".into());
+        }
+        if let Ok(mut cached) = self.me.lock() {
+            *cached = Some(me.clone());
+        }
+        Ok(me)
+    }
+
+    /// Transitions of `key` into an in-progress status.
+    fn in_progress_transitions(&self, key: &str) -> Result<Vec<JiraTransition>, String> {
+        let response: TransitionsResponse =
+            serde_json::from_slice(&self.api("GET", &format!("issue/{key}/transitions"), None)?)
+                .map_err(|err| format!("unexpected Jira response: {err}"))?;
+        Ok(response
+            .transitions
+            .into_iter()
+            .filter_map(|transition| {
+                let to = transition.to?;
+                to.status_category
+                    .as_ref()
+                    .is_some_and(|category| category.key == "indeterminate")
+                    .then_some(JiraTransition {
+                        id: transition.id,
+                        to: to.name,
+                    })
+            })
+            .collect())
+    }
+
+    /// A change to an issue. A refusal marks the token read-only, which disables the
+    /// start reminder's fix until Herdr restarts with another token.
+    fn write(&self, method: &str, path: &str, body: &str) -> Result<(), String> {
+        let (status, response) = self.api_with_status(method, path, Some(body))?;
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        if matches!(status, 401 | 403) {
+            self.write_denied
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(WRITE_SCOPE_HINT.into());
+        }
+        Err(http_error(status, &response))
+    }
+
+    /// Assigns the issue to you and moves it to in progress, as far as each is needed.
+    fn start_work(&self, item: &WorkItem) -> Result<String, String> {
+        let detail = item_detail(item).ok_or("the issue details are not loaded yet")?;
+        let plan = start_plan(&detail)?;
+        let key = &item.external_id;
+        if plan.assign {
+            let me = self.my_account_id()?;
+            self.write(
+                "PUT",
+                &format!("issue/{key}/assignee"),
+                &serde_json::json!({ "accountId": me }).to_string(),
+            )?;
+        }
+        if let Some(transition) = &plan.transition {
+            self.write(
+                "POST",
+                &format!("issue/{key}/transitions"),
+                &serde_json::json!({ "transition": { "id": transition.id } }).to_string(),
+            )?;
+        }
+        Ok(match (plan.assign, &plan.transition) {
+            (true, Some(transition)) => format!("{key} is yours and {}", transition.to),
+            (true, None) => format!("{key} is assigned to you"),
+            (false, Some(transition)) => format!("{key} moved to {}", transition.to),
+            (false, None) => format!("{key} is already up to date"),
+        })
     }
 
     fn site(&self) -> &str {
@@ -409,7 +602,9 @@ impl JiraSource {
         }
         Err(match last_status {
             401 => "Jira refused the API token; check work_items.jira.email and the token".into(),
-            403 => "the Jira API token lacks permission (read:jira-user, read:jira-work)".into(),
+            403 => "the Jira API token lacks permission (read:jira-user, read:jira-work; \
+                    write:jira-work to assign and start issues)"
+                .into(),
             status => format!("Jira returned HTTP {status}"),
         })
     }
@@ -727,7 +922,7 @@ impl WorkItemSource for JiraSource {
     }
 
     fn prepare(&self, item: &SourceItem) -> PreparedItem {
-        let fields = "description,issuetype,priority,status,labels,comment";
+        let fields = "description,issuetype,priority,status,labels,comment,assignee";
         let issue = self
             .api(
                 "GET",
@@ -755,6 +950,19 @@ impl WorkItemSource for JiraSource {
             .as_ref()
             .and_then(|status| status.status_category.as_ref())
             .is_some_and(|category| category.key.eq_ignore_ascii_case("done"));
+        let status_category = fields
+            .status
+            .as_ref()
+            .and_then(|status| status.status_category.as_ref())
+            .map(|category| category.key.clone())
+            .unwrap_or_default();
+        // Unknown when Jira will not say who you are: then no reminder, rather than a wrong one.
+        let assigned_to_me = self.my_account_id().ok().map(|me| {
+            fields
+                .assignee
+                .as_ref()
+                .is_some_and(|assignee| assignee.account_id == me)
+        });
         let mut error = None;
         let project = self.project(project_key(&item.external_id));
         let base_branch = match project {
@@ -763,6 +971,16 @@ impl WorkItemSource for JiraSource {
                 String::new()
             }),
             None => String::new(),
+        };
+        // Only an issue still to do needs a transition to start it.
+        let in_progress_transitions = if status_category == "new" {
+            self.in_progress_transitions(&item.external_id)
+                .unwrap_or_else(|err| {
+                    error.get_or_insert(format!("transitions unavailable: {err}"));
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
         };
         // Shown in the dialog; the worktree worker looks again when a choice is made.
         let (existing_branch, existing_worktree) = project
@@ -807,6 +1025,9 @@ impl WorkItemSource for JiraSource {
             base_branch,
             existing_branch,
             existing_worktree,
+            status_category,
+            assigned_to_me,
+            in_progress_transitions,
         };
         let summary = [
             detail.issue_type.clone(),
@@ -1075,6 +1296,20 @@ impl WorkItemSource for JiraSource {
         }))
     }
 
+    fn start_reminder(&self, item: &WorkItem) -> Option<StartReminder> {
+        start_reminder_for(
+            &item_detail(item)?,
+            self.write_denied.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn perform(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        match choice_id {
+            START_WORK_CHOICE_ID => self.start_work(item),
+            _ => Err(format!("choice {choice_id} cannot be carried out here")),
+        }
+    }
+
     fn pick_next_plan(
         &self,
         context: &str,
@@ -1163,6 +1398,8 @@ mod tests {
             waiting: false,
             manual: false,
             is_pick_next: false,
+            start_reminder_muted: false,
+            phase_before_action: None,
         }
     }
 
@@ -1180,7 +1417,100 @@ mod tests {
             base_branch: "master".into(),
             existing_branch: None,
             existing_worktree: None,
+            status_category: "indeterminate".into(),
+            assigned_to_me: Some(true),
+            in_progress_transitions: Vec::new(),
         }
+    }
+
+    fn to_do(assigned_to_me: bool, transitions: &[&str]) -> JiraDetail {
+        JiraDetail {
+            status: "To Do".into(),
+            status_category: "new".into(),
+            assigned_to_me: Some(assigned_to_me),
+            in_progress_transitions: transitions
+                .iter()
+                .enumerate()
+                .map(|(index, to)| JiraTransition {
+                    id: (index + 11).to_string(),
+                    to: (*to).into(),
+                })
+                .collect(),
+            ..detail()
+        }
+    }
+
+    #[test]
+    fn up_to_date_issue_has_no_start_reminder() {
+        assert_eq!(start_reminder_for(&detail(), false), None);
+        // Details stored before assignment was recorded never remind.
+        let unknown = JiraDetail {
+            assigned_to_me: None,
+            ..detail()
+        };
+        assert_eq!(start_reminder_for(&unknown, false), None);
+    }
+
+    #[test]
+    fn unassigned_to_do_issue_offers_assigning_and_starting_in_one_step() {
+        let reminder =
+            start_reminder_for(&to_do(false, &["In Progress"]), false).expect("reminder");
+        assert!(reminder.message.contains("isn't assigned to you"));
+        assert!(reminder.message.contains("To Do"));
+        assert_eq!(
+            reminder.choice.label,
+            "Assign to me and move to In Progress"
+        );
+        assert_eq!(reminder.choice.disabled_reason, None);
+        assert_eq!(
+            start_plan(&to_do(false, &["In Progress"])),
+            Ok(StartPlan {
+                assign: true,
+                transition: Some(JiraTransition {
+                    id: "11".into(),
+                    to: "In Progress".into(),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn start_reminder_label_names_only_the_missing_step() {
+        let move_only =
+            start_reminder_for(&to_do(true, &["In Progress"]), false).expect("reminder");
+        assert_eq!(move_only.choice.label, "Move to In Progress");
+        let assign_only = JiraDetail {
+            assigned_to_me: Some(false),
+            ..detail()
+        };
+        let reminder = start_reminder_for(&assign_only, false).expect("reminder");
+        assert_eq!(reminder.choice.label, "Assign to me");
+        assert_eq!(
+            start_plan(&assign_only),
+            Ok(StartPlan {
+                assign: true,
+                transition: None,
+            })
+        );
+    }
+
+    #[test]
+    fn start_fix_is_disabled_without_exactly_one_in_progress_transition() {
+        for transitions in [&[][..], &["In Progress", "In Review"][..]] {
+            let reminder =
+                start_reminder_for(&to_do(true, transitions), false).expect("still reminds");
+            assert!(reminder.choice.disabled_reason.is_some(), "{transitions:?}");
+        }
+    }
+
+    #[test]
+    fn read_only_token_disables_the_start_fix_with_the_scope_it_needs() {
+        let reminder = start_reminder_for(&to_do(false, &["In Progress"]), true).expect("reminder");
+        assert!(reminder
+            .choice
+            .disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("write:jira-work")));
     }
 
     #[test]
