@@ -378,6 +378,8 @@ sections = ["inbox", "spaces", "agents"]
 
 This is the default, matching today's layout. Omit a name to hide that section, for example `sections = ["inbox", "agents"]` to drop the spaces list in a work context and let the inbox use the height instead. `inbox` still only appears when a work-item source is configured, regardless of whether it is listed. Sections not linked to an inbox item stay reachable through the agent panel, the session navigator, and the next/previous workspace keys. Listed sections share the height in list order: the sidebar splits into an inbox/spaces group and an agent group (whichever comes first in the list renders on top, with a draggable divider when both are present), and within the inbox/spaces group each section but the last takes a bounded share, with the last section filling the rest. An unrecognized name is a configuration error.
 
+The next/previous workspace keys follow the sidebar top to bottom: the inbox's workspaces (tickets, then repositories, then Pick next) and the spaces list, in section order. With the spaces list hidden, the remaining workspaces follow the inbox.
+
 ### Sidebar row layouts
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:

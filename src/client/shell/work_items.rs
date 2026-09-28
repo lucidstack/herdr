@@ -172,6 +172,43 @@ pub(super) fn active_projection<'a>(
     })
 }
 
+/// Workspaces the inbox shows, top to bottom whatever its scroll, as snapshot indices: each
+/// listed ticket's, each repository's home not already under a ticket, then open "Pick next"
+/// workspaces. Keyboard workspace cycling follows this order.
+pub(super) fn inbox_workspace_order(
+    projection: &EndpointWorkItemsProjection,
+    snapshot: &ClientShellSnapshot,
+) -> Vec<usize> {
+    let index_of = |workspace_id: &str| {
+        snapshot
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.workspace_id == workspace_id)
+    };
+    let item_workspace_ids: Vec<&str> = projection
+        .items
+        .iter()
+        .filter(|item| is_listed(item))
+        .filter_map(|item| item.workspace_id.as_deref())
+        .collect();
+    let mut order: Vec<usize> = Vec::new();
+    let tickets = item_workspace_ids.iter().filter_map(|id| index_of(id));
+    let homes = repository_homes(projection, snapshot, &item_workspace_ids)
+        .into_iter()
+        .filter_map(|(_, home)| home.map(|(index, _)| index));
+    let discovery = projection
+        .items
+        .iter()
+        .filter(|item| item.is_pick_next)
+        .filter_map(|item| item.workspace_id.as_deref().and_then(index_of));
+    for index in tickets.chain(homes).chain(discovery) {
+        if !order.contains(&index) {
+            order.push(index);
+        }
+    }
+    order
+}
+
 fn provisioning_running(item: &WorkItemInfo) -> bool {
     item.provisioning
         .as_ref()

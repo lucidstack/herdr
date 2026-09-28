@@ -942,25 +942,21 @@ impl ClientShellState {
                 Some(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }))
             }
             KeybindAction::PreviousWorkspace | KeybindAction::NextWorkspace => {
-                let entries = self.navigation_workspace_entries(snapshot);
-                if entries.is_empty() {
+                let order = self.workspace_cycle_order(snapshot);
+                if order.is_empty() {
                     return None;
                 }
-                let current = entries
+                let current = order
                     .iter()
-                    .position(|entry| {
-                        snapshot.workspaces[entry.index].workspace_id == focused_workspace
-                    })
+                    .position(|&index| snapshot.workspaces[index].workspace_id == focused_workspace)
                     .unwrap_or(0);
                 let delta = if action == KeybindAction::PreviousWorkspace {
                     -1
                 } else {
                     1
                 };
-                let next = (current as isize + delta).rem_euclid(entries.len() as isize) as usize;
-                let workspace_id = snapshot.workspaces[entries[next].index]
-                    .workspace_id
-                    .clone();
+                let next = (current as isize + delta).rem_euclid(order.len() as isize) as usize;
+                let workspace_id = snapshot.workspaces[order[next]].workspace_id.clone();
                 self.reveal_workspace(&workspace_id);
                 Some(Method::WorkspaceFocus(WorkspaceTarget { workspace_id }))
             }

@@ -1229,6 +1229,44 @@ impl ClientShellState {
         }
     }
 
+    /// Workspace indices in the order the sidebar shows them, for previous/next workspace:
+    /// the inbox's workspaces and the spaces list, in section order. With the spaces list
+    /// hidden, the workspaces the inbox does not show still follow it so they stay reachable.
+    pub(super) fn workspace_cycle_order(&self, snapshot: &ClientShellSnapshot) -> Vec<usize> {
+        let mut spaces: Vec<usize> = self
+            .navigation_workspace_entries(snapshot)
+            .into_iter()
+            .map(|entry| entry.index)
+            .collect();
+        if self.mobile_layout_active() {
+            return spaces;
+        }
+        let sections = &self.config.sections;
+        let position = |wanted| sections.iter().position(|section| *section == wanted);
+        let Some(inbox_position) = position(crate::config::SidebarSection::Inbox) else {
+            return spaces;
+        };
+        let Some(projection) = super::work_items::active_projection(
+            &self.work_items,
+            &self.active_endpoint_id,
+            snapshot,
+        ) else {
+            return spaces;
+        };
+        let mut inbox = super::work_items::inbox_workspace_order(projection, snapshot);
+        spaces.retain(|index| !inbox.contains(index));
+        match position(crate::config::SidebarSection::Spaces) {
+            Some(spaces_position) if spaces_position < inbox_position => {
+                spaces.append(&mut inbox);
+                spaces
+            }
+            _ => {
+                inbox.append(&mut spaces);
+                inbox
+            }
+        }
+    }
+
     pub(super) fn reveal_workspace(&mut self, workspace_id: &str) {
         if self
             .hits

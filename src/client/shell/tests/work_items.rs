@@ -122,6 +122,42 @@ fn sidebar_has_no_inbox_without_a_projection() {
 }
 
 #[test]
+fn next_workspace_follows_the_inbox_order_before_the_spaces_list() {
+    // Spaces list order is ws_1, ws_2, ws_3; the inbox lists ws_3's ticket above ws_2's.
+    let mut snapshot = two_workspace_snapshot();
+    let mut third = snapshot.workspaces[1].clone();
+    third.workspace_id = "ws_3".into();
+    third.number = 3;
+    third.label = "third-space".into();
+    snapshot.workspaces.push(third);
+    let mut first_ticket = item("7");
+    first_ticket.workspace_id = Some("ws_3".into());
+    let mut second_ticket = item("8");
+    second_ticket.workspace_id = Some("ws_2".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(snapshot));
+    state.set_endpoint_work_items(
+        &ClientEndpointId::Local,
+        projection(1, vec![first_ticket, second_ticket]),
+    );
+
+    // ws_1 is focused and sits last, below the inbox: next wraps to the top ticket.
+    let mut next = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::NextWorkspace),
+        &mut next,
+    );
+    assert!(
+        matches!(
+            endpoint_methods(&next)[..],
+            [Method::WorkspaceFocus(target)] if target.workspace_id == "ws_3"
+        ),
+        "{:?}",
+        endpoint_methods(&next)
+    );
+}
+
+#[test]
 fn unseen_item_renders_in_the_inbox() {
     let mut state = shell_with(vec![item("7")]);
     let text = screen_text(&mut state);
