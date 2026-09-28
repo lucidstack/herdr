@@ -69,6 +69,16 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+/// The transcript file an official integration reported alongside a session id. A session
+/// reference that is already a path names the transcript itself, so it needs none.
+pub fn transcript_path_from_report(
+    session_ref: Option<&AgentSessionRef>,
+    agent_session_path: Option<String>,
+) -> Option<String> {
+    session_ref.filter(|session_ref| session_ref.kind == AgentSessionRefKind::Id)?;
+    agent_session_path.filter(|path| valid_session_path(path))
+}
+
 pub fn persisted_session_from_launch_args(
     agent: crate::detect::Agent,
     args: &[String],

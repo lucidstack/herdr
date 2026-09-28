@@ -1549,26 +1549,32 @@ impl App {
         id: String,
         params: PaneReportAgentParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path.clone(),
+        );
+        let transcript_path = crate::agent_resume::transcript_path_from_report(
+            session_ref.as_ref(),
+            params.agent_session_path,
+        );
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+            session_ref: session_ref.clone(),
             source: params.source,
             agent_label,
             state: detect_state_from_api(params.state),
             message: params.message,
             seq: params.seq,
         });
+        self.record_agent_transcript(ws_idx, pane_id, session_ref, transcript_path);
 
         encode_success(id, ResponseResult::Ok {})
     }
@@ -1578,20 +1584,25 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        let session_ref = crate::agent_resume::session_ref_from_report(
+            &params.source,
+            &agent_label,
+            params.agent_session_id,
+            params.agent_session_path.clone(),
+        );
+        let transcript_path = crate::agent_resume::transcript_path_from_report(
+            session_ref.as_ref(),
+            params.agent_session_path,
+        );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
-                &params.source,
-                &agent_label,
-                params.agent_session_id,
-                params.agent_session_path,
-            ),
+            session_ref: session_ref.clone(),
             source: params.source,
             agent_label,
             seq: params.seq,
@@ -1599,8 +1610,34 @@ impl App {
                 params.session_start_source,
             ),
         });
+        self.record_agent_transcript(ws_idx, pane_id, session_ref, transcript_path);
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    /// Remembers the transcript file a hook reported with its session, once the report has
+    /// been applied, so it only attaches to the session the terminal actually adopted.
+    fn record_agent_transcript(
+        &mut self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        transcript_path: Option<String>,
+    ) {
+        let (Some(session_ref), Some(path)) = (session_ref, transcript_path) else {
+            return;
+        };
+        let Some(terminal_id) = self.state.terminal_id_for_pane(ws_idx, pane_id) else {
+            return;
+        };
+        let recorded = self
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .is_some_and(|terminal| terminal.record_agent_transcript(&session_ref, path));
+        if recorded {
+            self.state.mark_session_dirty();
+        }
     }
 
     pub(super) fn handle_pane_report_metadata(
@@ -4309,6 +4346,66 @@ mod tests {
             .attached_terminal_id
             .clone();
         assert!(app.state.terminals[&terminal_id].agent_metadata.is_empty());
+    }
+
+    #[test]
+    fn claude_session_exposes_its_reported_transcript_until_a_new_session_replaces_it() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let transcript = |name: &str| {
+            std::env::temp_dir()
+                .join(format!("{name}.jsonl"))
+                .display()
+                .to_string()
+        };
+
+        let session_of = |app: &mut crate::app::App, seq, session: &str, reason: &str| {
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "session".into(),
+                method: crate::api::schema::Method::PaneReportAgentSession(
+                    PaneReportAgentSessionParams {
+                        pane_id: pane_id.clone(),
+                        source: "herdr:claude".into(),
+                        agent: "claude".into(),
+                        seq: Some(seq),
+                        agent_session_id: Some(session.into()),
+                        agent_session_path: Some(transcript(session)),
+                        session_start_source: Some(reason.into()),
+                    },
+                ),
+            });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(success.result, ResponseResult::Ok {});
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: "get".into(),
+                method: crate::api::schema::Method::PaneGet(PaneTarget {
+                    pane_id: pane_id.clone(),
+                }),
+            });
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::PaneInfo { pane } = success.result else {
+                panic!("expected pane info");
+            };
+            pane.agent_session.unwrap()
+        };
+
+        let first = session_of(&mut app, 1, "first-session", "startup");
+        assert_eq!(first.value, "first-session");
+        assert_eq!(first.transcript_path, Some(transcript("first-session")));
+
+        let second = session_of(&mut app, 2, "second-session", "clear");
+        assert_eq!(second.value, "second-session");
+        assert_eq!(second.transcript_path, Some(transcript("second-session")));
     }
 
     #[test]

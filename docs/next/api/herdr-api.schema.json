@@ -50,6 +50,13 @@
             "source": {
               "type": "string"
             },
+            "transcript_path": {
+              "description": "The session's transcript file, when the agent's integration reports one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "value": {
               "type": "string"
             }
@@ -6345,6 +6352,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.last_message",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -7624,6 +7647,96 @@
           ],
           "type": "object"
         },
+        "AgentLastMessageInfo": {
+          "description": "The last complete message of an agent, read from its transcript. Prompts that block the\nagent are not in transcripts; read them from the screen with `agent.read`.",
+          "properties": {
+            "agent": {
+              "description": "The agent, e.g. \"omp\" or \"claude\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentLastMessageStatus"
+            },
+            "stop_reason": {
+              "description": "Why the model stopped, as the transcript records it, e.g. \"stop\", \"end_turn\", \"aborted\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "text": {
+              "description": "The final assistant message of the agent's last finished turn, as markdown, never\ntruncated. Present when `status` is `available`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timestamp": {
+              "description": "When the message was written, as the transcript records it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "transcript_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "terminal_id",
+            "pane_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentLastMessageStatus": {
+          "description": "Whether an agent's last complete message could be read from its transcript.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "`text` holds the message.",
+              "type": "string"
+            },
+            {
+              "const": "no_message",
+              "description": "The transcript has no finished assistant message yet.",
+              "type": "string"
+            },
+            {
+              "const": "no_transcript",
+              "description": "The agent's integration has not reported a transcript for its current session.",
+              "type": "string"
+            },
+            {
+              "const": "unsupported_format",
+              "description": "Herdr has no reader for this agent's transcript format.",
+              "type": "string"
+            },
+            {
+              "const": "unreadable",
+              "description": "The transcript file could not be read.",
+              "type": "string"
+            }
+          ]
+        },
         "AgentManifestInfo": {
           "properties": {
             "active_version": {
@@ -7695,6 +7808,13 @@
             },
             "source": {
               "type": "string"
+            },
+            "transcript_path": {
+              "description": "The session's transcript file, when the agent's integration reports one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "value": {
               "type": "string"
@@ -10579,6 +10699,22 @@
               "required": [
                 "type",
                 "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "last_message": {
+                  "$ref": "#/schemas/success_response/$defs/AgentLastMessageInfo"
+                },
+                "type": {
+                  "const": "agent_last_message",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "last_message"
               ],
               "type": "object"
             },

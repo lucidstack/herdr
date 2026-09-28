@@ -454,6 +454,7 @@ fn unavailable_restored_terminal(
         terminal.launch_argv = pane.launch_argv.clone();
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
             terminal.set_persisted_agent_session(session);
+            restore_agent_transcript(&mut terminal, pane.agent_session.as_ref());
         }
         match (
             pane.agent_name.as_ref(),
@@ -579,6 +580,7 @@ fn restore_tab(
             }
             if let Some(session) = restored_agent_session {
                 terminal.set_persisted_agent_session(session);
+                restore_agent_transcript(&mut terminal, saved_agent_session);
             }
             match (saved_agent_name, saved_managed_agent) {
                 (Some(agent_name), Some(agent)) => {
@@ -676,6 +678,7 @@ fn restore_tab(
                 }
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
+                    restore_agent_transcript(&mut terminal, saved_agent_session);
                 }
                 match (saved_agent_name, saved_managed_agent) {
                     (Some(agent_name), Some(agent)) if was_imported => {
@@ -860,6 +863,25 @@ fn restored_terminal_agent_session(
         return None;
     }
     session.and_then(persisted_agent_session_from_snapshot)
+}
+
+fn restore_agent_transcript(
+    terminal: &mut TerminalState,
+    session: Option<&PaneAgentSessionSnapshot>,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let session_ref = crate::agent_resume::AgentSessionRef {
+        kind: session.kind,
+        value: session.value.clone(),
+    };
+    if let Some(path) = crate::agent_resume::transcript_path_from_report(
+        Some(&session_ref),
+        session.transcript_path.clone(),
+    ) {
+        terminal.record_agent_transcript(&session_ref, path);
+    }
 }
 
 #[cfg(test)]
@@ -1066,6 +1088,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
+            transcript_path: None,
         };
 
         assert!(restore_plan_for_snapshot(&session, false).is_none());
@@ -1079,6 +1102,7 @@ mod tests {
             agent: "claude".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("claude-session"),
+            transcript_path: None,
         };
         assert!(restore_plan_for_snapshot(&unsupported_path, true).is_none());
     }
@@ -1091,6 +1115,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: pi_session_path.clone(),
+            transcript_path: None,
         };
         let mut resumed = HashSet::new();
 
@@ -1113,6 +1138,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            transcript_path: None,
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             ansi: "RESTORED_HISTORY\r\n".into(),
@@ -1138,6 +1164,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            transcript_path: None,
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             ansi: "RESTORED_HISTORY\r\n".into(),
@@ -1166,6 +1193,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            transcript_path: None,
         };
         let history = super::super::snapshot::PaneHistorySnapshot {
             ansi: "RESTORED_HISTORY\r\n".into(),
@@ -1192,6 +1220,7 @@ mod tests {
             agent: "hermes".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Id,
             value: "hermes-session".into(),
+            transcript_path: None,
         };
 
         let preserved = restored_terminal_agent_session(Some(&session), false)
@@ -1208,6 +1237,7 @@ mod tests {
             agent: "pi".into(),
             kind: crate::agent_resume::AgentSessionRefKind::Path,
             value: test_session_path("pi-session.jsonl"),
+            transcript_path: None,
         };
         let mut resumed = HashSet::new();
         assert!(take_restore_plan_for_snapshot(&session, true, &mut resumed).is_some());
@@ -1242,6 +1272,7 @@ mod tests {
                 agent: "opencode".into(),
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "keep-my-session".into(),
+                transcript_path: Some(cwd.join("keep-my-session.jsonl").display().to_string()),
             });
             let (events, _rx) = mpsc::channel(32);
             let (workspaces, terminals, runtimes) = restore(
@@ -1279,9 +1310,12 @@ mod tests {
                 "fallback cwd must not replace saved intent"
             );
             assert_eq!(pane.label.as_deref(), Some("keep my pane"));
+            let agent_session = pane.agent_session.as_ref().unwrap();
+            assert_eq!(agent_session.value, "keep-my-session");
             assert_eq!(
-                pane.agent_session.as_ref().unwrap().value,
-                "keep-my-session"
+                agent_session.transcript_path,
+                Some(cwd.join("keep-my-session.jsonl").display().to_string()),
+                "the reported transcript must survive a restore"
             );
             let root = workspaces[0].tabs[0].root_pane;
             let terminal_id = workspaces[0].tabs[0].terminal_id(root).unwrap();
@@ -1331,6 +1365,7 @@ mod tests {
                                 agent: "opencode".into(),
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "opencode-session".into(),
+                                transcript_path: None,
                             }),
                             launch_argv: None,
                         },
@@ -1491,6 +1526,7 @@ mod tests {
                 agent: "codex".into(),
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "codex-session".into(),
+                transcript_path: None,
             }),
             launch_argv: None,
         };
@@ -1642,6 +1678,7 @@ mod tests {
                                 agent: "codex".into(),
                                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                                 value: "codex-session".into(),
+                                transcript_path: None,
                             }),
                             launch_argv: None,
                         },

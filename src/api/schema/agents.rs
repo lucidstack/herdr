@@ -234,4 +234,49 @@ pub struct AgentSessionInfo {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+    /// The session's transcript file, when the agent's integration reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+/// Whether an agent's last complete message could be read from its transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLastMessageStatus {
+    /// `text` holds the message.
+    Available,
+    /// The transcript has no finished assistant message yet.
+    NoMessage,
+    /// The agent's integration has not reported a transcript for its current session.
+    NoTranscript,
+    /// Herdr has no reader for this agent's transcript format.
+    UnsupportedFormat,
+    /// The transcript file could not be read.
+    Unreadable,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The last complete message of an agent, read from its transcript. Prompts that block the
+/// agent are not in transcripts; read them from the screen with `agent.read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentLastMessageInfo {
+    pub terminal_id: String,
+    pub pane_id: String,
+    /// The agent, e.g. "omp" or "claude".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: AgentLastMessageStatus,
+    /// The final assistant message of the agent's last finished turn, as markdown, never
+    /// truncated. Present when `status` is `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Why the model stopped, as the transcript records it, e.g. "stop", "end_turn", "aborted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// When the message was written, as the transcript records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
 }

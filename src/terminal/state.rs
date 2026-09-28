@@ -121,6 +121,12 @@ struct RecentAgentProcessExit {
     observed_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentTranscript {
+    session_ref: crate::agent_resume::AgentSessionRef,
+    path: String,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -137,6 +143,9 @@ pub struct TerminalState {
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    /// The transcript file reported for a session whose reference is an id. It counts only
+    /// while that session is the terminal's current one.
+    agent_transcript: Option<AgentTranscript>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
@@ -178,6 +187,7 @@ impl TerminalState {
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
+            agent_transcript: None,
             terminal_title: None,
             manual_label: None,
             agent_name: None,
@@ -1431,6 +1441,59 @@ impl TerminalState {
         self.persisted_agent_session = Some(session);
     }
 
+    /// The reference of the session Herdr currently attributes to this terminal: the hook
+    /// authority's, else the persisted one.
+    fn current_session_ref(&self) -> Option<&crate::agent_resume::AgentSessionRef> {
+        self.hook_authority
+            .as_ref()
+            .and_then(|authority| authority.session_ref.as_ref())
+            .or_else(|| {
+                self.persisted_agent_session
+                    .as_ref()
+                    .map(|session| &session.session_ref)
+            })
+    }
+
+    /// Remembers the transcript file reported for `session_ref`, if that is the current
+    /// session. Returns whether anything changed.
+    pub fn record_agent_transcript(
+        &mut self,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+        path: String,
+    ) -> bool {
+        if self.current_session_ref() != Some(session_ref) {
+            return false;
+        }
+        let transcript = AgentTranscript {
+            session_ref: session_ref.clone(),
+            path,
+        };
+        if self.agent_transcript.as_ref() == Some(&transcript) {
+            return false;
+        }
+        self.agent_transcript = Some(transcript);
+        true
+    }
+
+    /// The transcript file reported for the current session, when its reference is an id.
+    pub fn reported_agent_transcript_path(&self) -> Option<&str> {
+        let current = self.current_session_ref()?;
+        self.agent_transcript
+            .as_ref()
+            .filter(|transcript| transcript.session_ref == *current)
+            .map(|transcript| transcript.path.as_str())
+    }
+
+    /// The current session's transcript file: the session reference itself when it is a
+    /// path, otherwise the file its integration reported.
+    pub fn agent_transcript_path(&self) -> Option<&str> {
+        let current = self.current_session_ref()?;
+        match current.kind {
+            crate::agent_resume::AgentSessionRefKind::Path => Some(current.value.as_str()),
+            crate::agent_resume::AgentSessionRefKind::Id => self.reported_agent_transcript_path(),
+        }
+    }
+
     pub fn set_managed_agent_launch_session(
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,
@@ -2329,6 +2392,39 @@ mod tests {
             agent: agent_label.into(),
             session_ref,
         });
+    }
+
+    #[test]
+    fn reported_transcript_belongs_only_to_the_session_it_was_reported_for() {
+        let claude_session = |id: &str| crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id(id).unwrap(),
+        };
+        let mut terminal = test_terminal();
+        let first = claude_session("first");
+        terminal.set_persisted_agent_session(first.clone());
+        assert!(terminal.record_agent_transcript(&first.session_ref, "/t/first.jsonl".into()));
+        assert_eq!(terminal.agent_transcript_path(), Some("/t/first.jsonl"));
+
+        terminal.set_persisted_agent_session(claude_session("second"));
+
+        assert_eq!(terminal.agent_transcript_path(), None);
+        assert!(!terminal.record_agent_transcript(&first.session_ref, "/t/first.jsonl".into()));
+        assert_eq!(terminal.agent_transcript_path(), None);
+    }
+
+    #[test]
+    fn path_session_is_its_own_transcript() {
+        let mut terminal = test_terminal();
+        let path = test_session_path("omp-session.jsonl");
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:omp".into(),
+            agent: "omp".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(path.clone()).unwrap(),
+        });
+
+        assert_eq!(terminal.agent_transcript_path(), Some(path.as_str()));
     }
 
     #[test]
