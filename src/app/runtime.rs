@@ -161,6 +161,7 @@ impl App {
             self.session_save_deadline,
             self.next_tab_bar_status_deadline(),
             self.work_items.next_deadline(),
+            self.attention_deadline(),
             render_deadline,
         ]
         .into_iter()

@@ -212,6 +212,69 @@ pub struct WorkItemInfo {
     /// on its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folded_into: Option<String>,
+    /// Set while the item needs you, with the kind of need and why. Absent when it does not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<AttentionInfo>,
+}
+
+/// Why something needs you. Ordered from most to least urgent.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionKind {
+    /// An agent waits on you, e.g. for a permission or a question.
+    Blocked,
+    /// Provisioning a workspace or carrying out a choice failed.
+    Failed,
+    /// An agent finished its turn and its pane has been left alone since.
+    Finished,
+    /// A reviewer requested changes on your pull request.
+    ChangesRequested,
+    /// Checks are failing on your pull request.
+    ChecksFailing,
+    /// Your pull request is approved and waits for you to merge it.
+    ReadyToMerge,
+    /// Newly arrived and not acted on yet: a review request, an assignment, a mention.
+    New,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AttentionInfo {
+    pub kind: AttentionKind,
+    /// One line for the user, e.g. "Allow running bin/rails db:migrate?".
+    pub reason: String,
+    /// The agent's pane, for `blocked` and `finished`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// Unix time in seconds when it entered this kind.
+    pub since: u64,
+}
+
+/// An agent in a pane outside every work item's workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentAttentionInfo {
+    pub pane_id: String,
+    pub workspace_id: String,
+    /// The workspace's name.
+    pub workspace_label: String,
+    /// The agent, e.g. "claude".
+    pub agent: String,
+    pub agent_status: super::AgentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<AttentionInfo>,
 }
 
 /// A pull request found for the branch an item is worked on.

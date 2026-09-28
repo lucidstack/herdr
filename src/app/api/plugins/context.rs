@@ -195,6 +195,22 @@ impl App {
                     self.plugin_context_for_workspace_id(workspace_id, correlation_id)
                 })
                 .unwrap_or_else(|| empty_plugin_context(correlation_id)),
+            // An agent's own pane when there is one, else the item's workspace.
+            EventData::AttentionChanged {
+                pane_id,
+                workspace_id,
+                attention,
+                ..
+            } => pane_id
+                .as_deref()
+                .or_else(|| attention.as_ref().and_then(|a| a.pane_id.as_deref()))
+                .and_then(|pane_id| self.plugin_context_for_public_pane_id(pane_id, correlation_id))
+                .or_else(|| {
+                    workspace_id.as_deref().and_then(|workspace_id| {
+                        self.plugin_context_for_workspace_id(workspace_id, correlation_id)
+                    })
+                })
+                .unwrap_or_else(|| empty_plugin_context(correlation_id)),
         }
     }
 

@@ -773,6 +773,7 @@ impl App {
             }
             _ => {}
         }
+        self.note_attention_event(&event.data);
         self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);
     }

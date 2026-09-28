@@ -1318,6 +1318,9 @@ pub struct PaneRuntime {
     terminal: Arc<PaneTerminal>,
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
+    /// When input was last written for someone: typed, pasted, prompted or sent through the
+    /// API. Unattended writes (focus reports, agent start, scrollback reads) do not count.
+    last_user_input_at: Cell<Option<std::time::Instant>>,
     child_pid: Arc<AtomicU32>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
     persistence_cwd: Mutex<Option<std::path::PathBuf>>,
@@ -2478,6 +2481,7 @@ impl PaneRuntime {
             child_pid,
             reported_cwd,
             persistence_cwd: Mutex::new(None),
+            last_user_input_at: Cell::new(None),
             cwd_process_exited,
             child_wait_completed: None,
             kitty_keyboard_flags,
@@ -3068,6 +3072,7 @@ impl PaneRuntime {
             child_pid,
             reported_cwd,
             persistence_cwd: Mutex::new(None),
+            last_user_input_at: Cell::new(None),
             cwd_process_exited: child_wait_completed.clone(),
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
@@ -3451,7 +3456,22 @@ impl PaneRuntime {
     }
 
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.io.try_send_bytes(bytes)?;
+        self.last_user_input_at.set(Some(std::time::Instant::now()));
+        Ok(())
+    }
+
+    /// Writes input nobody typed, e.g. an agent's start command: it does not count as the
+    /// pane being touched.
+    pub fn try_send_unattended_bytes(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         self.io.try_send_bytes(bytes)
+    }
+
+    pub fn last_user_input_at(&self) -> Option<std::time::Instant> {
+        self.last_user_input_at.get()
     }
 
     pub fn queue_user_input_submission(
@@ -3461,8 +3481,11 @@ impl PaneRuntime {
         delay: std::time::Duration,
         deadline: Option<std::time::Instant>,
     ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
-        self.io
-            .queue_user_input_submission(text, enter, delay, deadline)
+        let completion = self
+            .io
+            .queue_user_input_submission(text, enter, delay, deadline)?;
+        self.last_user_input_at.set(Some(std::time::Instant::now()));
+        Ok(completion)
     }
 
     pub fn try_send_paste(&self, text: String) -> Result<(), mpsc::error::TrySendError<Bytes>> {
@@ -3488,7 +3511,7 @@ impl PaneRuntime {
         let Ok(bytes) = crate::ghostty::encode_focus(event) else {
             return false;
         };
-        if let Err(err) = self.try_send_bytes(Bytes::from(bytes)) {
+        if let Err(err) = self.try_send_unattended_bytes(Bytes::from(bytes)) {
             warn!(err = %err, ?event, "failed to forward pane focus event");
         }
         true
@@ -3779,6 +3802,7 @@ impl PaneRuntime {
                     resize_tx,
                 },
                 current_size: Cell::new((rows, cols, 0, 0)),
+                last_user_input_at: Cell::new(None),
                 child_pid: Arc::new(AtomicU32::new(0)),
                 reported_cwd: Arc::new(Mutex::new(None)),
                 persistence_cwd: Mutex::new(None),
@@ -4949,6 +4973,7 @@ mod tests {
                 resize_tx,
             },
             current_size: Cell::new((80, 24, 0, 0)),
+            last_user_input_at: Cell::new(None),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,
@@ -4988,6 +5013,7 @@ mod tests {
                 resize_tx,
             },
             current_size: Cell::new((80, 24, 0, 0)),
+            last_user_input_at: Cell::new(None),
             child_pid: Arc::new(AtomicU32::new(0)),
             reported_cwd: Arc::new(Mutex::new(None)),
             child_wait_completed: None,

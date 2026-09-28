@@ -463,7 +463,9 @@ fn send_wheel(
     for _ in 0..events {
         bytes.extend_from_slice(&event);
     }
-    runtime.try_send_bytes(Bytes::from(bytes)).map_err(|_| ())
+    runtime
+        .try_send_unattended_bytes(Bytes::from(bytes))
+        .map_err(|_| ())
 }
 
 #[cfg(test)]

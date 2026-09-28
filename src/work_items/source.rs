@@ -219,4 +219,13 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn pull_request_of(&self, _item: &WorkItem) -> Option<(String, u64)> {
         None
     }
+    /// Pure: what the tracker asks of you for `item`, whatever Herdr is doing about it.
+    /// Newly arrived by default; Herdr only reports `New` until a choice is made.
+    fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {
+        let (title, _) = self.arrival_notice(&item.source_item());
+        Some(super::attention::Need::new(
+            crate::api::schema::AttentionKind::New,
+            title,
+        ))
+    }
 }

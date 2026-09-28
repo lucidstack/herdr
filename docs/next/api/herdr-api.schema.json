@@ -79,6 +79,82 @@
           ],
           "type": "string"
         },
+        "AttentionInfo": {
+          "properties": {
+            "kind": {
+              "$ref": "#/schemas/event/$defs/AttentionKind"
+            },
+            "pane_id": {
+              "description": "The agent's pane, for `blocked` and `finished`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "One line for the user, e.g. \"Allow running bin/rails db:migrate?\".",
+              "type": "string"
+            },
+            "since": {
+              "description": "Unix time in seconds when it entered this kind.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "since"
+          ],
+          "type": "object"
+        },
+        "AttentionKind": {
+          "description": "Why something needs you. Ordered from most to least urgent.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "blocked",
+              "description": "An agent waits on you, e.g. for a permission or a question.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Provisioning a workspace or carrying out a choice failed.",
+              "type": "string"
+            },
+            {
+              "const": "finished",
+              "description": "An agent finished its turn and its pane has been left alone since.",
+              "type": "string"
+            },
+            {
+              "const": "changes_requested",
+              "description": "A reviewer requested changes on your pull request.",
+              "type": "string"
+            },
+            {
+              "const": "checks_failing",
+              "description": "Checks are failing on your pull request.",
+              "type": "string"
+            },
+            {
+              "const": "ready_to_merge",
+              "description": "Your pull request is approved and waits for you to merge it.",
+              "type": "string"
+            },
+            {
+              "const": "new",
+              "description": "Newly arrived and not acted on yet: a review request, an assignment, a mention.",
+              "type": "string"
+            }
+          ]
+        },
         "EventData": {
           "oneOf": [
             {
@@ -377,6 +453,56 @@
               "required": [
                 "type",
                 "item"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A work item, or an agent outside every item, started or stopped needing you, or\nneeds you for another kind of reason. Not sent again while the kind stays the same.",
+              "properties": {
+                "attention": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/AttentionInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The need now; absent once it no longer needs you."
+                },
+                "item_id": {
+                  "description": "The work item; absent for an agent outside every item.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pane_id": {
+                  "description": "The agent's pane, for an agent outside every item.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "description": "The item's title, or the agent and its workspace, e.g. \"claude · api\".",
+                  "type": "string"
+                },
+                "type": {
+                  "const": "attention_changed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "description": "The item's workspace, or the agent's.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "title"
               ],
               "type": "object"
             },
@@ -792,6 +918,7 @@
             "work_item_created",
             "work_item_updated",
             "work_item_resolved",
+            "attention_changed",
             "tab_created",
             "tab_closed",
             "tab_renamed",
@@ -1269,6 +1396,17 @@
                 }
               ],
               "description": "How the last `Perform` choice on this item ended, until another one starts."
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/AttentionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set while the item needs you, with the kind of need and why. Absent when it does not."
             },
             "author": {
               "type": [
@@ -4524,6 +4662,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "attention.changed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "tab.created",
                   "type": "string"
                 }
@@ -7299,6 +7449,46 @@
     },
     "success_response": {
       "$defs": {
+        "AgentAttentionInfo": {
+          "description": "An agent in a pane outside every work item's workspace.",
+          "properties": {
+            "agent": {
+              "description": "The agent, e.g. \"claude\".",
+              "type": "string"
+            },
+            "agent_status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AttentionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "workspace_label": {
+              "description": "The workspace's name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "workspace_id",
+            "workspace_label",
+            "agent",
+            "agent_status"
+          ],
+          "type": "object"
+        },
         "AgentInfo": {
           "properties": {
             "agent": {
@@ -7534,6 +7724,82 @@
             "unknown"
           ],
           "type": "string"
+        },
+        "AttentionInfo": {
+          "properties": {
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AttentionKind"
+            },
+            "pane_id": {
+              "description": "The agent's pane, for `blocked` and `finished`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "reason": {
+              "description": "One line for the user, e.g. \"Allow running bin/rails db:migrate?\".",
+              "type": "string"
+            },
+            "since": {
+              "description": "Unix time in seconds when it entered this kind.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "since"
+          ],
+          "type": "object"
+        },
+        "AttentionKind": {
+          "description": "Why something needs you. Ordered from most to least urgent.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "blocked",
+              "description": "An agent waits on you, e.g. for a permission or a question.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "Provisioning a workspace or carrying out a choice failed.",
+              "type": "string"
+            },
+            {
+              "const": "finished",
+              "description": "An agent finished its turn and its pane has been left alone since.",
+              "type": "string"
+            },
+            {
+              "const": "changes_requested",
+              "description": "A reviewer requested changes on your pull request.",
+              "type": "string"
+            },
+            {
+              "const": "checks_failing",
+              "description": "Checks are failing on your pull request.",
+              "type": "string"
+            },
+            {
+              "const": "ready_to_merge",
+              "description": "Your pull request is approved and waits for you to merge it.",
+              "type": "string"
+            },
+            {
+              "const": "new",
+              "description": "Newly arrived and not acted on yet: a review request, an assignment, a mention.",
+              "type": "string"
+            }
+          ]
         },
         "ClientWindowTitleReason": {
           "enum": [
@@ -7849,6 +8115,56 @@
               "required": [
                 "type",
                 "item"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "A work item, or an agent outside every item, started or stopped needing you, or\nneeds you for another kind of reason. Not sent again while the kind stays the same.",
+              "properties": {
+                "attention": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AttentionInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The need now; absent once it no longer needs you."
+                },
+                "item_id": {
+                  "description": "The work item; absent for an agent outside every item.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pane_id": {
+                  "description": "The agent's pane, for an agent outside every item.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "description": "The item's title, or the agent and its workspace, e.g. \"claude · api\".",
+                  "type": "string"
+                },
+                "type": {
+                  "const": "attention_changed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "description": "The item's workspace, or the agent's.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "title"
               ],
               "type": "object"
             },
@@ -8279,6 +8595,7 @@
             "work_item_created",
             "work_item_updated",
             "work_item_resolved",
+            "attention_changed",
             "tab_created",
             "tab_closed",
             "tab_renamed",
@@ -11218,6 +11535,14 @@
             },
             {
               "properties": {
+                "agents": {
+                  "default": [],
+                  "description": "Agents in panes outside every item's workspace, so none goes unnoticed.",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentAttentionInfo"
+                  },
+                  "type": "array"
+                },
                 "items": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
@@ -11630,6 +11955,17 @@
                 }
               ],
               "description": "How the last `Perform` choice on this item ended, until another one starts."
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AttentionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set while the item needs you, with the kind of need and why. Absent when it does not."
             },
             "author": {
               "type": [

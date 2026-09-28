@@ -153,6 +153,9 @@ pub struct TerminalState {
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
+    /// When the agent last went idle after working or waiting on you; cleared while it is
+    /// not idle.
+    pub turn_finished_at: Option<Instant>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -191,6 +194,7 @@ impl TerminalState {
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
+            turn_finished_at: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2174,6 +2178,7 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
+        self.turn_finished_at = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2268,6 +2273,15 @@ impl TerminalState {
         }
 
         self.state = state;
+        self.turn_finished_at = match state {
+            AgentState::Idle
+                if matches!(previous_state, AgentState::Working | AgentState::Blocked) =>
+            {
+                Some(now)
+            }
+            AgentState::Idle => self.turn_finished_at,
+            _ => None,
+        };
         Some(EffectiveStateChange {
             previous_agent_label,
             previous_known_agent,

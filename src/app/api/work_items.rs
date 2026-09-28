@@ -26,6 +26,7 @@ impl App {
                 sources: self.work_items.source_infos(),
                 pick_next: self.work_items.pick_next_info(),
                 repositories: self.work_items.repository_infos(),
+                agents: self.agents_outside_items(),
             },
         )
     }

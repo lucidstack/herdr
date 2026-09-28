@@ -2107,6 +2107,18 @@ impl WorkItemSource for GithubSource {
         )
     }
 
+    fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {
+        use crate::api::schema::AttentionKind;
+        let event = Event::of(&item.external_id);
+        let kind = match event {
+            Event::ReviewRequested | Event::Assigned | Event::Mentioned => AttentionKind::New,
+            Event::ChangesRequested => AttentionKind::ChangesRequested,
+            Event::CiFailing => AttentionKind::ChecksFailing,
+            Event::ReadyToMerge => AttentionKind::ReadyToMerge,
+        };
+        Some(super::attention::Need::new(kind, event.arrival_title()))
+    }
+
     fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
         if let Some(error) = &self.build_error {
             return Err(error.clone());

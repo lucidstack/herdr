@@ -470,6 +470,18 @@ impl TerminalRuntime {
         self.0.try_send_bytes(bytes)
     }
 
+    /// Writes input nobody typed; see `PaneRuntime::try_send_unattended_bytes`.
+    pub fn try_send_unattended_bytes(
+        &self,
+        bytes: Bytes,
+    ) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0.try_send_unattended_bytes(bytes)
+    }
+
+    pub fn last_user_input_at(&self) -> Option<std::time::Instant> {
+        self.0.last_user_input_at()
+    }
+
     pub fn queue_user_input_submission(
         &self,
         text: Bytes,

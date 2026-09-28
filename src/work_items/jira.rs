@@ -1214,6 +1214,14 @@ impl WorkItemSource for JiraSource {
         )
     }
 
+    fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {
+        let reason = item.tracker_state.as_deref().unwrap_or("New ticket");
+        Some(super::attention::Need::new(
+            crate::api::schema::AttentionKind::New,
+            reason,
+        ))
+    }
+
     fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
         if let Some(error) = &self.build_error {
             return Err(error.clone());

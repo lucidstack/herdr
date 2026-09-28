@@ -84,16 +84,21 @@ impl App {
         if self.work_items.revision() != revision {
             // Items loaded or dropped by the new configuration are not events.
             self.work_item_changes.reset();
+            self.work_items.reset_attention();
         }
     }
 
-    /// Emits `work_item.created|updated|resolved` for changes since the last call.
+    /// Works out what needs you when due, then emits `work_item.created|updated|resolved`
+    /// for changes since the last call, and `attention.changed` for needs that started,
+    /// stopped or changed kind.
     pub(crate) fn sync_work_item_events(&mut self) {
         use crate::api::schema::{EventData, EventEnvelope, EventKind};
         use crate::work_items::ItemChange;
 
+        let transitions = self.update_attention(Instant::now());
         let revision = self.work_items.revision();
         if !self.work_items.is_enabled() || !self.work_item_changes.is_behind(revision) {
+            self.emit_attention_transitions(transitions);
             return;
         }
         let items = self.work_items.projection_items();
@@ -120,6 +125,7 @@ impl App {
             };
             self.emit_event(EventEnvelope { event, data });
         }
+        self.emit_attention_transitions(transitions);
     }
 
     pub(super) fn work_items_workspace_closed(&mut self, workspace_id: &str) {

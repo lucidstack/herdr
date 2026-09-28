@@ -4,6 +4,7 @@
 //! The runtime holder here is source-agnostic; sources implement
 //! [`source::WorkItemSource`]. Nothing runs unless a source is configured.
 
+pub(crate) mod attention;
 pub(crate) mod changes;
 pub(crate) mod github;
 pub(crate) mod jira;
@@ -21,8 +22,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
-    WorkItemActionOutcome, WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo,
-    WorkItemSourceInfo,
+    AttentionInfo, AttentionKind, WorkItemActionOutcome, WorkItemInfo, WorkItemPhase,
+    WorkItemProvisioningInfo, WorkItemSourceInfo,
 };
 use crate::config::WorkItemsConfig;
 
@@ -144,6 +145,8 @@ pub(crate) struct WorkItems {
     /// When the pull requests of items' workspace branches are looked up next.
     next_pull_request_lookup: Instant,
     pull_request_lookup_in_flight: bool,
+    /// What needs you now, and since when; worked out by the app from items and agents.
+    attention: attention::Tracker,
 }
 
 /// A mapped local clone and the Git key that recognises workspaces on its main checkout.
@@ -241,6 +244,7 @@ impl WorkItems {
             repositories: Vec::new(),
             next_pull_request_lookup: Instant::now(),
             pull_request_lookup_in_flight: false,
+            attention: attention::Tracker::default(),
         }
     }
 
@@ -712,17 +716,27 @@ impl WorkItems {
 
     fn project(&self, item: &WorkItem, hosts: &HashMap<(String, u64), String>) -> WorkItemInfo {
         let (choices, reminder) = self.choices_and_reminder(item);
-        let folded_into = self
-            .source(&item.source_id)
-            .and_then(|source| source.pull_request_of(item))
-            .and_then(|(repo, number)| hosts.get(&(repo.to_ascii_lowercase(), number)))
-            .filter(|host| **host != item.key)
-            .cloned();
         item.info(
             choices,
             reminder.map(|reminder| reminder.message),
-            folded_into,
+            self.folded_into(item, hosts),
+            self.attention
+                .get(&attention::Subject::Item(item.key.clone()))
+                .cloned(),
         )
+    }
+
+    /// The item whose linked pull request `item` is, if another item shows it.
+    fn folded_into(
+        &self,
+        item: &WorkItem,
+        hosts: &HashMap<(String, u64), String>,
+    ) -> Option<String> {
+        self.source(&item.source_id)
+            .and_then(|source| source.pull_request_of(item))
+            .and_then(|(repo, number)| hosts.get(&(repo.to_ascii_lowercase(), number)))
+            .filter(|host| **host != item.key)
+            .cloned()
     }
 
     /// Items showing a linked pull request, by (lowercased repository, number). Hidden
@@ -1071,6 +1085,101 @@ impl WorkItems {
             .collect()
     }
 
+    /// Workspaces that belong to an item; agents anywhere else are reported on their own.
+    pub(crate) fn item_workspace_ids(&self) -> HashSet<&str> {
+        self.state
+            .items()
+            .iter()
+            .filter_map(|item| item.workspace_id.as_deref())
+            .collect()
+    }
+
+    pub(crate) fn attention(&self, subject: &attention::Subject) -> Option<&AttentionInfo> {
+        self.attention.get(subject)
+    }
+
+    /// Forgets which needs were already reported; the next update records without events.
+    pub(crate) fn reset_attention(&mut self) {
+        self.attention.reset();
+    }
+
+    /// Works out what needs you from each item's own state and `agents`, the folded verdict
+    /// of each workspace's agents, plus `loose`, the needs of agents outside every item keyed
+    /// by pane. Items folded into another report through it. Bumps the revision only when
+    /// an item's attention changes.
+    pub(crate) fn update_attention(
+        &mut self,
+        agents: &HashMap<String, attention::AgentVerdict>,
+        loose: Vec<(String, attention::Candidate)>,
+        now_unix: u64,
+    ) -> Vec<attention::Transition> {
+        use attention::{Candidate, ItemSignals, Subject};
+
+        let hosts = self.pull_request_hosts();
+        let mut folded: HashMap<String, Option<attention::Need>> = HashMap::new();
+        for item in self.state.items() {
+            if let Some(host) = self.folded_into(item, &hosts) {
+                let slot = folded.entry(host).or_default();
+                *slot = attention::most_urgent(slot.take(), self.tracker_need(item));
+            }
+        }
+        let idle = attention::AgentVerdict::default();
+        let mut current: HashMap<Subject, Candidate> = loose
+            .into_iter()
+            .map(|(pane_id, candidate)| (Subject::Pane(pane_id), candidate))
+            .collect();
+        for item in self.state.items() {
+            if self.folded_into(item, &hosts).is_some() {
+                continue;
+            }
+            let verdict = item
+                .workspace_id
+                .as_deref()
+                .and_then(|workspace_id| agents.get(workspace_id))
+                .unwrap_or(&idle);
+            let signals = ItemSignals {
+                failure: failure_need(item),
+                busy: self.jobs.contains_key(&item.key) || item.action_running.is_some(),
+                tracker: attention::most_urgent(
+                    self.tracker_need(item),
+                    folded.remove(&item.key).flatten(),
+                ),
+            };
+            if let Some(need) = attention::item_need(verdict, signals) {
+                current.insert(
+                    Subject::Item(item.key.clone()),
+                    Candidate {
+                        need,
+                        title: item.title.clone(),
+                        workspace_id: item.workspace_id.clone(),
+                    },
+                );
+            }
+        }
+        let update = self.attention.update(current, now_unix);
+        if update.items_changed {
+            // Not persisted: attention is worked out again after a restart.
+            self.revision += 1;
+        }
+        update.transitions
+    }
+
+    /// What the tracker asks of you, unless the item is hidden, waits on others, or was
+    /// handled outside Herdr. Newly arrived items stop asking once a choice is made.
+    fn tracker_need(&self, item: &WorkItem) -> Option<attention::Need> {
+        if item.is_pick_next
+            || item.dismissed
+            || item.snoozed_until.is_some()
+            || item.resolved
+            || item.waiting
+            || item.phase == WorkItemPhase::AwaitingExternal
+        {
+            return None;
+        }
+        let need = self.source(&item.source_id)?.tracker_need(item)?;
+        (need.kind != AttentionKind::New || item.phase == WorkItemPhase::Pending).then_some(need)
+    }
+
     /// The linked pull request of `key`, with the source hosting it.
     pub(crate) fn linked_pull_request(
         &self,
@@ -1143,6 +1252,36 @@ impl WorkItems {
     pub(crate) fn schedule_all_for_test(&mut self, now: Instant) {
         self.schedule_all(now);
     }
+}
+
+/// A failed choice, a failed provisioning step, or a workspace that could not be removed.
+fn failure_need(item: &WorkItem) -> Option<attention::Need> {
+    let failed = |reason: String| Some(attention::Need::new(AttentionKind::Failed, reason));
+    if let Some(outcome) = item
+        .action_outcome
+        .as_ref()
+        .filter(|outcome| !outcome.succeeded)
+    {
+        return failed(outcome.message.clone());
+    }
+    let failed_step = item
+        .provisioning
+        .as_ref()
+        .filter(|provisioning| provisioning.finished)
+        .and_then(|provisioning| {
+            provisioning
+                .steps
+                .iter()
+                .find(|step| step.status == crate::api::schema::WorkItemStepStatus::Failed)
+        });
+    if let Some(step) = failed_step {
+        return failed(
+            step.detail
+                .clone()
+                .unwrap_or_else(|| format!("{} failed", step.label)),
+        );
+    }
+    item.resolve_error.clone().and_then(failed)
 }
 
 #[cfg(test)]

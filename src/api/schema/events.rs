@@ -44,6 +44,8 @@ pub enum Subscription {
     WorkItemUpdated {},
     #[serde(rename = "work_item.resolved")]
     WorkItemResolved {},
+    #[serde(rename = "attention.changed")]
+    AttentionChanged {},
     #[serde(rename = "tab.created")]
     TabCreated {},
     #[serde(rename = "tab.closed")]
@@ -212,6 +214,7 @@ pub enum EventKind {
     WorkItemCreated,
     WorkItemUpdated,
     WorkItemResolved,
+    AttentionChanged,
     TabCreated,
     TabClosed,
     TabRenamed,
@@ -246,6 +249,7 @@ impl EventKind {
             EventKind::WorkItemCreated => "work_item.created",
             EventKind::WorkItemUpdated => "work_item.updated",
             EventKind::WorkItemResolved => "work_item.resolved",
+            EventKind::AttentionChanged => "attention.changed",
             EventKind::TabCreated => "tab.created",
             EventKind::TabClosed => "tab.closed",
             EventKind::TabRenamed => "tab.renamed",
@@ -281,6 +285,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkItemCreated,
     EventKind::WorkItemUpdated,
     EventKind::WorkItemResolved,
+    EventKind::AttentionChanged,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
@@ -312,6 +317,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkItemCreated,
     EventKind::WorkItemUpdated,
     EventKind::WorkItemResolved,
+    EventKind::AttentionChanged,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
@@ -497,6 +503,24 @@ pub enum EventData {
     /// while a workspace hangs off it.
     WorkItemResolved {
         item: Box<super::work_items::WorkItemInfo>,
+    },
+    /// A work item, or an agent outside every item, started or stopped needing you, or
+    /// needs you for another kind of reason. Not sent again while the kind stays the same.
+    AttentionChanged {
+        /// The work item; absent for an agent outside every item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
+        /// The agent's pane, for an agent outside every item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
+        /// The item's workspace, or the agent's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        /// The item's title, or the agent and its workspace, e.g. "claude · api".
+        title: String,
+        /// The need now; absent once it no longer needs you.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attention: Option<super::work_items::AttentionInfo>,
     },
     TabCreated {
         tab: TabInfo,

@@ -187,6 +187,7 @@ impl WorkItem {
         choices: ItemChoices,
         reminder: Option<String>,
         folded_into: Option<String>,
+        attention: Option<crate::api::schema::AttentionInfo>,
     ) -> WorkItemInfo {
         WorkItemInfo {
             item_id: self.key.clone(),
@@ -217,6 +218,7 @@ impl WorkItem {
             action_outcome: self.action_outcome.clone(),
             linked_pull_request: self.linked_pull_request.clone(),
             folded_into,
+            attention,
         }
     }
 

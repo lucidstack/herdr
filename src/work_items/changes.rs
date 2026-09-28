@@ -113,6 +113,7 @@ mod tests {
             action_outcome: None,
             linked_pull_request: None,
             folded_into: None,
+            attention: None,
         }
     }
 

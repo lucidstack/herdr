@@ -172,6 +172,24 @@ herdr work-item unhide 'jira:APP-7'
 herdr work-item link 'jira:APP-7' w3
 ```
 
+### What needs you
+
+Herdr works out whether each item needs you, and why, and reports it as the item's `attention`: a `kind` and a one-line `reason`, plus the agent's `pane_id` for agent kinds and `since`, when it entered that kind. Items that do not need you have no `attention`. From most to least urgent:
+
+| Kind | When |
+|---|---|
+| `blocked` | An agent in the item's workspace waits on you. The reason is the prompt the agent reported, when its integration reports one. |
+| `failed` | Setting up the workspace or carrying out a choice failed, or the workspace could not be removed. |
+| `finished` | An agent in the item's workspace finished its turn and its pane got no input for two minutes since. Typing, pasting or prompting it after the turn ended counts as dealing with it. |
+| `changes_requested`, `checks_failing`, `ready_to_merge` | What the tracker asks of your pull request, including the one linked to a ticket. |
+| `new` | A review request, assignment, mention or Jira ticket you have not made a choice for yet. |
+
+While an agent in the item's workspace is working, or Herdr is setting up the workspace or carrying out a choice, the tracker's asks wait: someone is already on it. Hidden items, items waiting on others, and items you chose to handle on GitHub or Jira carry no tracker asks. A start reminder is shown on the item but is never a need.
+
+`attention.changed` is published when an item starts or stops needing you, or needs you for another kind of reason, and never again while the kind stays the same. It carries `item_id`, `workspace_id`, a `title` and the new `attention` (absent once it no longer needs you). Needs found at start-up are recorded without events.
+
+Agents in panes outside every item's workspace are covered too, so none goes unnoticed: `herdr work-item list` returns them under `agents`, each with its pane, workspace, status and `attention` (`blocked` or `finished`, by the same rules), and `attention.changed` reports them with a `pane_id` instead of an `item_id`.
+
 ### Read, search and add tickets on demand
 
 Beyond the sidebar's own queries, `search` and `show` read any ticket through a configured source's credentials, and `add` brings one into the inbox by hand:

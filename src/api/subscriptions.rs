@@ -149,6 +149,9 @@ impl ActiveSubscription {
             Subscription::WorkItemResolved {} => {
                 Ok(event_subscription(EventKind::WorkItemResolved))
             }
+            Subscription::AttentionChanged {} => {
+                Ok(event_subscription(EventKind::AttentionChanged))
+            }
             Subscription::TabCreated {} => Ok(event_subscription(EventKind::TabCreated)),
             Subscription::TabClosed {} => Ok(event_subscription(EventKind::TabClosed)),
             Subscription::TabFocused {} => Ok(event_subscription(EventKind::TabFocused)),
