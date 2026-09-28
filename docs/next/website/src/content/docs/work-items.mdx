@@ -63,6 +63,8 @@ Your pull requests show up as **ready to merge** once reviews approve them: at l
 
 The dialog lists the merge methods the repository allows, your default first, and says who approved it. Merging asks for a second <kbd>Enter</kbd>, since it cannot be undone, and only merges the commit you saw: if someone pushed since, GitHub refuses. When GitHub would refuse anyway (conflicts, a branch behind its base, required checks or reviews), the merge choices are disabled with the reason. The item leaves the inbox once GitHub reports the merge; if the merge fails, the reason shows on the item.
 
+Approvals often come with a nit. The summary counts the reviewers' comments (the approval's own text and inline comments, not your replies), and the dialog also offers the changes-requested choices: work on it locally or ask the agent to address the feedback, both on a worktree of the pull request branch, then ask the agent to push and reply in each thread. It does not re-request review, since the pull request is already approved.
+
 Worktrees are created through Herdr's own worktree support, so `worktree.created` and `worktree.removed` [plugin hooks](/docs/plugins/) run for them, exactly as for worktrees you create by hand.
 
 ### Workflows

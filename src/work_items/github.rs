@@ -148,8 +148,8 @@ impl Event {
             Self::CiFailing => &[ReviewMode::FixChecks, ReviewMode::FixChecksAgent],
             Self::Assigned => &[ReviewMode::StartIssue, ReviewMode::StartIssueAgent],
             Self::Mentioned => &[ReviewMode::ThreadAgent],
-            // Merging is carried out by the source, not in a workspace.
-            Self::ReadyToMerge => &[],
+            // Merging is carried out by the source; the workspace is for review nits.
+            Self::ReadyToMerge => &[ReviewMode::Address, ReviewMode::AddressAgent],
         }
     }
 }
@@ -243,7 +243,7 @@ pub(crate) struct GithubDetail {
     /// Users whose review is currently requested; only fetched for changes-requested items.
     #[serde(default)]
     pub review_requests: Vec<GithubReviewRequest>,
-    /// Inline review comments; only fetched for changes-requested items.
+    /// Inline review comments; only fetched for changes-requested and ready-to-merge items.
     #[serde(default)]
     pub inline_comments: Vec<GithubInlineComment>,
     /// Failing checks; only fetched for failing-checks items.
@@ -903,13 +903,25 @@ pub(super) fn one_line(text: &str) -> String {
     )
 }
 
-/// Reviews that requested changes, then inline comments, as brief lines. Other reviews are
-/// left to the full threads the brief points at.
-fn feedback_list(detail: &GithubDetail) -> String {
-    let mut lines: Vec<String> = detail
-        .reviews
-        .iter()
-        .filter(|review| review.state == "CHANGES_REQUESTED")
+/// Reviews with feedback, then inline comments, as brief lines. Changes-requested items
+/// list the reviews requesting changes; ready-to-merge items every latest review with text.
+/// Other reviews are left to the full threads the brief points at.
+fn feedback_list(detail: &GithubDetail, event: Event) -> String {
+    let reviews: Vec<&GithubReview> = if event == Event::ReadyToMerge {
+        detail
+            .latest_reviews
+            .iter()
+            .filter(|review| !review.body.trim().is_empty())
+            .collect()
+    } else {
+        detail
+            .reviews
+            .iter()
+            .filter(|review| review.state == "CHANGES_REQUESTED")
+            .collect()
+    };
+    let mut lines: Vec<String> = reviews
+        .into_iter()
         .map(|review| {
             let author = review
                 .author
@@ -1001,6 +1013,12 @@ fn at_logins(logins: &[String]) -> String {
 fn changes_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
     let number = detail.number;
     let head = &detail.head_ref_name;
+    let event = Event::of(&item.external_id);
+    let heading = if event == Event::ReadyToMerge {
+        format!("Your GitHub pull request {repo}#{number} is approved; reviewers left comments")
+    } else {
+        format!("Reviewers requested changes on your GitHub pull request {repo}#{number}")
+    };
     let instructions = if mode == ReviewMode::AddressAgent {
         "Address each point now: make the changes and run the relevant tests, then commit \
          them on this branch. Do not push, reply or comment on GitHub yet. Report what you \
@@ -1010,7 +1028,7 @@ fn changes_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: Revie
          for my instructions before changing anything."
     };
     format!(
-        "Reviewers requested changes on your GitHub pull request {repo}#{number}: {title}\n\
+        "{heading}: {title}\n\
          {url}\n\
          This directory is a worktree on the pull request branch {head} (base {base}).\n\
          \n\
@@ -1027,7 +1045,7 @@ fn changes_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: Revie
         title = item.title,
         url = item.url,
         base = detail.base_ref_name,
-        feedback = feedback_list(detail),
+        feedback = feedback_list(detail, event),
         changed = detail.changed_files,
         additions = detail.additions,
         deletions = detail.deletions,
@@ -1082,7 +1100,7 @@ fn ci_brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode
 
 /// Follow-up asking the agent in the item's workspace to send its changes back to the
 /// reviewers. The agent does the GitHub writes; the user approves each in its pane.
-fn push_reply_brief(repo: &str, detail: &GithubDetail) -> String {
+fn push_reply_brief(repo: &str, detail: &GithubDetail, event: Event) -> String {
     let number = detail.number;
     let requesters = changes_requesters(detail);
     let rerequest = if requesters.is_empty() {
@@ -1115,7 +1133,7 @@ fn push_reply_brief(repo: &str, detail: &GithubDetail) -> String {
          Review feedback:\n\
          {feedback}",
         head = detail.head_ref_name,
-        feedback = feedback_list(detail),
+        feedback = feedback_list(detail, event),
     )
 }
 
@@ -1642,11 +1660,13 @@ impl WorkItemSource for GithubSource {
             }
         };
         let mut errors = Vec::new();
-        match event {
-            Event::ChangesRequested => match self.inline_comments(repo, number) {
+        if matches!(event, Event::ChangesRequested | Event::ReadyToMerge) {
+            match self.inline_comments(repo, number) {
                 Ok(comments) => detail.inline_comments = comments,
                 Err(error) => errors.push(format!("inline comments unavailable: {error}")),
-            },
+            }
+        }
+        match event {
             Event::CiFailing => match self.failing_checks(repo, number) {
                 Ok(checks) => detail.failing_checks = checks,
                 Err(error) => errors.push(format!("checks unavailable: {error}")),
@@ -1687,7 +1707,7 @@ impl WorkItemSource for GithubSource {
                     )
                 }
             },
-            Event::ReadyToMerge => merge_summary(&detail),
+            Event::ReadyToMerge => merge_summary(&detail, item.author.as_deref()),
             Event::CiFailing => {
                 let failing = detail.failing_checks.len();
                 format!(
@@ -1722,9 +1742,6 @@ impl WorkItemSource for GithubSource {
             };
         }
         let event = Event::of(&item.external_id);
-        if event == Event::ReadyToMerge {
-            return merge_choices(item, item_detail::<GithubDetail>(item).as_ref());
-        }
         let repo = parse_external_id(&item.external_id)
             .map(|(repo, _)| repo)
             .unwrap_or(&item.external_id);
@@ -1748,6 +1765,12 @@ impl WorkItemSource for GithubSource {
                 "The agent commits, pushes, replies in each thread and re-requests review; you \
                  approve each step in its pane",
             )),
+            Event::ReadyToMerge => Some((
+                PUSH_REPLY_CHOICE_ID,
+                "Ask agent to push and reply",
+                "The agent commits, pushes and replies in each thread; you approve each step \
+                 in its pane",
+            )),
             Event::CiFailing => Some((
                 PUSH_FIX_CHOICE_ID,
                 "Ask agent to push the fix",
@@ -1767,6 +1790,9 @@ impl WorkItemSource for GithubSource {
                     .then(|| "Work on it locally first".into()),
                 confirm: None,
             });
+        }
+        if event == Event::ReadyToMerge {
+            return merge_choices(item, item_detail::<GithubDetail>(item).as_ref(), choices);
         }
         let (label, url) = match event {
             Event::ReviewRequested => ("Review on GitHub", item.url.clone()),
@@ -2055,8 +2081,10 @@ impl WorkItemSource for GithubSource {
         let event = Event::of(&item.external_id);
         let briefs = matches!(
             (event, choice_id),
-            (Event::ChangesRequested, PUSH_REPLY_CHOICE_ID)
-                | (Event::CiFailing, PUSH_FIX_CHOICE_ID)
+            (
+                Event::ChangesRequested | Event::ReadyToMerge,
+                PUSH_REPLY_CHOICE_ID
+            ) | (Event::CiFailing, PUSH_FIX_CHOICE_ID)
         );
         let repo = parse_external_id(&item.external_id)
             .filter(|_| briefs)
@@ -2064,8 +2092,8 @@ impl WorkItemSource for GithubSource {
             .ok_or_else(|| format!("choice {choice_id} does not brief an agent"))?;
         let detail = item_detail::<GithubDetail>(item)
             .ok_or("details are not available yet; try again shortly")?;
-        Ok(if event == Event::ChangesRequested {
-            push_reply_brief(repo, &detail)
+        Ok(if choice_id == PUSH_REPLY_CHOICE_ID {
+            push_reply_brief(repo, &detail, event)
         } else {
             push_fix_brief(repo, &detail)
         })
@@ -2256,7 +2284,9 @@ fn merge_blocker(detail: &GithubDetail) -> Option<String> {
     }
 }
 
-fn merge_summary(detail: &GithubDetail) -> String {
+/// Approval, merge state and, when reviewers left any, how many comments they left.
+/// `pr_author` is left out of the count: replies you posted are not feedback.
+fn merge_summary(detail: &GithubDetail, pr_author: Option<&str>) -> String {
     let approvers = approvers(detail);
     let approved = if approvers.is_empty() {
         "Approved".to_string()
@@ -2270,14 +2300,41 @@ fn merge_summary(detail: &GithubDetail) -> String {
             .map(|blocker| blocker.to_lowercase())
             .unwrap_or_else(|| "ready to merge".into()),
     };
-    format!("{approved} · {state}")
+    let by_reviewer = |login: &str| Some(login) != pr_author;
+    let comments = detail
+        .latest_reviews
+        .iter()
+        .filter(|review| !review.body.trim().is_empty())
+        .filter(|review| {
+            review
+                .author
+                .as_ref()
+                .is_none_or(|author| by_reviewer(&author.login))
+        })
+        .count()
+        + detail
+            .inline_comments
+            .iter()
+            .filter(|comment| by_reviewer(&comment.author))
+            .count();
+    match comments {
+        0 => format!("{approved} · {state}"),
+        1 => format!("{approved} · {state} · 1 comment"),
+        n => format!("{approved} · {state} · {n} comments"),
+    }
 }
 
-/// Merge choices, your default method first, then opening it on GitHub.
-fn merge_choices(item: &WorkItem, detail: Option<&GithubDetail>) -> ItemChoices {
+/// Merge choices, your default method first, then `work` (addressing review comments in a
+/// workspace), then opening it on GitHub.
+fn merge_choices(
+    item: &WorkItem,
+    detail: Option<&GithubDetail>,
+    mut work: Vec<WorkItemChoiceInfo>,
+) -> ItemChoices {
     let Some(detail) = detail else {
+        work.push(open_on_github(item, "Open on GitHub"));
         return ItemChoices {
-            choices: vec![open_on_github(item, "Open on GitHub")],
+            choices: work,
             default_choice_id: Some(GITHUB_CHOICE_ID.into()),
         };
     };
@@ -2305,6 +2362,7 @@ fn merge_choices(item: &WorkItem, detail: Option<&GithubDetail>) -> ItemChoices 
         .map_or(GITHUB_CHOICE_ID.to_string(), |choice| {
             choice.choice_id.clone()
         });
+    choices.append(&mut work);
     choices.push(open_on_github(item, "Open on GitHub"));
     ItemChoices {
         choices,
@@ -3188,7 +3246,7 @@ mod tests {
             ..detail(&[])
         };
         assert_eq!(
-            feedback_list(&detail),
+            feedback_list(&detail, Event::ChangesRequested),
             "- [thread 100] src/a.rs:3 @bob: Still panics.\n- src/b.rs @bob: Stored before ids."
         );
     }
@@ -3761,7 +3819,17 @@ esac
             .iter()
             .map(|choice| choice.choice_id.as_str())
             .collect();
-        assert_eq!(ids, vec!["merge_squash", "merge_commit", "github"]);
+        assert_eq!(
+            ids,
+            vec![
+                "merge_squash",
+                "merge_commit",
+                "address",
+                "address_agent",
+                "push_reply",
+                "github"
+            ]
+        );
         assert_eq!(choices.default_choice_id.as_deref(), Some("merge_squash"));
         let squash = &choices.choices[0];
         assert_eq!(squash.action, WorkItemChoiceAction::Perform);
@@ -3770,8 +3838,37 @@ esac
             .as_deref()
             .is_some_and(|prompt| prompt.contains("cannot be undone")));
         assert_eq!(
-            merge_summary(&merge_detail("CLEAN")),
+            merge_summary(&merge_detail("CLEAN"), Some("me")),
             "Approved by tony · ready to merge"
+        );
+    }
+
+    #[test]
+    fn merge_summary_counts_reviewer_comments_but_not_your_replies() {
+        let comment = |id: u64, author: &str| GithubInlineComment {
+            id,
+            in_reply_to: (id > 1).then_some(1),
+            path: "src/a.rs".into(),
+            line: Some(3),
+            author: author.into(),
+            body: "nit: rename this".into(),
+        };
+        let mut detail = merge_detail("CLEAN");
+        detail.latest_reviews[0].body = "LGTM, one nit".into();
+        detail.inline_comments = vec![comment(1, "tony"), comment(2, "me")];
+        assert_eq!(
+            merge_summary(&detail, Some("me")),
+            "Approved by tony · ready to merge · 2 comments"
+        );
+        // The brief carries the approval's text alongside the inline thread.
+        let feedback = feedback_list(&detail, Event::ReadyToMerge);
+        assert!(
+            feedback.contains("@tony (approved): LGTM, one nit"),
+            "{feedback}"
+        );
+        assert!(
+            feedback.contains("[thread 1] src/a.rs:3 @tony"),
+            "{feedback}"
         );
     }
 
