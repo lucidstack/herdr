@@ -19,16 +19,31 @@ pub(super) fn render_work_item_overlay(
     }
 }
 
+/// Longest the status message above the choices may wrap to.
+const MAX_STATUS_ROWS: usize = 3;
+
 fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Option<OverlayRender> {
     let item = &o.item;
     let choice_count = item.choices.len() as u16;
-    // Heading (3 rows), gap, one row per choice, gap, detail, hint, plus borders.
-    let q = popup(b.area, WIDTH, choice_count + 9)?;
+    let (status, status_color) = status_message(item, p);
+    let status_rows = status.map_or(Vec::new(), |message| {
+        wrap(
+            &message,
+            usize::from(WIDTH.saturating_sub(4)),
+            MAX_STATUS_ROWS,
+        )
+    });
+    let status_height = status_rows.len().max(1) as u16;
+    // Heading, title and status, gap, one row per choice, gap, detail, hint, plus borders.
+    let q = popup(b.area, WIDTH, choice_count + 8 + status_height)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
-    let heading = match &item.author {
-        Some(author) => format!(" {} · @{author}", item.context),
-        None => format!(" {}", item.context),
-    };
+    let mut heading = format!(" {}", item.context);
+    if let Some(state) = &item.tracker_state {
+        heading.push_str(&format!(" · {state}"));
+    }
+    if let Some(author) = &item.author {
+        heading.push_str(&format!(" · @{author}"));
+    }
     put_text(
         b,
         i.x,
@@ -48,64 +63,64 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         &format!(" {}", item.title),
         Style::default().fg(p.text).bg(p.panel_bg),
     );
-    if let Some(notice) = &item.notice {
+    for (row, line) in status_rows.iter().enumerate() {
         put_text(
             b,
             i.x,
-            i.y + 2,
+            i.y + 2 + row as u16,
             i.width,
-            &format!(" {notice}"),
-            Style::default().fg(p.peach).bg(p.panel_bg),
-        );
-    } else if let Some(reminder) = &item.start_reminder {
-        put_text(
-            b,
-            i.x,
-            i.y + 2,
-            i.width,
-            &format!(" {reminder}"),
-            Style::default().fg(p.yellow).bg(p.panel_bg),
-        );
-    } else if let Some(summary) = &item.summary {
-        put_text(
-            b,
-            i.x,
-            i.y + 2,
-            i.width,
-            &format!(" {summary}"),
-            Style::default().fg(p.subtext0).bg(p.panel_bg),
+            &format!(" {line}"),
+            Style::default().fg(status_color).bg(p.panel_bg),
         );
     }
+    let succeeded = item
+        .action_outcome
+        .as_ref()
+        .filter(|outcome| outcome.succeeded)
+        .map(|outcome| outcome.choice_id.as_str());
+    let spinner = SPINNER_FRAMES[o.spinner_frame % SPINNER_FRAMES.len()];
     let mut menu_rows = Vec::with_capacity(item.choices.len());
     for (index, choice) in item.choices.iter().enumerate() {
-        let y = i.y + 4 + index as u16;
+        let y = i.y + 3 + status_height + index as u16;
         if y >= i.bottom().saturating_sub(3) {
             break;
         }
         let rect = Rect::new(i.x + 1, y, i.width.saturating_sub(2), 1);
         let highlighted = index == o.highlighted;
-        let style = if highlighted && choice.disabled_reason.is_none() {
+        let done = succeeded == Some(choice.choice_id.as_str());
+        let running = item.running_choice_id.as_deref() == Some(choice.choice_id.as_str());
+        let unavailable = choice.disabled_reason.is_some() || done;
+        let style = if highlighted && !unavailable {
             Style::default()
                 .fg(contrast(p))
                 .bg(p.accent)
                 .add_modifier(Modifier::BOLD)
         } else if highlighted {
             Style::default().fg(p.overlay0).bg(p.surface0)
-        } else if choice.disabled_reason.is_some() {
+        } else if unavailable {
             Style::default().fg(p.overlay0).bg(p.panel_bg)
         } else {
             Style::default().fg(p.text).bg(p.panel_bg)
         };
         b.set_style(rect, style);
-        let marker = if highlighted { "↵" } else { " " };
-        put_text(
+        let marker = if running {
+            spinner
+        } else if highlighted {
+            "↵"
+        } else {
+            " "
+        };
+        let x = put_segment(
             b,
             rect.x,
             rect.y,
-            rect.width,
+            rect.right(),
             &format!(" {marker} {}", choice.label),
             style,
         );
+        if done {
+            put_segment(b, x, rect.y, rect.right(), " ✓", style.fg(p.green));
+        }
         menu_rows.push((rect, index));
     }
     let confirming = o
@@ -154,6 +169,55 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         menu_rows,
         ..OverlayRender::default()
     })
+}
+
+/// The line under the title: how the last action ended, else the item's notice, reminder
+/// or summary.
+fn status_message<'a>(
+    item: &'a crate::api::schema::WorkItemInfo,
+    p: &Palette,
+) -> (Option<std::borrow::Cow<'a, str>>, ratatui::style::Color) {
+    if item.running_choice_id.is_none() {
+        if let Some(outcome) = &item.action_outcome {
+            return if outcome.succeeded {
+                (Some(format!("✓ {}", outcome.message).into()), p.green)
+            } else {
+                (Some(outcome.message.as_str().into()), p.red)
+            };
+        }
+    }
+    if let Some(notice) = &item.notice {
+        (Some(notice.as_str().into()), p.peach)
+    } else if let Some(reminder) = &item.start_reminder {
+        (Some(reminder.as_str().into()), p.yellow)
+    } else if let Some(summary) = &item.summary {
+        (Some(summary.as_str().into()), p.subtext0)
+    } else {
+        (None, p.subtext0)
+    }
+}
+
+/// Word-wraps `text` to `width` columns in at most `max_rows` rows; the last row keeps the
+/// rest and is cut when drawn.
+fn wrap(text: &str, width: usize, max_rows: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let needed = current.width() + usize::from(!current.is_empty()) + word.width();
+        if !current.is_empty() && needed > width && rows.len() + 1 < max_rows {
+            rows.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
 }
 
 fn render_checklist(

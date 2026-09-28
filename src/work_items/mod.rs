@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
-    WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo, WorkItemSourceInfo,
+    WorkItemActionOutcome, WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo,
+    WorkItemSourceInfo,
 };
 use crate::config::WorkItemsConfig;
 
@@ -494,12 +495,13 @@ impl WorkItems {
 
     /// Marks a `Perform` choice as running: the item shows a spinner until the source stops
     /// reporting it. Fails while one is already running.
-    pub(crate) fn begin_action(&mut self, key: &str) -> Result<(), &'static str> {
+    pub(crate) fn begin_action(&mut self, key: &str, choice_id: &str) -> Result<(), &'static str> {
         let item = self.state.get_mut(key).ok_or("work_item_not_found")?;
-        if item.action_in_flight {
+        if item.action_running.is_some() {
             return Err("work_item_busy");
         }
-        item.action_in_flight = true;
+        item.action_running = Some(choice_id.to_string());
+        item.action_outcome = None;
         item.action_error = None;
         item.phase_before_action = Some(item.phase);
         item.phase = WorkItemPhase::AwaitingExternal;
@@ -517,7 +519,7 @@ impl WorkItems {
         now: Instant,
     ) -> Option<WorkItemNotice> {
         let item = self.state.get_mut(key)?;
-        item.action_in_flight = false;
+        let choice_id = item.action_running.take()?;
         let before = item.phase_before_action.take();
         let context = item.context.clone();
         let source_id = item.source_id.clone();
@@ -528,6 +530,11 @@ impl WorkItems {
                 if before == Some(WorkItemPhase::Local) {
                     item.phase = WorkItemPhase::Local;
                 }
+                item.action_outcome = Some(WorkItemActionOutcome {
+                    choice_id,
+                    succeeded: true,
+                    message: message.clone(),
+                });
                 self.next_poll.insert(source_id, now);
                 WorkItemNotice {
                     title: message,
@@ -537,6 +544,11 @@ impl WorkItems {
             Err(error) => {
                 item.phase = before.unwrap_or(WorkItemPhase::Pending);
                 item.action_error = Some(error.clone());
+                item.action_outcome = Some(WorkItemActionOutcome {
+                    choice_id,
+                    succeeded: false,
+                    message: error.clone(),
+                });
                 WorkItemNotice {
                     title: "Could not complete the action".into(),
                     body: Some(format!("{context} · {error}")),

@@ -1103,7 +1103,8 @@ impl ClientShellState {
             .is_some_and(|projection| projection.items.iter().any(item_animates));
         let overlay_animates = match self.overlay.as_ref() {
             Some(ClientShellOverlay::WorkItem(overlay)) => {
-                (overlay.awaiting_provisioning && overlay.item.provisioning.is_none())
+                overlay.item.running_choice_id.is_some()
+                    || (overlay.awaiting_provisioning && overlay.item.provisioning.is_none())
                     || overlay
                         .item
                         .provisioning
@@ -1514,7 +1515,13 @@ impl ClientShellState {
         let Some(choice) = overlay.item.choices.get(index).cloned() else {
             return;
         };
-        if choice.disabled_reason.is_some() {
+        // One action at a time, and a finished fix is not repeated.
+        let done = overlay
+            .item
+            .action_outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.succeeded && outcome.choice_id == choice.choice_id);
+        if choice.disabled_reason.is_some() || overlay.item.running_choice_id.is_some() || done {
             return;
         }
         // Choices that cannot be undone ask first; the second confirm carries them out.
@@ -1525,7 +1532,7 @@ impl ClientShellState {
         }
         let method = Method::WorkItemChoose(WorkItemChooseParams {
             item_id: overlay.item.item_id.clone(),
-            choice_id: choice.choice_id,
+            choice_id: choice.choice_id.clone(),
         });
         match choice.action {
             WorkItemChoiceAction::OpenUrl { url } => {
@@ -1541,9 +1548,16 @@ impl ClientShellState {
                 overlay.item.provisioning = None;
                 self.push_endpoint_method(method, outcome);
             }
-            // The server carries it out; the item's spinner shows it running. A brief goes to
-            // the agent, which the server focuses.
-            WorkItemChoiceAction::Perform | WorkItemChoiceAction::BriefAgent => {
+            // The dialog stays open and shows how it ends: a spinner on the choice, then
+            // the outcome above the choices.
+            WorkItemChoiceAction::Perform => {
+                overlay.highlighted = index;
+                overlay.item.running_choice_id = Some(choice.choice_id.clone());
+                overlay.item.action_outcome = None;
+                self.push_endpoint_method(method, outcome);
+            }
+            // A brief goes to the agent, which the server focuses.
+            WorkItemChoiceAction::BriefAgent => {
                 self.overlay = None;
                 self.push_endpoint_method(method, outcome);
             }

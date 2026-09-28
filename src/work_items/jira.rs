@@ -45,8 +45,6 @@ pub(crate) struct JiraSource {
     api_base: Mutex<Option<String>>,
     /// The token owner's account id, to tell whether a ticket is assigned to you.
     me: Mutex<Option<String>>,
-    /// Jira refused a change (assign or transition): the token is read-only.
-    write_denied: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Deserialize)]
@@ -291,8 +289,8 @@ fn project_key(issue_key: &str) -> &str {
         .map_or(issue_key, |(project, _)| project)
 }
 
-const WRITE_SCOPE_HINT: &str =
-    "Jira refused the change; the API token needs write:jira-work to assign and start issues";
+const WRITE_SCOPE_HINT: &str = "Jira refused the change: the API token needs write:jira-work to \
+     assign and start issues. After replacing it, restart the Herdr server so it reads the new token";
 
 /// What starting work on an issue changes in Jira.
 #[derive(Debug, PartialEq, Eq)]
@@ -344,7 +342,7 @@ fn item_detail(item: &WorkItem) -> Option<JiraDetail> {
 
 /// The reminder for an issue you work on while Jira lags behind: not assigned to you,
 /// or still in a to-do status.
-fn start_reminder_for(detail: &JiraDetail, write_denied: bool) -> Option<StartReminder> {
+fn start_reminder_for(detail: &JiraDetail) -> Option<StartReminder> {
     let unassigned = detail.assigned_to_me == Some(false);
     let to_do = detail.status_category == "new";
     let status = &detail.status;
@@ -363,11 +361,7 @@ fn start_reminder_for(detail: &JiraDetail, write_denied: bool) -> Option<StartRe
             "Move to In Progress",
         ),
     };
-    let disabled_reason = if write_denied {
-        Some(WRITE_SCOPE_HINT.to_string())
-    } else {
-        start_plan(detail).err()
-    };
+    let disabled_reason = start_plan(detail).err();
     Some(StartReminder {
         message,
         choice: WorkItemChoiceInfo {
@@ -396,7 +390,6 @@ impl JiraSource {
             build_error,
             api_base: Mutex::new(None),
             me: Mutex::new(None),
-            write_denied: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -438,16 +431,13 @@ impl JiraSource {
             .collect())
     }
 
-    /// A change to an issue. A refusal marks the token read-only, which disables the
-    /// start reminder's fix until Herdr restarts with another token.
+    /// A change to an issue.
     fn write(&self, method: &str, path: &str, body: &str) -> Result<(), String> {
         let (status, response) = self.api_with_status(method, path, Some(body))?;
         if (200..300).contains(&status) {
             return Ok(());
         }
         if matches!(status, 401 | 403) {
-            self.write_denied
-                .store(true, std::sync::atomic::Ordering::Relaxed);
             return Err(WRITE_SCOPE_HINT.into());
         }
         Err(http_error(status, &response))
@@ -1319,10 +1309,7 @@ impl WorkItemSource for JiraSource {
     }
 
     fn start_reminder(&self, item: &WorkItem) -> Option<StartReminder> {
-        start_reminder_for(
-            &item_detail(item)?,
-            self.write_denied.load(std::sync::atomic::Ordering::Relaxed),
-        )
+        start_reminder_for(&item_detail(item)?)
     }
 
     fn perform(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
@@ -1414,7 +1401,8 @@ mod tests {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
-            action_in_flight: false,
+            action_running: None,
+            action_outcome: None,
             action_error: None,
             waiting: false,
             manual: false,
@@ -1463,19 +1451,18 @@ mod tests {
 
     #[test]
     fn up_to_date_issue_has_no_start_reminder() {
-        assert_eq!(start_reminder_for(&detail(), false), None);
+        assert_eq!(start_reminder_for(&detail()), None);
         // Details stored before assignment was recorded never remind.
         let unknown = JiraDetail {
             assigned_to_me: None,
             ..detail()
         };
-        assert_eq!(start_reminder_for(&unknown, false), None);
+        assert_eq!(start_reminder_for(&unknown), None);
     }
 
     #[test]
     fn unassigned_to_do_issue_offers_assigning_and_starting_in_one_step() {
-        let reminder =
-            start_reminder_for(&to_do(false, &["In Progress"]), false).expect("reminder");
+        let reminder = start_reminder_for(&to_do(false, &["In Progress"])).expect("reminder");
         assert!(reminder.message.contains("isn't assigned to you"));
         assert!(reminder.message.contains("To Do"));
         assert_eq!(
@@ -1497,14 +1484,13 @@ mod tests {
 
     #[test]
     fn start_reminder_label_names_only_the_missing_step() {
-        let move_only =
-            start_reminder_for(&to_do(true, &["In Progress"]), false).expect("reminder");
+        let move_only = start_reminder_for(&to_do(true, &["In Progress"])).expect("reminder");
         assert_eq!(move_only.choice.label, "Move to In Progress");
         let assign_only = JiraDetail {
             assigned_to_me: Some(false),
             ..detail()
         };
-        let reminder = start_reminder_for(&assign_only, false).expect("reminder");
+        let reminder = start_reminder_for(&assign_only).expect("reminder");
         assert_eq!(reminder.choice.label, "Assign to me");
         assert_eq!(
             start_plan(&assign_only),
@@ -1518,8 +1504,7 @@ mod tests {
     #[test]
     fn start_fix_is_disabled_without_a_single_in_progress_transition() {
         for transitions in [&[][..], &["Doing", "In Review"][..]] {
-            let reminder =
-                start_reminder_for(&to_do(true, transitions), false).expect("still reminds");
+            let reminder = start_reminder_for(&to_do(true, transitions)).expect("still reminds");
             assert!(reminder.choice.disabled_reason.is_some(), "{transitions:?}");
         }
     }
@@ -1537,16 +1522,6 @@ mod tests {
                 }),
             })
         );
-    }
-
-    #[test]
-    fn read_only_token_disables_the_start_fix_with_the_scope_it_needs() {
-        let reminder = start_reminder_for(&to_do(false, &["In Progress"]), true).expect("reminder");
-        assert!(reminder
-            .choice
-            .disabled_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("write:jira-work")));
     }
 
     #[test]

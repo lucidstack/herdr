@@ -109,6 +109,8 @@ mod tests {
             provisioning: None,
             is_pick_next: false,
             start_reminder: None,
+            running_choice_id: None,
+            action_outcome: None,
         }
     }
 

@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::schema::{WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo};
+use crate::api::schema::{
+    WorkItemActionOutcome, WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo,
+};
 
 use super::source::{ItemChoices, PreparedItem, SourceItem};
 
@@ -65,9 +67,12 @@ pub(crate) struct WorkItem {
     /// Why removing the workspace on resolution failed.
     #[serde(skip)]
     pub resolve_error: Option<String>,
-    /// A choice the source is carrying out, e.g. a merge.
+    /// The choice the source is carrying out, e.g. a merge.
     #[serde(skip)]
-    pub action_in_flight: bool,
+    pub action_running: Option<String>,
+    /// How the last such choice ended, until another one starts.
+    #[serde(skip)]
+    pub action_outcome: Option<WorkItemActionOutcome>,
     /// Why the last such choice failed.
     #[serde(skip)]
     pub action_error: Option<String>,
@@ -109,7 +114,8 @@ impl WorkItem {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
-            action_in_flight: false,
+            action_running: None,
+            action_outcome: None,
             action_error: None,
             waiting: false,
             manual: false,
@@ -145,7 +151,8 @@ impl WorkItem {
             prepare_in_flight: false,
             provisioning: None,
             resolve_error: None,
-            action_in_flight: false,
+            action_running: None,
+            action_outcome: None,
             action_error: None,
             waiting: false,
             manual: false,
@@ -194,6 +201,8 @@ impl WorkItem {
             provisioning: self.provisioning.clone(),
             is_pick_next: self.is_pick_next,
             start_reminder: reminder,
+            running_choice_id: self.action_running.clone(),
+            action_outcome: self.action_outcome.clone(),
         }
     }
 

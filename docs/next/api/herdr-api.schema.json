@@ -1127,6 +1127,27 @@
           ],
           "type": "object"
         },
+        "WorkItemActionOutcome": {
+          "description": "How a `Perform` choice ended.",
+          "properties": {
+            "choice_id": {
+              "type": "string"
+            },
+            "message": {
+              "description": "What changed, e.g. \"TECH-7 is yours and In Progress\", or why it failed.",
+              "type": "string"
+            },
+            "succeeded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "choice_id",
+            "succeeded",
+            "message"
+          ],
+          "type": "object"
+        },
         "WorkItemChoiceAction": {
           "oneOf": [
             {
@@ -1238,6 +1259,17 @@
         },
         "WorkItemInfo": {
           "properties": {
+            "action_outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkItemActionOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How the last `Perform` choice on this item ended, until another one starts."
+            },
             "author": {
               "type": [
                 "string",
@@ -1295,6 +1327,13 @@
             "resolved": {
               "default": false,
               "type": "boolean"
+            },
+            "running_choice_id": {
+              "description": "The `Perform` choice the source is carrying out right now.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "seen": {
               "type": "boolean"
@@ -11393,6 +11432,27 @@
           ],
           "type": "object"
         },
+        "WorkItemActionOutcome": {
+          "description": "How a `Perform` choice ended.",
+          "properties": {
+            "choice_id": {
+              "type": "string"
+            },
+            "message": {
+              "description": "What changed, e.g. \"TECH-7 is yours and In Progress\", or why it failed.",
+              "type": "string"
+            },
+            "succeeded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "choice_id",
+            "succeeded",
+            "message"
+          ],
+          "type": "object"
+        },
         "WorkItemChoiceAction": {
           "oneOf": [
             {
@@ -11504,6 +11564,17 @@
         },
         "WorkItemInfo": {
           "properties": {
+            "action_outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemActionOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How the last `Perform` choice on this item ended, until another one starts."
+            },
             "author": {
               "type": [
                 "string",
@@ -11561,6 +11632,13 @@
             "resolved": {
               "default": false,
               "type": "boolean"
+            },
+            "running_choice_id": {
+              "description": "The `Perform` choice the source is carrying out right now.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "seen": {
               "type": "boolean"

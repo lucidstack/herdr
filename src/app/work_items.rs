@@ -430,7 +430,7 @@ impl App {
             return Err(("work_item_not_found", format!("unknown work item {key}")));
         };
         self.work_items
-            .begin_action(key)
+            .begin_action(key, choice_id)
             .map_err(|code| (code, format!("{key} is already being handled")))?;
         let event_tx = self.event_tx.clone();
         let key = key.to_string();
@@ -1621,12 +1621,23 @@ mod tests {
 
         assert!(serde_json::from_str::<SuccessResponse>(&choose(&mut app)).is_ok());
         run_until(&mut app, |app| list(app)[0].phase == WorkItemPhase::Pending);
-        assert_eq!(list(&mut app)[0].notice.as_deref(), Some("merge refused"));
+        let failed = list(&mut app).remove(0);
+        assert_eq!(failed.notice.as_deref(), Some("merge refused"));
+        assert_eq!(failed.running_choice_id, None);
+        assert!(failed.action_outcome.as_ref().is_some_and(|outcome| {
+            outcome.choice_id == "do" && !outcome.succeeded && outcome.message == "merge refused"
+        }));
 
         // Success polls at once; the item goes as soon as the source stops listing it.
         *source.perform_error.lock().unwrap() = None;
-        source.set_items(Vec::new());
         assert!(serde_json::from_str::<SuccessResponse>(&choose(&mut app)).is_ok());
+        run_until(&mut app, |app| {
+            list(app)[0]
+                .action_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.succeeded)
+        });
+        source.set_items(Vec::new());
         run_until(&mut app, |app| list(app).is_empty());
     }
 

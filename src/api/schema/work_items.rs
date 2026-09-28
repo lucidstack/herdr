@@ -198,6 +198,21 @@ pub struct WorkItemInfo {
     /// user, e.g. "You're working on this, but it isn't assigned to you".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_reminder: Option<String>,
+    /// The `Perform` choice the source is carrying out right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_choice_id: Option<String>,
+    /// How the last `Perform` choice on this item ended, until another one starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_outcome: Option<WorkItemActionOutcome>,
+}
+
+/// How a `Perform` choice ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemActionOutcome {
+    pub choice_id: String,
+    pub succeeded: bool,
+    /// What changed, e.g. "TECH-7 is yours and In Progress", or why it failed.
+    pub message: String,
 }
 
 /// A local clone mapped by a work-item source (`[work_items.github] repos`,

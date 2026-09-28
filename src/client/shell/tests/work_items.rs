@@ -47,6 +47,8 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         provisioning: None,
         is_pick_next: false,
         start_reminder: None,
+        running_choice_id: None,
+        action_outcome: None,
     }
 }
 
@@ -715,7 +717,81 @@ fn irreversible_choice_runs_only_after_a_second_confirm() {
         endpoint_methods(&second)[..],
         [Method::WorkItemChoose(params)] if params.choice_id == "merge_squash"
     ));
-    assert!(state.overlay.is_none());
+    assert!(
+        matches!(
+            state.overlay.as_ref(),
+            Some(ClientShellOverlay::WorkItem(_))
+        ),
+        "the dialog stays to show the outcome"
+    );
+}
+
+#[test]
+fn performed_choice_shows_its_outcome_and_retries_only_after_failure() {
+    use crate::api::schema::WorkItemActionOutcome;
+
+    let mut started = item("7");
+    started.seen = true;
+    started.choices.insert(
+        0,
+        WorkItemChoiceInfo {
+            choice_id: "start_work".into(),
+            label: "Assign to me and move to In Progress".into(),
+            description: None,
+            action: WorkItemChoiceAction::Perform,
+            disabled_reason: None,
+            confirm: None,
+        },
+    );
+    started.default_choice_id = Some("start_work".into());
+    let mut state = shell_with(vec![started.clone()]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
+    let sent = state.handle_input_bytes(b"\r");
+    assert!(matches!(
+        endpoint_methods(&sent)[..],
+        [Method::WorkItemChoose(params)] if params.choice_id == "start_work"
+    ));
+    // Running: a second Enter sends nothing.
+    assert!(endpoint_methods(&state.handle_input_bytes(b"\r")).is_empty());
+
+    let refused = "Jira refused the change: the API token needs write:jira-work to assign and \
+                   start issues. After replacing it, restart the Herdr server so it reads the new token";
+    let mut failed = started.clone();
+    failed.notice = Some(refused.into());
+    failed.action_outcome = Some(WorkItemActionOutcome {
+        choice_id: "start_work".into(),
+        succeeded: false,
+        message: refused.into(),
+    });
+    state.set_endpoint_work_items(&ClientEndpointId::Local, projection(2, vec![failed]));
+    let text = screen_text(&mut state);
+    assert!(
+        text.contains("restart the Herdr server"),
+        "the reason wraps: {text}"
+    );
+    assert!(matches!(
+        endpoint_methods(&state.handle_input_bytes(b"\r"))[..],
+        [Method::WorkItemChoose(params)] if params.choice_id == "start_work"
+    ));
+
+    let mut done = started;
+    done.action_outcome = Some(WorkItemActionOutcome {
+        choice_id: "start_work".into(),
+        succeeded: true,
+        message: "TECH-7 is yours and In Progress".into(),
+    });
+    state.set_endpoint_work_items(&ClientEndpointId::Local, projection(3, vec![done]));
+    let text = screen_text(&mut state);
+    assert!(text.contains("✓ TECH-7 is yours and In Progress"), "{text}");
+    assert!(
+        text.contains("Assign to me and move to In Progress ✓"),
+        "{text}"
+    );
+    assert!(
+        endpoint_methods(&state.handle_input_bytes(b"\r")).is_empty(),
+        "a finished fix is not repeated"
+    );
 }
 
 #[test]
