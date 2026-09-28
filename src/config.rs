@@ -31,8 +31,8 @@ pub use self::{
         ToastHerdrPosition, UpdateChannelConfig, MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
-        AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarSection, SidebarTokenStyle,
-        SpaceSidebarToken, SpacesSidebarConfig,
+        AgentSidebarToken, AgentsSidebarConfig, ServiceIcons, SidebarConfig, SidebarSection,
+        SidebarTokenStyle, SpaceSidebarToken, SpacesSidebarConfig,
     },
     sound::SoundConfig,
     tab_bar::TabBarRightEntryConfig,

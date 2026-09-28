@@ -1388,6 +1388,7 @@ mod tests {
             url: format!("https://example.atlassian.net/browse/{key}"),
             updated_at: "2026-09-24T15:51:59.000+0100".into(),
             tracker_state: Some("In Progress · Tony".into()),
+            linked_pull_request: None,
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,
             prepare_error: None,

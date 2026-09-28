@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::schema::{
     WorkItemActionOutcome, WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo,
+    WorkItemPullRequestInfo,
 };
 
 use super::source::{ItemChoices, PreparedItem, SourceItem};
@@ -23,6 +24,9 @@ pub(crate) struct WorkItem {
     /// Where the ticket stands in its tracker, e.g. "Selected for Development · unassigned".
     #[serde(default)]
     pub tracker_state: Option<String>,
+    /// The pull request opened from the branch of the item's workspace.
+    #[serde(default)]
+    pub linked_pull_request: Option<WorkItemPullRequestInfo>,
     #[serde(default)]
     pub detail: Option<serde_json::Value>,
     #[serde(default)]
@@ -101,6 +105,7 @@ impl WorkItem {
             url: item.url,
             updated_at: item.updated_at,
             tracker_state: item.tracker_state,
+            linked_pull_request: None,
             detail: None,
             summary: None,
             prepare_error: None,
@@ -138,6 +143,7 @@ impl WorkItem {
             url: String::new(),
             updated_at: "0".to_string(),
             tracker_state: None,
+            linked_pull_request: None,
             detail: None,
             summary: None,
             prepare_error: None,
@@ -174,8 +180,14 @@ impl WorkItem {
         }
     }
 
-    /// `reminder` is the start reminder line, already gated by workspace and mute.
-    pub(crate) fn info(&self, choices: ItemChoices, reminder: Option<String>) -> WorkItemInfo {
+    /// `reminder` is the start reminder line, already gated by workspace and mute;
+    /// `folded_into` the item whose linked pull request this one is.
+    pub(crate) fn info(
+        &self,
+        choices: ItemChoices,
+        reminder: Option<String>,
+        folded_into: Option<String>,
+    ) -> WorkItemInfo {
         WorkItemInfo {
             item_id: self.key.clone(),
             source_id: self.source_id.clone(),
@@ -203,6 +215,8 @@ impl WorkItem {
             start_reminder: reminder,
             running_choice_id: self.action_running.clone(),
             action_outcome: self.action_outcome.clone(),
+            linked_pull_request: self.linked_pull_request.clone(),
+            folded_into,
         }
     }
 
@@ -210,6 +224,8 @@ impl WorkItem {
         self.workspace_id = None;
         self.provisioning = None;
         self.phase = WorkItemPhase::Pending;
+        // Found through the workspace's branch; without it the link can no longer be kept current.
+        self.linked_pull_request = None;
     }
 }
 

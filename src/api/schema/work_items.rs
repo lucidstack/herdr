@@ -204,6 +204,29 @@ pub struct WorkItemInfo {
     /// How the last `Perform` choice on this item ended, until another one starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_outcome: Option<WorkItemActionOutcome>,
+    /// The pull request opened from the branch of the item's workspace, for items that
+    /// are not pull requests themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_pull_request: Option<WorkItemPullRequestInfo>,
+    /// The item whose linked pull request this item is: shown with that item instead of
+    /// on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded_into: Option<String>,
+}
+
+/// A pull request found for the branch an item is worked on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemPullRequestInfo {
+    /// Source hosting it, e.g. "github".
+    pub source_id: String,
+    /// Repository as owner/name.
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    /// Open and still a draft: it waits for you to mark it ready for review.
+    pub is_draft: bool,
+    /// One line for the user, e.g. "draft", "awaiting review · checks running", "merged".
+    pub status: String,
 }
 
 /// How a `Perform` choice ended.

@@ -67,7 +67,20 @@ pub(crate) enum WorkItemsEvent {
         result: Result<Box<TicketDetail>, String>,
         respond_to: std::sync::mpsc::Sender<String>,
     },
+    /// Pull requests looked up for items' workspace branches, per item key.
+    PullRequestsFound {
+        results: Vec<(
+            String,
+            Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String>,
+        )>,
+    },
 }
+
+/// How often the pull requests of items' workspace branches are looked up again.
+const PULL_REQUEST_LOOKUP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A due pull request lookup: the sources to ask, and (item key, workspace id) pairs.
+pub(crate) type PullRequestLookup = (Vec<Arc<dyn WorkItemSource>>, Vec<(String, String)>);
 
 /// A review worktree created for an item, remembered so its branch can be cleaned up
 /// when Herdr removes the worktree.
@@ -128,6 +141,9 @@ pub(crate) struct WorkItems {
     focus_requested: bool,
     /// Mapped local clones, reachable from the inbox even without an item.
     repositories: Vec<Repository>,
+    /// When the pull requests of items' workspace branches are looked up next.
+    next_pull_request_lookup: Instant,
+    pull_request_lookup_in_flight: bool,
 }
 
 /// A mapped local clone and the Git key that recognises workspaces on its main checkout.
@@ -223,6 +239,8 @@ impl WorkItems {
             pick_next: PickNextState::default(),
             focus_requested: false,
             repositories: Vec::new(),
+            next_pull_request_lookup: Instant::now(),
+            pull_request_lookup_in_flight: false,
         }
     }
 
@@ -322,6 +340,14 @@ impl WorkItems {
             .state
             .next_snooze_end()
             .map(|until| Instant::now() + Duration::from_secs(until.saturating_sub(unix_now())));
+        // Only while something could have a pull request: items with a workspace.
+        let pull_request_lookup = (!self.pull_request_lookup_in_flight
+            && self
+                .state
+                .items()
+                .iter()
+                .any(|item| item.workspace_id.is_some() && !item.is_pick_next))
+        .then_some(self.next_pull_request_lookup);
         self.next_poll
             .iter()
             .filter(|(id, _)| !self.polls_in_flight.contains(*id))
@@ -333,6 +359,7 @@ impl WorkItems {
                     .map(|removal| removal.pending.next_check),
             )
             .chain(snooze_end)
+            .chain(pull_request_lookup)
             .min()
     }
 
@@ -440,7 +467,61 @@ impl WorkItems {
             }
             // Handled by the app driver, which owns the response channel.
             WorkItemsEvent::TicketFetchedForAdd { .. } => (false, Vec::new()),
+            WorkItemsEvent::PullRequestsFound { results } => {
+                self.pull_request_lookup_in_flight = false;
+                self.next_pull_request_lookup = now + PULL_REQUEST_LOOKUP_INTERVAL;
+                let mut changed = false;
+                for (key, result) in results {
+                    let found = match result {
+                        Ok(found) => found,
+                        // Keep what was found last; the next lookup tries again.
+                        Err(error) => {
+                            tracing::warn!(item = %key, %error, "pull request lookup failed");
+                            continue;
+                        }
+                    };
+                    if let Some(item) = self.state.get_mut(&key) {
+                        // A workspace closed while the lookup ran has nothing to link.
+                        if item.workspace_id.is_some() && item.linked_pull_request != found {
+                            item.linked_pull_request = found;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    self.changed();
+                }
+                (changed, Vec::new())
+            }
         }
+    }
+
+    /// When a lookup is due: the sources to ask and the items to look up, as
+    /// (item key, workspace id). Marks the lookup in flight.
+    pub(crate) fn take_due_pull_request_lookup(
+        &mut self,
+        now: Instant,
+    ) -> Option<PullRequestLookup> {
+        if self.pull_request_lookup_in_flight || self.next_pull_request_lookup > now {
+            return None;
+        }
+        let candidates: Vec<(String, String)> = self
+            .state
+            .items()
+            .iter()
+            .filter(|item| !item.is_pick_next)
+            .filter(|item| {
+                self.source(&item.source_id)
+                    .is_some_and(|source| source.pull_request_of(item).is_none())
+            })
+            .filter_map(|item| Some((item.key.clone(), item.workspace_id.clone()?)))
+            .collect();
+        self.next_pull_request_lookup = now + PULL_REQUEST_LOOKUP_INTERVAL;
+        if candidates.is_empty() {
+            return None;
+        }
+        self.pull_request_lookup_in_flight = true;
+        Some((self.sources.clone(), candidates))
     }
 
     /// Queues workspace removal for items that just resolved, when their source wants that.
@@ -536,6 +617,8 @@ impl WorkItems {
                     message: message.clone(),
                 });
                 self.next_poll.insert(source_id, now);
+                // A change may be visible on the linked pull request too, e.g. ready for review.
+                self.next_pull_request_lookup = now;
                 WorkItemNotice {
                     title: message,
                     body: Some(context),
@@ -564,6 +647,7 @@ impl WorkItems {
     pub(crate) fn link(&mut self, key: &str, workspace_id: &str) -> Result<(), NotFound> {
         if self.state.link(key, workspace_id)? {
             self.jobs.remove(key);
+            self.next_pull_request_lookup = Instant::now();
             self.changed();
         }
         Ok(())
@@ -622,12 +706,40 @@ impl WorkItems {
 
     /// The projected info for one item, if it exists.
     pub(crate) fn item_info(&self, key: &str) -> Option<WorkItemInfo> {
-        self.state.get(key).map(|item| self.project(item))
+        let hosts = self.pull_request_hosts();
+        self.state.get(key).map(|item| self.project(item, &hosts))
     }
 
-    fn project(&self, item: &WorkItem) -> WorkItemInfo {
+    fn project(&self, item: &WorkItem, hosts: &HashMap<(String, u64), String>) -> WorkItemInfo {
         let (choices, reminder) = self.choices_and_reminder(item);
-        item.info(choices, reminder.map(|reminder| reminder.message))
+        let folded_into = self
+            .source(&item.source_id)
+            .and_then(|source| source.pull_request_of(item))
+            .and_then(|(repo, number)| hosts.get(&(repo.to_ascii_lowercase(), number)))
+            .filter(|host| **host != item.key)
+            .cloned();
+        item.info(
+            choices,
+            reminder.map(|reminder| reminder.message),
+            folded_into,
+        )
+    }
+
+    /// Items showing a linked pull request, by (lowercased repository, number). Hidden
+    /// items host nothing, so the pull request's own item stays reachable.
+    fn pull_request_hosts(&self) -> HashMap<(String, u64), String> {
+        self.state
+            .items()
+            .iter()
+            .filter(|item| !item.dismissed && item.snoozed_until.is_none())
+            .filter_map(|item| {
+                let pull_request = item.linked_pull_request.as_ref()?;
+                Some((
+                    (pull_request.repo.to_ascii_lowercase(), pull_request.number),
+                    item.key.clone(),
+                ))
+            })
+            .collect()
     }
 
     /// The choices offered for `item`, including the start reminder's.
@@ -666,6 +778,52 @@ impl WorkItems {
                     label: "Don't remind me for this ticket".into(),
                     description: Some("Keep working without updating the tracker".into()),
                     action: crate::api::schema::WorkItemChoiceAction::Perform,
+                    disabled_reason: None,
+                    confirm: None,
+                },
+            );
+        }
+        if let Some(pull_request) = &item.linked_pull_request {
+            // After the tracker fix and its mute, when the reminder shows.
+            let open = choices
+                .choices
+                .len()
+                .min(usize::from(reminder.is_some()) * 2);
+            if pull_request.is_draft {
+                // Waiting on you: the default, unless the tracker fix already is.
+                let reminder_is_default = reminder.as_ref().is_some_and(|reminder| {
+                    choices.default_choice_id.as_deref() == Some(reminder.choice.choice_id.as_str())
+                });
+                if !reminder_is_default {
+                    choices.default_choice_id = Some(source::PULL_REQUEST_READY_CHOICE_ID.into());
+                }
+                choices.choices.insert(
+                    open,
+                    crate::api::schema::WorkItemChoiceInfo {
+                        choice_id: source::PULL_REQUEST_READY_CHOICE_ID.into(),
+                        label: "Mark pull request ready for review".into(),
+                        description: Some(format!(
+                            "{}#{} is a draft; reviewers are asked once it is ready",
+                            pull_request.repo, pull_request.number
+                        )),
+                        action: crate::api::schema::WorkItemChoiceAction::Perform,
+                        disabled_reason: None,
+                        confirm: None,
+                    },
+                );
+            }
+            choices.choices.insert(
+                open + usize::from(pull_request.is_draft),
+                crate::api::schema::WorkItemChoiceInfo {
+                    choice_id: source::PULL_REQUEST_OPEN_CHOICE_ID.into(),
+                    label: "Open pull request".into(),
+                    description: Some(format!(
+                        "{}#{} · {}",
+                        pull_request.repo, pull_request.number, pull_request.status
+                    )),
+                    action: crate::api::schema::WorkItemChoiceAction::OpenUrl {
+                        url: pull_request.url.clone(),
+                    },
                     disabled_reason: None,
                     confirm: None,
                 },
@@ -863,6 +1021,7 @@ impl WorkItems {
         let key = job.key.clone();
         if let Some(item) = self.state.get_mut(&key) {
             item.workspace_id = Some(workspace_id.to_string());
+            self.next_pull_request_lookup = Instant::now();
             self.changed();
         }
     }
@@ -904,11 +1063,25 @@ impl WorkItems {
     }
 
     pub(crate) fn projection_items(&self) -> Vec<WorkItemInfo> {
+        let hosts = self.pull_request_hosts();
         self.state
             .sorted()
             .into_iter()
-            .map(|item| self.project(item))
+            .map(|item| self.project(item, &hosts))
             .collect()
+    }
+
+    /// The linked pull request of `key`, with the source hosting it.
+    pub(crate) fn linked_pull_request(
+        &self,
+        key: &str,
+    ) -> Option<(
+        Arc<dyn WorkItemSource>,
+        crate::api::schema::WorkItemPullRequestInfo,
+    )> {
+        let pull_request = self.state.get(key)?.linked_pull_request.clone()?;
+        let source = self.source(&pull_request.source_id)?.clone();
+        Some((source, pull_request))
     }
 
     pub(crate) fn repository_infos(&self) -> Vec<crate::api::schema::WorkItemRepositoryInfo> {

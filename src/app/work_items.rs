@@ -171,6 +171,7 @@ impl App {
                 );
             });
         }
+        self.start_pull_request_lookup(now);
         let revision = self.work_items.revision();
         for job_id in self.work_items.job_ids() {
             self.advance_work_item_worktree(job_id, now);
@@ -236,6 +237,33 @@ impl App {
             self.request_work_items_render();
         }
         (changed, notices)
+    }
+
+    /// Looks up, on a background thread, the pull request of each item's workspace branch.
+    fn start_pull_request_lookup(&mut self, now: Instant) {
+        let Some((sources, candidates)) = self.work_items.take_due_pull_request_lookup(now) else {
+            return;
+        };
+        let checkouts: Vec<(String, std::path::PathBuf, std::path::PathBuf)> = candidates
+            .into_iter()
+            .filter_map(|(key, workspace_id)| {
+                let ws_idx = self.parse_workspace_id(&workspace_id)?;
+                let space = self.state.workspaces[ws_idx].worktree_space()?;
+                Some((key, space.checkout_path.clone(), space.repo_root.clone()))
+            })
+            .collect();
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let results = checkouts
+                .into_iter()
+                .map(|(key, checkout, repo_root)| {
+                    let found =
+                        provision::find_branch_pull_request(&sources, &checkout, &repo_root);
+                    (key, found)
+                })
+                .collect();
+            send_event(&event_tx, WorkItemsEvent::PullRequestsFound { results });
+        });
     }
 
     fn start_work_items_prepare(&mut self, source_id: &str) {
@@ -429,6 +457,19 @@ impl App {
         let Some(source) = self.work_items.source(&item.source_id).cloned() else {
             return Err(("work_item_not_found", format!("unknown work item {key}")));
         };
+        // The linked pull request lives in another source than the item, e.g. a Jira
+        // ticket's pull request on GitHub.
+        let pull_request = if choice_id == crate::work_items::source::PULL_REQUEST_READY_CHOICE_ID {
+            let Some(linked) = self.work_items.linked_pull_request(key) else {
+                return Err((
+                    "work_item_choice_unavailable",
+                    format!("{key} has no linked pull request"),
+                ));
+            };
+            Some(linked)
+        } else {
+            None
+        };
         self.work_items
             .begin_action(key, choice_id)
             .map_err(|code| (code, format!("{key} is already being handled")))?;
@@ -436,7 +477,10 @@ impl App {
         let key = key.to_string();
         let choice_id = choice_id.to_string();
         std::thread::spawn(move || {
-            let result = source.perform(&item, &choice_id);
+            let result = match pull_request {
+                Some((host, pull_request)) => host.mark_pull_request_ready(&pull_request),
+                None => source.perform(&item, &choice_id),
+            };
             send_event(&event_tx, WorkItemsEvent::Performed { key, result });
         });
         self.request_work_items_render();
@@ -2070,6 +2114,73 @@ mod tests {
         assert_eq!(
             choose_local(&mut app).expect_err("second choice rejected"),
             "work_item_already_provisioned"
+        );
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn draft_pull_request_of_the_workspace_branch_folds_in_and_can_be_marked_ready() {
+        use crate::api::schema::WorkItemPullRequestInfo;
+        use crate::work_items::source::PULL_REQUEST_READY_CHOICE_ID;
+
+        let repo = ReviewRepo::new("linked-pr");
+        let (mut app, source) = provisioning_app(&repo);
+        *source.pull_request_prefix.lock().unwrap() = Some("pr:".into());
+        *source.pull_request.lock().unwrap() = Some(WorkItemPullRequestInfo {
+            source_id: "fake".into(),
+            repo: "o/r".into(),
+            number: 5,
+            url: "https://example.test/o/r/pull/5".into(),
+            is_draft: true,
+            status: "draft".into(),
+        });
+        // The pull request also has its own inbox item, e.g. CI failing on it.
+        source.set_items(vec![source_item("1"), source_item("pr:5")]);
+        app.work_items.schedule_all_for_test(Instant::now());
+        run_until(&mut app, |app| list(app).len() == 2);
+        choose_local(&mut app).expect("local choice accepted");
+        run_until(&mut app, |app| {
+            list(app)
+                .iter()
+                .any(|item| item.item_id == "fake:1" && item.linked_pull_request.is_some())
+        });
+
+        let items = list(&mut app);
+        let ticket = items.iter().find(|item| item.item_id == "fake:1").unwrap();
+        let pull = items
+            .iter()
+            .find(|item| item.item_id == "fake:pr:5")
+            .unwrap();
+        assert_eq!(pull.folded_into.as_deref(), Some("fake:1"));
+        assert_eq!(ticket.folded_into, None);
+        assert_eq!(
+            ticket.default_choice_id.as_deref(),
+            Some(PULL_REQUEST_READY_CHOICE_ID),
+            "a draft waits on you"
+        );
+
+        api(
+            &mut app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: PULL_REQUEST_READY_CHOICE_ID.into(),
+            }),
+        )
+        .expect("ready accepted");
+        run_until(&mut app, |app| {
+            list(app).iter().any(|item| {
+                item.item_id == "fake:1"
+                    && item
+                        .action_outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome.succeeded)
+            })
+        });
+        assert_eq!(
+            source.marked_ready.lock().unwrap().as_slice(),
+            [("o/r".to_string(), 5)],
+            "the pull request's host marks it ready, not the ticket's source"
         );
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }

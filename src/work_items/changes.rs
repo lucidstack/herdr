@@ -111,6 +111,8 @@ mod tests {
             start_reminder: None,
             running_choice_id: None,
             action_outcome: None,
+            linked_pull_request: None,
+            folded_into: None,
         }
     }
 

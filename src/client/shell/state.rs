@@ -22,6 +22,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) tab_bar_position: TabBarPositionConfig,
     pub(super) hide_tab_bar_when_single_tab: bool,
     pub(super) sections: Vec<crate::config::SidebarSection>,
+    pub(super) service_icons: crate::config::ServiceIcons,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
@@ -552,6 +553,7 @@ pub(super) enum ClientContextMenuAction {
     WorkItemDismiss,
     WorkItemUnhide,
     WorkItemLink,
+    WorkItemPullRequest,
 }
 
 #[derive(Debug)]
@@ -585,6 +587,8 @@ pub(super) enum ClientContextMenuTarget {
         start_reminder: bool,
         /// The focused workspace, when it could become the item's workspace.
         link_target: Option<String>,
+        /// A pull request item is folded into this one; its own choices are one step away.
+        has_pull_request_item: bool,
     },
 }
 

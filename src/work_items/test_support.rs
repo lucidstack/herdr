@@ -34,6 +34,12 @@ pub(crate) struct FakeSource {
     pub pick_next_contexts: Mutex<Vec<String>>,
     /// Reminder line for every item asked about; `None` means the tracker is up to date.
     pub start_reminder: Mutex<Option<String>>,
+    /// Returned by `find_pull_request` for any branch.
+    pub pull_request: Mutex<Option<crate::api::schema::WorkItemPullRequestInfo>>,
+    /// Every (repository, number) marked ready for review, in call order.
+    pub marked_ready: Mutex<Vec<(String, u64)>>,
+    /// Items whose external id starts with this prefix are pull request `o/r#<id>`.
+    pub pull_request_prefix: Mutex<Option<String>>,
 }
 
 impl FakeSource {
@@ -51,6 +57,9 @@ impl FakeSource {
             scripted_pick_next_plan: Mutex::new(None),
             pick_next_contexts: Mutex::new(Vec::new()),
             start_reminder: Mutex::new(None),
+            pull_request: Mutex::new(None),
+            marked_ready: Mutex::new(Vec::new()),
+            pull_request_prefix: Mutex::new(None),
         })
     }
 
@@ -228,5 +237,34 @@ impl WorkItemSource for FakeSource {
             .expect("fake source lock")
             .clone()
             .ok_or_else(|| "no pick-next plan scripted".to_string())
+    }
+
+    fn find_pull_request(
+        &self,
+        _repo_root: &std::path::Path,
+        _branch: &str,
+    ) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
+        Ok(self.pull_request.lock().expect("fake source lock").clone())
+    }
+
+    fn mark_pull_request_ready(
+        &self,
+        pull_request: &crate::api::schema::WorkItemPullRequestInfo,
+    ) -> Result<String, String> {
+        self.marked_ready
+            .lock()
+            .expect("fake source lock")
+            .push((pull_request.repo.clone(), pull_request.number));
+        Ok(format!("#{} is ready for review", pull_request.number))
+    }
+
+    fn pull_request_of(&self, item: &WorkItem) -> Option<(String, u64)> {
+        let prefix = self
+            .pull_request_prefix
+            .lock()
+            .expect("fake source lock")
+            .clone()?;
+        let number = item.external_id.strip_prefix(&prefix)?.parse().ok()?;
+        Some(("o/r".into(), number))
     }
 }

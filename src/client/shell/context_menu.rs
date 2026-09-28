@@ -82,6 +82,7 @@ impl ClientContextMenuOverlay {
                 hidden,
                 start_reminder,
                 link_target,
+                has_pull_request_item,
                 ..
             } => {
                 let mut items = Vec::new();
@@ -93,6 +94,9 @@ impl ClientContextMenuOverlay {
                     }
                 } else {
                     items.push(item("Choose what to do...", Action::WorkItemChoose));
+                }
+                if *has_pull_request_item {
+                    items.push(item("Pull request actions...", Action::WorkItemPullRequest));
                 }
                 if *has_progress {
                     items.push(item("Show progress", Action::WorkItemProgress));

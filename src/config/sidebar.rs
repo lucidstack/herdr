@@ -497,6 +497,17 @@ fn default_sidebar_sections() -> Vec<SidebarSection> {
     DEFAULT_SIDEBAR_SECTIONS.to_vec()
 }
 
+/// How inbox rows mark which service a status line comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceIcons {
+    /// Short labels, e.g. "jira" and "gh"; works with any font.
+    #[default]
+    Text,
+    /// Nerd Font glyphs; needs a Nerd Font in the terminal.
+    Nerd,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SidebarConfig {
@@ -504,6 +515,8 @@ pub struct SidebarConfig {
     /// listed ones share the height in list order.
     #[serde(default = "default_sidebar_sections")]
     pub sections: Vec<SidebarSection>,
+    /// How inbox status lines mark their service: "text" labels or "nerd" font icons. Default: "text".
+    pub service_icons: ServiceIcons,
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
 }
@@ -512,6 +525,7 @@ impl Default for SidebarConfig {
     fn default() -> Self {
         Self {
             sections: default_sidebar_sections(),
+            service_icons: ServiceIcons::Text,
             agents: AgentsSidebarConfig::default(),
             spaces: SpacesSidebarConfig::default(),
         }

@@ -631,6 +631,8 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         start_reminder: None,
         running_choice_id: None,
         action_outcome: None,
+        linked_pull_request: None,
+        folded_into: None,
     };
     let projection = |boot: &str, items| EndpointWorkItemsProjection {
         boot_id: boot.into(),

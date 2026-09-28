@@ -598,6 +598,94 @@ impl GithubSource {
     }
 }
 
+/// The first pull request of a `gh pr list --json` answer, with its state in one line.
+fn parse_branch_pull_request(
+    bytes: &[u8],
+    source_id: &str,
+    repo: &str,
+) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listed {
+        number: u64,
+        url: String,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        is_draft: bool,
+        #[serde(default)]
+        review_decision: Option<String>,
+        #[serde(default)]
+        status_check_rollup: Vec<Check>,
+    }
+    #[derive(Deserialize)]
+    struct Check {
+        #[serde(default)]
+        conclusion: Option<String>,
+        /// Commit statuses report `state`; check runs report `status` and `conclusion`.
+        #[serde(default)]
+        state: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+    }
+    let listed: Vec<Listed> =
+        serde_json::from_slice(bytes).map_err(|err| format!("unexpected gh output: {err}"))?;
+    let Some(pull) = listed.into_iter().next() else {
+        return Ok(None);
+    };
+    let open = pull.state.eq_ignore_ascii_case("open");
+    let status = if !open {
+        pull.state.to_lowercase()
+    } else {
+        let review = if pull.is_draft {
+            "draft"
+        } else {
+            match pull.review_decision.as_deref() {
+                Some("APPROVED") => "approved",
+                Some("CHANGES_REQUESTED") => "changes requested",
+                Some("REVIEW_REQUIRED") => "awaiting review",
+                _ => "open",
+            }
+        };
+        let is = |value: &Option<String>, wanted: &[&str]| {
+            value
+                .as_deref()
+                .is_some_and(|value| wanted.iter().any(|w| value.eq_ignore_ascii_case(w)))
+        };
+        let failing = pull.status_check_rollup.iter().any(|check| {
+            is(
+                &check.conclusion,
+                &[
+                    "FAILURE",
+                    "TIMED_OUT",
+                    "CANCELLED",
+                    "ACTION_REQUIRED",
+                    "STARTUP_FAILURE",
+                ],
+            ) || is(&check.state, &["FAILURE", "ERROR"])
+        });
+        let running = pull.status_check_rollup.iter().any(|check| {
+            is(
+                &check.status,
+                &["QUEUED", "IN_PROGRESS", "PENDING", "WAITING"],
+            ) || is(&check.state, &["PENDING", "EXPECTED"])
+        });
+        match (failing, running) {
+            (true, _) => format!("{review} · CI failing"),
+            (false, true) => format!("{review} · checks running"),
+            (false, false) => review.to_string(),
+        }
+    };
+    Ok(Some(crate::api::schema::WorkItemPullRequestInfo {
+        source_id: source_id.to_string(),
+        repo: repo.to_string(),
+        number: pull.number,
+        url: pull.url,
+        is_draft: open && pull.is_draft,
+        status,
+    }))
+}
+
 fn gh_env() -> Vec<(String, String)> {
     [
         ("GH_PROMPT_DISABLED", "1"),
@@ -1917,6 +2005,52 @@ impl WorkItemSource for GithubSource {
         Ok(format!("Merged #{number} into {}", detail.base_ref_name))
     }
 
+    fn find_pull_request(
+        &self,
+        repo_root: &Path,
+        branch: &str,
+    ) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
+        let wanted = crate::worktree::canonical_or_original(repo_root);
+        let Some(repo) = self.config.repos.iter().find(|repo| {
+            crate::worktree::canonical_or_original(&crate::worktree::expand_tilde_absolute_path(
+                &repo.path,
+            )) == wanted
+        }) else {
+            return Ok(None);
+        };
+        let output = self.run_gh(&[
+            "pr",
+            "list",
+            "--repo",
+            &repo.name,
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--limit",
+            "1",
+            "--json",
+            "number,url,state,isDraft,reviewDecision,statusCheckRollup",
+        ])?;
+        parse_branch_pull_request(&output, self.id(), &repo.name)
+    }
+
+    fn mark_pull_request_ready(
+        &self,
+        pull_request: &crate::api::schema::WorkItemPullRequestInfo,
+    ) -> Result<String, String> {
+        let number = pull_request.number.to_string();
+        self.run_gh(&["pr", "ready", &number, "--repo", &pull_request.repo])?;
+        Ok(format!("#{number} is ready for review"))
+    }
+
+    fn pull_request_of(&self, item: &WorkItem) -> Option<(String, u64)> {
+        if !Event::of(&item.external_id).is_pull_request_event() {
+            return None;
+        }
+        parse_external_id(&item.external_id).map(|(repo, number)| (repo.to_string(), number))
+    }
+
     fn follow_up_brief(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
         let event = Event::of(&item.external_id);
         let briefs = matches!(
@@ -2553,6 +2687,37 @@ mod tests {
     }
 
     #[test]
+    fn branch_pull_request_state_reads_as_one_line() {
+        let parse = |json: &str| {
+            parse_branch_pull_request(json.as_bytes(), "github", "o/r")
+                .expect("parses")
+                .map(|pull| (pull.is_draft, pull.status))
+        };
+        assert_eq!(parse("[]"), None);
+        assert_eq!(
+            parse(
+                r#"[{"number":7,"url":"u","state":"OPEN","isDraft":true,"reviewDecision":"",
+                "statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}]"#
+            ),
+            Some((true, "draft · checks running".into()))
+        );
+        assert_eq!(
+            parse(
+                r#"[{"number":7,"url":"u","state":"OPEN","isDraft":false,
+                "reviewDecision":"CHANGES_REQUESTED",
+                "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"},
+                {"state":"FAILURE"}]}]"#
+            ),
+            Some((false, "changes requested · CI failing".into()))
+        );
+        // A merged draft is no longer waiting on you.
+        assert_eq!(
+            parse(r#"[{"number":7,"url":"u","state":"MERGED","isDraft":true}]"#),
+            Some((false, "merged".into()))
+        );
+    }
+
+    #[test]
     fn search_results_become_source_items() {
         let json = br#"{"total_count":2,"items":[
             {"number":12,"title":"Fix it","html_url":"https://github.com/o/r/pull/12",
@@ -2693,6 +2858,7 @@ mod tests {
             url: format!("https://github.com/{repo}/pull/5"),
             updated_at: "2026-01-01T00:00:00Z".into(),
             tracker_state: None,
+            linked_pull_request: None,
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,
             prepare_error: None,

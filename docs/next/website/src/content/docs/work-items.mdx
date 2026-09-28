@@ -119,6 +119,12 @@ tabs = [
 
 Each issue shows its key, its title, and a line with its status and assignee, **unassigned** when nobody has it.
 
+### Pull requests for your tickets
+
+When a ticket's workspace is a worktree of a clone mapped in `[work_items.github] repos`, Herdr looks up the pull request opened from its branch every minute and shows it on a second line, e.g. `gh #11904 · draft` or `gh #11904 · awaiting review · checks running`. This works for Jira issues and for GitHub issues assigned to you. A draft is waiting on you: its line turns amber and the item's dialog offers **Mark pull request ready for review** (the default choice unless the ticket itself needs updating) and **Open pull request**.
+
+If the same pull request is also in the inbox on its own, for example because changes were requested or CI is failing, it shows with the ticket instead: its line turns amber, and the ticket's right-click menu offers **Pull request actions...**, which opens that item's own choices. Status lines start with a service label, `jira` or `gh`; set `ui.sidebar.service_icons = "nerd"` to use Nerd Font icons instead.
+
 Issues of a mapped project can be worked on locally on a new branch from `base_branch`, or from the remote's default branch when unset. When the clone already has a worktree or local branch whose name contains the issue key (from Orca, `git worktree add` or another Herdr), the choice reads **Continue on <branch>** and reopens that work instead of starting a new branch. A worktree that is already open as a workspace in this Herdr is linked as it is, without new tabs or agent. The agent brief carries the description, type, priority, status, labels and comments. Issues of unmapped projects can only be opened in Jira.
 
 ## Using the inbox

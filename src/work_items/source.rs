@@ -124,6 +124,11 @@ pub(crate) struct ProvisionPlan {
 pub(crate) const START_WORK_CHOICE_ID: &str = "start_work";
 /// Choice that stops the start reminder for one item. Handled by Herdr, not the source.
 pub(crate) const MUTE_START_REMINDER_CHOICE_ID: &str = "mute_start_reminder";
+/// Marks an item's linked draft pull request ready for review. Handled by Herdr through
+/// the source hosting the pull request.
+pub(crate) const PULL_REQUEST_READY_CHOICE_ID: &str = "pull_request_ready";
+/// Opens an item's linked pull request in the browser.
+pub(crate) const PULL_REQUEST_OPEN_CHOICE_ID: &str = "pull_request_open";
 
 /// The tracker has not caught up with work you started: the ticket is not assigned to
 /// you, or still in a to-do status.
@@ -189,5 +194,29 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// `BriefAgent`.
     fn follow_up_brief(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {
         Err(format!("choice {choice_id} does not brief an agent"))
+    }
+    /// Blocking; background thread only. The pull request opened from `branch` of the
+    /// clone at `repo_root`, the most recent one if several, when this source hosts it.
+    fn find_pull_request(
+        &self,
+        _repo_root: &Path,
+        _branch: &str,
+    ) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
+        Ok(None)
+    }
+    /// Blocking; background thread only. Marks a draft pull request found by
+    /// `find_pull_request` ready for review.
+    fn mark_pull_request_ready(
+        &self,
+        pull_request: &crate::api::schema::WorkItemPullRequestInfo,
+    ) -> Result<String, String> {
+        Err(format!(
+            "{}#{} cannot be changed here",
+            pull_request.repo, pull_request.number
+        ))
+    }
+    /// Pure: the pull request (repository, number) an item of this source is, if any.
+    fn pull_request_of(&self, _item: &WorkItem) -> Option<(String, u64)> {
+        None
     }
 }

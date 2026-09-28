@@ -1,7 +1,7 @@
 //! Client-side work items: the per-endpoint projection copy, the sidebar
 //! inbox section, and the work-item dialog's state and input.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -131,10 +131,11 @@ pub(super) fn is_hidden(item: &WorkItemInfo) -> bool {
     item.dismissed || item.snoozed_until.is_some()
 }
 
-/// Items the inbox lists as tickets: not hidden, and not a provider's "Pick next"
-/// discovery row, which has its own place at the bottom of the inbox.
+/// Items the inbox lists as tickets: not hidden, not a provider's "Pick next" discovery
+/// row, which has its own place at the bottom of the inbox, and not a pull request shown
+/// with the item it was opened for.
 pub(super) fn is_listed(item: &WorkItemInfo) -> bool {
-    !is_hidden(item) && !item.is_pick_next
+    !is_hidden(item) && !item.is_pick_next && item.folded_into.is_none()
 }
 
 #[derive(Debug)]
@@ -215,10 +216,16 @@ pub(super) fn render_items_section<'a>(
         .iter()
         .filter(|item| is_listed(item))
         .collect();
+    // Hosts of a folded pull request item, found once per frame rather than per row.
+    let folding_hosts: HashSet<&str> = projection
+        .items
+        .iter()
+        .filter_map(|item| item.folded_into.as_deref())
+        .collect();
     let hidden = projection
         .items
         .iter()
-        .filter(|item| !item.is_pick_next && is_hidden(item))
+        .filter(|item| !item.is_pick_next && item.folded_into.is_none() && is_hidden(item))
         .count();
     // With a following section (normally spaces), keep this to a share of the
     // zone instead of consuming all of it; expanded keeps that follower to a
@@ -415,8 +422,10 @@ pub(super) fn render_items_section<'a>(
             buffer,
             item_rect,
             item,
+            folding_hosts.contains(item.item_id.as_str()),
             focused_workspace_id,
             view.spinner_frame,
+            config.service_icons,
             palette,
         );
         hits.work_items.push(WorkItemHit {
@@ -699,17 +708,34 @@ fn repository_home<'a>(
         .find(|(_, workspace)| workspace.workspace_id == workspace_id)
 }
 
-/// Context and title, plus the tracker's state when the source reports one.
+/// Context and title, plus one status line per service the item is on: its own tracker's,
+/// then its linked pull request's.
 fn item_rows(item: &WorkItemInfo) -> u16 {
-    2 + u16::from(item.tracker_state.is_some())
+    2 + u16::from(item.tracker_state.is_some()) + u16::from(item.linked_pull_request.is_some())
 }
 
+/// The mark in front of a status line from `source_id`.
+fn service_mark(icons: crate::config::ServiceIcons, source_id: &str) -> Option<&'static str> {
+    use crate::config::ServiceIcons;
+    match (icons, source_id) {
+        (ServiceIcons::Text, "jira") => Some("jira"),
+        (ServiceIcons::Text, "github") => Some("gh"),
+        // nf-dev-jira, nf-fa-github.
+        (ServiceIcons::Nerd, "jira") => Some("\u{e75c}"),
+        (ServiceIcons::Nerd, "github") => Some("\u{f09b}"),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // Row inputs; a struct would only rename them.
 fn render_item_rows(
     buffer: &mut Buffer,
     rect: Rect,
     item: &WorkItemInfo,
+    has_folded: bool,
     focused_workspace_id: Option<&str>,
     spinner_frame: usize,
+    icons: crate::config::ServiceIcons,
     palette: &Palette,
 ) {
     if item.workspace_id.is_some() && item.workspace_id.as_deref() == focused_workspace_id {
@@ -742,17 +768,11 @@ fn render_item_rows(
         None
     };
     let status_width = u16::from(status.is_some()) * 2;
-    // Amber while the tracker lags behind work you started on the item.
-    let context_color = if item.start_reminder.is_some() {
-        palette.yellow
-    } else {
-        palette.mauve
-    };
     let context_style = if item.seen {
-        Style::default().fg(context_color)
+        Style::default().fg(palette.mauve)
     } else {
         Style::default()
-            .fg(context_color)
+            .fg(palette.mauve)
             .add_modifier(Modifier::BOLD)
     };
     put_segment(
@@ -795,14 +815,51 @@ fn render_item_rows(
             Style::default().fg(palette.overlay0),
         );
     }
+    let mut y = title_y.saturating_add(1);
+    let mut status_row = |source_id: &str, text: &str, style: Style| {
+        let mut x = rect.x.saturating_add(3);
+        if let Some(mark) = service_mark(icons, source_id) {
+            x = put_segment(
+                buffer,
+                x,
+                y,
+                rect.right(),
+                &format!("{mark} "),
+                Style::default().fg(palette.overlay0),
+            );
+        }
+        put_segment(buffer, x, y, rect.right(), text, style);
+        y = y.saturating_add(1);
+    };
     if let Some(state) = &item.tracker_state {
-        put_segment(
-            buffer,
-            rect.x.saturating_add(3),
-            title_y.saturating_add(1),
-            rect.right(),
-            state,
-            Style::default().fg(palette.overlay0),
+        // Highlighted while the tracker lags behind work you started on the item.
+        if item.start_reminder.is_some() {
+            status_row(
+                &item.source_id,
+                &format!(" {state} "),
+                Style::default()
+                    .fg(panel_contrast_fg(palette))
+                    .bg(palette.yellow),
+            );
+        } else {
+            status_row(
+                &item.source_id,
+                state,
+                Style::default().fg(palette.overlay0),
+            );
+        }
+    }
+    if let Some(pull_request) = &item.linked_pull_request {
+        // Amber while it waits on you: a draft to mark ready, or its own inbox event.
+        let color = if pull_request.is_draft || has_folded {
+            palette.yellow
+        } else {
+            palette.overlay0
+        };
+        status_row(
+            &pull_request.source_id,
+            &format!("#{} · {}", pull_request.number, pull_request.status),
+            Style::default().fg(color),
         );
     }
 }
@@ -819,7 +876,7 @@ fn inbox_order(projection: &EndpointWorkItemsProjection) -> Vec<WorkItemInfo> {
     let (mut items, hidden): (Vec<WorkItemInfo>, Vec<WorkItemInfo>) = projection
         .items
         .iter()
-        .filter(|item| !item.is_pick_next)
+        .filter(|item| !item.is_pick_next && item.folded_into.is_none())
         .cloned()
         .partition(|item| !is_hidden(item));
     items.extend(hidden);
@@ -1362,6 +1419,7 @@ impl ClientShellState {
                 .as_deref()
                 .and_then(|snapshot| snapshot.focused_workspace_id.clone())
                 .filter(|focused| item.workspace_id.as_deref() != Some(focused.as_str())),
+            has_pull_request_item: self.folded_pull_request_item(item_id).is_some(),
         };
         self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
             target,
@@ -1431,6 +1489,12 @@ impl ClientShellState {
             }
             ClientContextMenuAction::WorkItemUnhide => self
                 .push_endpoint_method(Method::WorkItemUnhide(WorkItemTarget { item_id }), outcome),
+            ClientContextMenuAction::WorkItemPullRequest => {
+                if let Some(pull_request) = self.folded_pull_request_item(&item_id).cloned() {
+                    self.mark_work_item_seen(&pull_request, outcome);
+                    self.open_work_item_overlay(pull_request, false);
+                }
+            }
             ClientContextMenuAction::RemoveWorktree | ClientContextMenuAction::Close => {
                 if let Some(workspace_id) = workspace_id {
                     self.activate_workspace_context_action(workspace_id, action, outcome);
@@ -1438,6 +1502,15 @@ impl ClientShellState {
             }
             _ => {}
         }
+    }
+
+    /// The pull request item shown with `host_id` instead of on its own.
+    fn folded_pull_request_item(&self, host_id: &str) -> Option<&WorkItemInfo> {
+        let snapshot = self.snapshot.as_deref()?;
+        active_projection(&self.work_items, &self.active_endpoint_id, snapshot)?
+            .items
+            .iter()
+            .find(|item| item.folded_into.as_deref() == Some(host_id))
     }
 
     /// Handles keys while the work-item dialog is open. Returns false for other overlays.

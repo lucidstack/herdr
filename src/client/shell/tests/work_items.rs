@@ -49,6 +49,8 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         start_reminder: None,
         running_choice_id: None,
         action_outcome: None,
+        linked_pull_request: None,
+        folded_into: None,
     }
 }
 
@@ -628,23 +630,69 @@ fn item_menu_links_the_focused_workspace() {
 }
 
 #[test]
-fn tracker_state_gets_its_own_line_under_the_title() {
+fn ticket_shows_a_status_line_per_service_and_its_pull_request_folds_in() {
+    use crate::api::schema::WorkItemPullRequestInfo;
+
     let mut ticket = item("7");
-    ticket.tracker_state = Some("Selected for Development · unassigned".into());
-    let mut state = shell_with(vec![ticket, item("8")]);
+    ticket.item_id = "jira:TECH-7".into();
+    ticket.source_id = "jira".into();
+    ticket.tracker_state = Some("In Progress · Ada".into());
+    ticket.linked_pull_request = Some(WorkItemPullRequestInfo {
+        source_id: "github".into(),
+        repo: "o/r".into(),
+        number: 8,
+        url: "https://github.com/o/r/pull/8".into(),
+        is_draft: true,
+        status: "draft".into(),
+    });
+    // The pull request's own inbox item shows with the ticket, not on its own.
+    let mut pull = item("8");
+    pull.folded_into = Some("jira:TECH-7".into());
+    let mut state = shell_with(vec![ticket, pull, item("9")]);
     state.compose(106, 30).expect("frame");
-    let [first, second] = state.hits.work_items.as_slice() else {
-        panic!("two items drawn");
-    };
-    assert_eq!(first.rect.height, 3);
-    assert_eq!(second.rect.y, first.rect.y + 3);
+    assert_eq!(
+        state.hits.inbox.visible, 2,
+        "the folded pull request is not listed on its own"
+    );
+    let first = &state.hits.work_items[0];
+    assert_eq!(first.item_id, "jira:TECH-7");
+    assert_eq!(first.rect.height, 4);
+    let rect = first.rect;
     let text = screen_text(&mut state);
     let lines: Vec<&str> = text.lines().collect();
     let title_row = lines
         .iter()
         .position(|line| line.contains("Pull request 7"))
         .expect("title drawn");
-    assert!(lines[title_row + 1].contains("Selected for"), "{text}");
+    assert!(lines[title_row + 1].contains("jira In Progress"), "{text}");
+    assert!(lines[title_row + 2].contains("gh #8 · draft"), "{text}");
+
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        rect.x + 2,
+        rect.y,
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    let actions = menu
+        .items()
+        .iter()
+        .position(|entry| entry.label == "Pull request actions...")
+        .expect("folded pull request reachable");
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[actions];
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(matches!(
+        state.overlay.as_ref(),
+        Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#8"
+    ));
 }
 
 #[test]
@@ -682,6 +730,26 @@ fn item_menu_of_a_started_item_opens_its_tracker_fix() {
         state.overlay.as_ref(),
         Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#7"
     ));
+}
+
+#[test]
+fn start_reminder_highlights_the_tracker_line_not_the_item() {
+    let mut started = item("7");
+    started.seen = true;
+    started.workspace_id = Some("ws_2".into());
+    started.tracker_state = Some("To Do · unassigned".into());
+    started.start_reminder = Some("You're working on this, but it isn't assigned to you".into());
+    let mut state = shell_with(vec![started]);
+    let frame = state.compose(106, 30).expect("frame");
+    let buffer = frame.to_ratatui_buffer().expect("buffer");
+    let rect = state.hits.work_items[0].rect;
+    let palette = &state.config.palette;
+
+    let tracker = cell_symbol_position(&frame, rect, "To Do");
+    assert_eq!(buffer[tracker].bg, palette.yellow);
+    let context = cell_symbol_position(&frame, rect, "o/r #7");
+    assert_eq!(buffer[context].fg, palette.mauve);
+    assert_ne!(buffer[context].bg, palette.yellow);
 }
 
 #[test]

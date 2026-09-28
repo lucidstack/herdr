@@ -231,6 +231,41 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Result<(), String> {
     }
 }
 
+/// The branch checked out at `checkout`, or `None` when HEAD is detached.
+pub(crate) fn checked_out_branch(checkout: &Path) -> Result<Option<String>, String> {
+    let output = git_output(
+        checkout,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+    )?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!branch.is_empty()).then_some(branch))
+}
+
+/// Blocking: the pull request opened from the branch checked out at `checkout`, asking
+/// each source in turn. `None` when detached, or when no source hosts one.
+pub(crate) fn find_branch_pull_request(
+    sources: &[std::sync::Arc<dyn super::WorkItemSource>],
+    checkout: &Path,
+    repo_root: &Path,
+) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
+    let Some(branch) = checked_out_branch(checkout)? else {
+        return Ok(None);
+    };
+    let mut error = None;
+    for source in sources {
+        match source.find_pull_request(repo_root, &branch) {
+            Ok(Some(found)) => return Ok(Some(found)),
+            Ok(None) => {}
+            Err(err) => error = Some(err),
+        }
+    }
+    error.map_or(Ok(None), Err)
+}
+
 fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
     let output = git_output(
         repo,
