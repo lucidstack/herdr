@@ -4454,6 +4454,13 @@
         },
         "ServerLiveHandoffParams": {
           "properties": {
+            "environment": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "The caller's environment. The replacement server takes from it only the credential\nvariables the config names, such as `work_items.jira.token_env`, so a rotated token\nreaches it. Everything else, and any of those variables the caller lacks or leaves\nempty, is inherited from the old server. Send it only to servers advertising\n`handoff_environment`.",
+              "type": "object"
+            },
             "expected_protocol": {
               "format": "uint32",
               "minimum": 0,
@@ -11808,6 +11815,11 @@
                 "integer",
                 "null"
               ]
+            },
+            "handoff_environment": {
+              "default": false,
+              "description": "Live handoff refreshes credential variables from `server.live_handoff`'s `environment`.",
+              "type": "boolean"
             },
             "health_check": {
               "default": false,

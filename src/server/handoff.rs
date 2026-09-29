@@ -61,11 +61,30 @@ pub(crate) fn handoff_socket_path() -> PathBuf {
     crate::session::data_dir().join(format!("herdr-handoff-{}.sock", std::process::id()))
 }
 
+/// The credential variables a replacement server takes from the handoff caller's
+/// environment: those the config names that the caller has set to a non-empty value.
+#[cfg(unix)]
+pub(crate) fn handoff_credentials(
+    work_items: &crate::config::WorkItemsConfig,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    work_items
+        .credential_env_names()
+        .filter_map(|name| {
+            environment
+                .get(name)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (name.to_string(), value.clone()))
+        })
+        .collect()
+}
+
 #[cfg(unix)]
 pub(crate) fn spawn_handoff_import(
     import_exe: Option<&Path>,
     socket_path: &Path,
     token: &str,
+    credentials: &[(String, String)],
 ) -> io::Result<Child> {
     let fallback_exe;
     let exe = if let Some(import_exe) = import_exe {
@@ -95,6 +114,7 @@ pub(crate) fn spawn_handoff_import(
             .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
             .env_remove(crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR);
     }
+    command.envs(credentials.iter().map(|(name, value)| (name, value)));
     crate::platform::detach_server_daemon_command(&mut command);
     command.spawn().map_err(|err| {
         io::Error::new(
@@ -528,6 +548,36 @@ pub(crate) fn log_import_result(panes: usize) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_takes_only_the_configured_credentials_the_caller_has_set() {
+        let work_items = crate::config::WorkItemsConfig {
+            jira: Some(crate::config::JiraWorkItemsConfig {
+                token_env: "WORK_JIRA_TOKEN".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let environment = |token: &str| {
+            std::collections::BTreeMap::from([
+                ("WORK_JIRA_TOKEN".to_string(), token.to_string()),
+                ("ATLASSIAN_TOKEN".to_string(), "not-configured".to_string()),
+                ("PATH".to_string(), "/caller/bin".to_string()),
+            ])
+        };
+
+        assert_eq!(
+            handoff_credentials(&work_items, &environment("rotated")),
+            vec![("WORK_JIRA_TOKEN".to_string(), "rotated".to_string())]
+        );
+        // An empty value would clobber a working token, so the old one is kept.
+        assert!(handoff_credentials(&work_items, &environment("  ")).is_empty());
+        assert!(handoff_credentials(
+            &crate::config::WorkItemsConfig::default(),
+            &environment("rotated")
+        )
+        .is_empty());
+    }
 
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {

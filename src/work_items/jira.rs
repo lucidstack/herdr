@@ -290,7 +290,8 @@ fn project_key(issue_key: &str) -> &str {
 }
 
 const WRITE_SCOPE_HINT: &str = "Jira refused the change: the API token needs write:jira-work to \
-     assign and start issues. After replacing it, restart the Herdr server so it reads the new token";
+     assign and start issues. After replacing it, run `herdr server live-handoff` from a shell \
+     that has the new token so the server picks it up";
 
 /// What starting work on an issue changes in Jira.
 #[derive(Debug, PartialEq, Eq)]
@@ -504,7 +505,8 @@ impl JiraSource {
             .filter(|token| !token.trim().is_empty())
             .ok_or_else(|| {
                 format!(
-                    "{} is not set in the Herdr server's environment (work_items.jira.token_env)",
+                    "{} is not set in the Herdr server's environment (work_items.jira.token_env); \
+                     set it, then run `herdr server live-handoff` from that shell",
                     self.config.token_env
                 )
             })

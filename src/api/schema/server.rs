@@ -11,6 +11,23 @@ pub struct ServerLiveHandoffParams {
     pub expected_protocol: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<String>,
+    /// The caller's environment. The replacement server takes from it only the credential
+    /// variables the config names, such as `work_items.jira.token_env`, so a rotated token
+    /// reaches it. Everything else, and any of those variables the caller lacks or leaves
+    /// empty, is inherited from the old server. Send it only to servers advertising
+    /// `handoff_environment`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub environment: std::collections::BTreeMap<String, String>,
+}
+
+impl ServerLiveHandoffParams {
+    /// This process's environment, for `environment`. Variables that are not valid UTF-8
+    /// cannot travel over the JSON API and are left out.
+    pub fn caller_environment() -> std::collections::BTreeMap<String, String> {
+        std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -36,4 +53,7 @@ pub struct ServerCapabilities {
     /// Supports connection-scoped `server.ssh_agent.register` on the local JSON API.
     #[serde(default)]
     pub ssh_agent_registration: bool,
+    /// Live handoff refreshes credential variables from `server.live_handoff`'s `environment`.
+    #[serde(default)]
+    pub handoff_environment: bool,
 }

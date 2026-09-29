@@ -97,6 +97,8 @@ reviewr also opens itself as a split beside the agent when a worktree workspace 
 
 Jira Cloud goes through its REST API with an [API token](https://id.atlassian.com/manage-profile/security/api-tokens). Put the token in the environment of the Herdr server (by default `ATLASSIAN_TOKEN`); it is passed to `curl` on standard input, never on the command line. Both classic and scoped tokens work. A scoped token needs `read:jira-user` and `read:jira-work`; add `write:jira-work` to assign and start issues from Herdr.
 
+The server reads the token from its own environment, so changing it in your shell does not reach a running server. To switch to a new token without stopping your panes, run `herdr server live-handoff` from a shell where the new token is set: the replacement server takes the variable named by `token_env` from that shell, and inherits everything else from the old server. A handoff from a server older than this feature keeps the old token; stop and start that server once instead.
+
 ```toml
 [work_items.jira]
 site = "acme.atlassian.net"

@@ -66,6 +66,14 @@ pub struct WorkItemsConfig {
     pub jira: Option<JiraWorkItemsConfig>,
 }
 
+impl WorkItemsConfig {
+    /// Environment variables the server reads credentials from on every call. A live
+    /// handoff refreshes these from the caller, so a rotated token reaches the new server.
+    pub fn credential_env_names(&self) -> impl Iterator<Item = &str> {
+        self.jira.iter().map(|jira| jira.token_env.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct JiraWorkItemsConfig {

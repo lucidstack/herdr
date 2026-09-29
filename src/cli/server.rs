@@ -1,4 +1,4 @@
-use crate::api::schema::{EmptyParams, Method, Request, ServerLiveHandoffParams};
+use crate::api::schema::{EmptyParams, Method, PingParams, Request, ServerLiveHandoffParams};
 
 pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -198,7 +198,7 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
 }
 
 fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
-    let Some(params) = parse_live_handoff_params(args) else {
+    let Some(mut params) = parse_live_handoff_params(args) else {
         eprintln!(
             "usage: herdr server live-handoff [--import-exe <path>] [--expected-protocol <n>] [--expected-version <version>]"
         );
@@ -207,6 +207,18 @@ fn server_live_handoff(args: &[String]) -> std::io::Result<i32> {
 
     // Live handoff is itself a protocol-mismatch recovery path, so it must
     // reach the running server without the normal CLI compatibility guard.
+    let pong = super::send_request_unchecked(&Request {
+        id: "cli:server:live-handoff:ping".into(),
+        method: Method::Ping(PingParams::default()),
+    })?;
+    if pong["result"]["capabilities"]["handoff_environment"].as_bool() == Some(true) {
+        params.environment = ServerLiveHandoffParams::caller_environment();
+    } else {
+        eprintln!(
+            "note: the running server predates handing credentials over, so the new server keeps \
+             its environment; stop and start it from this shell to pick up a rotated token"
+        );
+    }
     let response = super::send_request_unchecked(&Request {
         id: "cli:server:live-handoff".into(),
         method: Method::ServerLiveHandoff(params),

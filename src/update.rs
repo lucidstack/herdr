@@ -1357,7 +1357,22 @@ fn live_handoff_running_server_for_update(
         plan.target_noun(),
         plan.label()
     );
-    live_handoff_server_via_api_for_update_at(plan.socket_path(), updated_exe, release)?;
+    let environment = if plan
+        .server
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.handoff_environment)
+    {
+        crate::api::schema::ServerLiveHandoffParams::caller_environment()
+    } else {
+        Default::default()
+    };
+    live_handoff_server_via_api_for_update_at(
+        plan.socket_path(),
+        updated_exe,
+        release,
+        environment,
+    )?;
     wait_for_server_handoff_at(plan.socket_path(), SERVER_HANDOFF_CONFIRM_TIMEOUT, release)?;
     eprintln!(
         "live handoff complete for {} {}; pane processes should still be running.",
@@ -1600,6 +1615,7 @@ fn live_handoff_server_via_api_for_release_at(
     timeout: Duration,
     updated_exe: &Path,
     release: &ReleaseInfo,
+    environment: std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
     use crate::api::schema::{Method, ServerLiveHandoffParams};
 
@@ -1607,6 +1623,7 @@ fn live_handoff_server_via_api_for_release_at(
         import_exe: Some(updated_exe.display().to_string()),
         expected_protocol: release.target_protocol,
         expected_version: Some(release.label().to_string()),
+        environment,
     };
 
     send_server_update_method_at(
@@ -1623,12 +1640,14 @@ fn live_handoff_server_via_api_for_update_at(
     socket_path: &Path,
     updated_exe: &Path,
     release: &ReleaseInfo,
+    environment: std::collections::BTreeMap<String, String>,
 ) -> Result<(), String> {
     live_handoff_server_via_api_for_release_at(
         socket_path,
         SERVER_HANDOFF_REQUEST_TIMEOUT,
         updated_exe,
         release,
+        environment,
     )
 }
 
@@ -2854,6 +2873,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 ssh_agent_registration: false,
+                handoff_environment: false,
             }),
         };
         let missing_baseline = crate::api::RuntimeStatus {
@@ -2929,6 +2949,7 @@ mod tests {
                     surface_interest: true,
                     health_check: true,
                     ssh_agent_registration: false,
+                    handoff_environment: false,
                 }),
             },
         };
@@ -3188,6 +3209,7 @@ mod tests {
                     surface_interest: true,
                     health_check: true,
                     ssh_agent_registration: false,
+                    handoff_environment: false,
                 }),
             },
         };
@@ -3320,6 +3342,7 @@ mod tests {
             Duration::from_millis(200),
             Path::new("/tmp/herdr-new"),
             &release,
+            Default::default(),
         );
         let _ = handle.join();
         let _ = fs::remove_file(&socket_path);

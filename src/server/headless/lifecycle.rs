@@ -112,10 +112,24 @@ impl HeadlessServer {
             params.expected_version,
             self.api_window_title.clone(),
         );
+        // The replacement starts from this process, so it would otherwise keep this
+        // server's credentials forever. Read the config afresh, as the replacement will.
+        let credentials = crate::server::handoff::handoff_credentials(
+            &crate::config::Config::load().config.work_items,
+            &params.environment,
+        );
+        if !credentials.is_empty() {
+            let names: Vec<&str> = credentials.iter().map(|(name, _)| name.as_str()).collect();
+            info!(
+                ?names,
+                "handoff refreshes credential variables from the caller"
+            );
+        }
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
             &token,
+            &credentials,
         ) {
             Ok(child) => child,
             Err(err) => {

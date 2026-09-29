@@ -1787,6 +1787,90 @@ fn live_handoff_keeps_shell_pane_after_foreground_process_exits() {
 }
 
 #[test]
+fn live_handoff_takes_configured_credentials_from_the_caller() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let env_marker = base.join("replacement-env");
+
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[
+            ("HERDR_TEST_JIRA_TOKEN", "old-token"),
+            ("HERDR_TEST_UNLISTED", "old-value"),
+        ],
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    // The handoff reads the config afresh, as the replacement server will. Test builds
+    // read `herdr-dev`.
+    fs::create_dir_all(config_home.join("herdr-dev")).unwrap();
+    fs::write(
+        config_home.join("herdr-dev/config.toml"),
+        "onboarding = false\n\n[work_items.jira]\nenabled = false\ntoken_env = \"HERDR_TEST_JIRA_TOKEN\"\n",
+    )
+    .unwrap();
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:handoff",
+            "method": "server.live_handoff",
+            "params": {"environment": {
+                "HERDR_TEST_JIRA_TOKEN": "rotated-token",
+                "HERDR_TEST_UNLISTED": "caller-value",
+            }}
+        }),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // A pane the replacement server starts inherits its environment.
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:print-env",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": pane_id,
+                "text": format!(
+                    "echo \"$HERDR_TEST_JIRA_TOKEN $HERDR_TEST_UNLISTED\" > {}",
+                    env_marker.display()
+                ),
+                "keys": ["Enter"]
+            }
+        }),
+    ));
+
+    assert_eq!(
+        wait_for_file_contains(&env_marker, "\n", Duration::from_secs(5)),
+        "rotated-token old-value\n"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_preserves_python_http_server() {
     let _lock = test_lock();
     let base = unique_test_dir();

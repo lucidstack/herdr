@@ -73,6 +73,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
         surface_interest: true,
         health_check: true,
         ssh_agent_registration: false,
+        handoff_environment: crate::platform::capabilities().live_handoff,
     })
 }
 
@@ -1383,6 +1384,7 @@ mod tests {
                 surface_interest: true,
                 health_check: true,
                 ssh_agent_registration: false,
+                handoff_environment: false,
             }),
             None,
             None,
