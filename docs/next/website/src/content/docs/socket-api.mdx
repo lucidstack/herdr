@@ -564,13 +564,19 @@ log record. Missing context fields are filled from the active workspace, tab,
 focused pane, worktree provenance, and request id. Invoking an action from a
 disabled plugin returns a `plugin_disabled` error.
 
+`plugin.action.invoke` accepts an optional `input` string, capped at 64 KiB.
+When present, the started action process receives it verbatim in
+`HERDR_PLUGIN_INPUT`; event hooks, startup hooks, and pane commands never see
+it. Input over the limit returns a `plugin_input_too_large` error and starts
+no command.
+
 Herdr injects `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV=1`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`,
 `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`, and available
 `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` values. Action
-commands also receive `HERDR_PLUGIN_ACTION_ID`; event hooks receive
-`HERDR_PLUGIN_EVENT` and `HERDR_PLUGIN_EVENT_JSON`; pane commands receive
-`HERDR_PLUGIN_ENTRYPOINT_ID`.
+commands also receive `HERDR_PLUGIN_ACTION_ID` and, when `input` was given,
+`HERDR_PLUGIN_INPUT`; event hooks receive `HERDR_PLUGIN_EVENT` and
+`HERDR_PLUGIN_EVENT_JSON`; pane commands receive `HERDR_PLUGIN_ENTRYPOINT_ID`.
 
 List recent action and event command logs:
 

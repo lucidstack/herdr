@@ -430,10 +430,13 @@ fn plugin_action_list(args: &[String]) -> std::io::Result<i32> {
 
 fn plugin_action_invoke(args: &[String]) -> std::io::Result<i32> {
     let Some(action_id) = args.first() else {
-        eprintln!("usage: herdr plugin action invoke <action_id> [--plugin ID]");
+        eprintln!(
+            "usage: herdr plugin action invoke <action_id> [--plugin ID] [--input STRING | --input-file PATH]"
+        );
         return Ok(2);
     };
     let mut plugin_id = None;
+    let mut input = None;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -442,6 +445,32 @@ fn plugin_action_invoke(args: &[String]) -> std::io::Result<i32> {
                     return Ok(2);
                 };
                 plugin_id = Some(value);
+            }
+            "--input" => {
+                if input.is_some() {
+                    eprintln!("--input and --input-file are mutually exclusive");
+                    return Ok(2);
+                }
+                let Some(value) = required_value(args, &mut index, "--input") else {
+                    return Ok(2);
+                };
+                input = Some(value);
+            }
+            "--input-file" => {
+                if input.is_some() {
+                    eprintln!("--input and --input-file are mutually exclusive");
+                    return Ok(2);
+                }
+                let Some(path) = required_value(args, &mut index, "--input-file") else {
+                    return Ok(2);
+                };
+                input = match std::fs::read_to_string(&path) {
+                    Ok(contents) => Some(contents),
+                    Err(err) => {
+                        eprintln!("failed to read {path}: {err}");
+                        return Ok(2);
+                    }
+                };
             }
             other => {
                 eprintln!("unknown option: {other}");
@@ -470,6 +499,7 @@ fn plugin_action_invoke(args: &[String]) -> std::io::Result<i32> {
             clicked_url: None,
             link_handler_id: None,
         }),
+        input,
     }))
 }
 
@@ -1670,7 +1700,9 @@ fn print_plugin_help() {
 fn print_plugin_action_help() {
     eprintln!("herdr plugin action commands:");
     eprintln!("  herdr plugin action list [--plugin ID]");
-    eprintln!("  herdr plugin action invoke <action_id> [--plugin ID]");
+    eprintln!(
+        "  herdr plugin action invoke <action_id> [--plugin ID] [--input STRING | --input-file PATH]"
+    );
 }
 
 fn print_plugin_pane_help() {

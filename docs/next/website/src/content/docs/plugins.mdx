@@ -255,10 +255,12 @@ injects `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV=1`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`,
 `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`, and any available
 `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID`. Action commands also
-receive `HERDR_PLUGIN_ACTION_ID`; startup and event hooks receive
-`HERDR_PLUGIN_EVENT` (`startup` for startup hooks), event hooks additionally
-receive `HERDR_PLUGIN_EVENT_JSON`, and pane commands receive
-`HERDR_PLUGIN_ENTRYPOINT_ID`.
+receive `HERDR_PLUGIN_ACTION_ID` and, when the caller passed an `input` string to
+`plugin.action.invoke` (at most 64 KiB), `HERDR_PLUGIN_INPUT` with that exact
+string; startup and event hooks receive `HERDR_PLUGIN_EVENT` (`startup` for
+startup hooks), event hooks additionally receive `HERDR_PLUGIN_EVENT_JSON`, and
+pane commands receive `HERDR_PLUGIN_ENTRYPOINT_ID`. Event hooks, startup hooks,
+and pane commands never receive `HERDR_PLUGIN_INPUT`.
 
 `HERDR_PLUGIN_ROOT` is the installed or linked plugin directory. Do not store
 user credentials or durable state there, because GitHub-installed plugin roots

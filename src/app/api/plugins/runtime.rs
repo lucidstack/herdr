@@ -21,6 +21,7 @@ impl App {
         command: Vec<String>,
         context: &PluginInvocationContext,
         event_json: Option<String>,
+        input: Option<String>,
     ) -> Result<PluginCommandLogInfo, (&'static str, String)> {
         let Some(program) = command.first().cloned() else {
             return Err((
@@ -60,6 +61,9 @@ impl App {
         }
         if let Some(event_json) = event_json {
             env.push(("HERDR_PLUGIN_EVENT_JSON".to_string(), event_json));
+        }
+        if let Some(input) = input {
+            env.push(("HERDR_PLUGIN_INPUT".to_string(), input));
         }
         if let Some(workspace_id) = context.workspace_id.as_ref() {
             env.push(("HERDR_WORKSPACE_ID".to_string(), workspace_id.clone()));
@@ -210,6 +214,7 @@ impl App {
                     startup.command,
                     &context,
                     None,
+                    None,
                 );
             }
         }
@@ -260,6 +265,7 @@ impl App {
                     hook.command.clone(),
                     &context,
                     event_json.clone(),
+                    None,
                 );
             }
         }

@@ -1178,3 +1178,104 @@ command = ["sh", "-c", "echo install"]
 
     cleanup_test_base(&base);
 }
+
+#[test]
+fn plugin_action_invoke_input_flags_cli_smoke_test() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let plugin_dir = base.join("plugins").join("input-echo");
+    fs::create_dir_all(&plugin_dir).unwrap();
+    let capture_path = plugin_dir.join("captured-input.txt");
+    fs::write(
+        plugin_dir.join("herdr-plugin.toml"),
+        format!(
+            "id = \"example.input-echo\"\nname = \"Input Echo\"\nversion = \"0.1.0\"\nmin_herdr_version = \"0.6.10\"\n\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\ncommand = [\"sh\", \"-c\", \"printf '%s' \\\"$HERDR_PLUGIN_INPUT\\\" > {}\"]\n",
+            capture_path.display()
+        ),
+    )
+    .unwrap();
+
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+
+    let linked = run_cli_json_in_dir(
+        &socket_path,
+        &["plugin", "link", "plugins/input-echo"],
+        &base,
+    );
+    assert_eq!(linked["result"]["type"], "plugin_linked");
+
+    let invoked = run_cli_json(
+        &socket_path,
+        &[
+            "plugin",
+            "action",
+            "invoke",
+            "run",
+            "--plugin",
+            "example.input-echo",
+            "--input",
+            "hello via --input",
+        ],
+    );
+    assert_eq!(invoked["result"]["type"], "plugin_action_invoked");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !capture_path.exists() {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fs::read_to_string(&capture_path).unwrap(),
+        "hello via --input"
+    );
+    fs::remove_file(&capture_path).unwrap();
+
+    let input_file = base.join("input.txt");
+    fs::write(&input_file, "hello via --input-file").unwrap();
+    let invoked_file = run_cli_json(
+        &socket_path,
+        &[
+            "plugin",
+            "action",
+            "invoke",
+            "run",
+            "--plugin",
+            "example.input-echo",
+            "--input-file",
+            input_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(invoked_file["result"]["type"], "plugin_action_invoked");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !capture_path.exists() {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        fs::read_to_string(&capture_path).unwrap(),
+        "hello via --input-file"
+    );
+
+    let conflicting = run_cli(
+        &socket_path,
+        &[
+            "plugin",
+            "action",
+            "invoke",
+            "run",
+            "--plugin",
+            "example.input-echo",
+            "--input",
+            "a",
+            "--input-file",
+            input_file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(conflicting.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&conflicting.stderr)
+        .contains("--input and --input-file are mutually exclusive"));
+
+    cleanup_spawned_herdr(herdr, base);
+}

@@ -1405,6 +1405,7 @@ fn plugin_action_list_and_invoke_round_trips() {
             plugin_id: Some("example.issue-flow".into()),
             action_id: "assign-issue".into(),
             context: None,
+            input: None,
         }),
     };
     let json = serde_json::to_value(&invoke).unwrap();

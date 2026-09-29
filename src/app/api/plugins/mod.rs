@@ -18,6 +18,8 @@ use manifest::{
     effective_platforms, ensure_platform_supported, normalize_action_id, normalize_plugin_source,
 };
 
+const PLUGIN_ACTION_INPUT_MAX_BYTES: usize = 64 * 1024;
+
 #[cfg(test)]
 use crate::api::schema::{PluginCommandStatus, PluginInvocationContext};
 pub(crate) use manifest::load_plugin_manifest;
@@ -179,6 +181,18 @@ impl App {
         id: String,
         params: PluginActionInvokeParams,
     ) -> String {
+        if let Some(input) = params.input.as_ref() {
+            if input.len() > PLUGIN_ACTION_INPUT_MAX_BYTES {
+                return encode_error(
+                    id,
+                    "plugin_input_too_large",
+                    format!(
+                        "action input must be at most {PLUGIN_ACTION_INPUT_MAX_BYTES} bytes, got {} bytes",
+                        input.len()
+                    ),
+                );
+            }
+        }
         if let Err(err) = self.refresh_installed_plugins() {
             return encode_error(id, "plugin_registry_load_failed", err.to_string());
         }
@@ -208,6 +222,7 @@ impl App {
             action.command.clone(),
             &context,
             None,
+            params.input,
         ) {
             Ok(log) => log,
             Err((code, message)) => return encode_error(id, code, message),
@@ -249,6 +264,7 @@ impl App {
             None,
             action.command,
             &context,
+            None,
             None,
         )
         .map(|_| ())
@@ -400,6 +416,7 @@ impl App {
             None,
             action.command,
             &context,
+            None,
             None,
         )
         .map(|_| true)
@@ -2467,6 +2484,7 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
                     clicked_url: None,
                     link_handler_id: None,
                 }),
+                input: None,
             }),
         });
         let ResponseResult::PluginActionInvoked {
@@ -2536,6 +2554,7 @@ command = ["sh", "-c", "printf %s ${{HERDR_PANE_ID-unset}} > '{}'; sleep 1"]
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: None,
+                input: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
@@ -2683,6 +2702,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
                 plugin_id: Some("example.runner".into()),
                 action_id: "run".into(),
                 context: None,
+                input: None,
             }),
         });
         let ResponseResult::PluginActionInvoked { log, .. } = response_result(&invoke) else {
@@ -2750,6 +2770,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
                 plugin_id: Some("example.action-paths".into()),
                 action_id: "run".into(),
                 context: None,
+                input: None,
             }),
         });
         let ResponseResult::PluginActionInvoked { log, .. } = response_result(&invoke) else {
@@ -2806,6 +2827,226 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
                     .to_string()
                     .as_str()
             )
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_action_invoke_passes_input_env() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-action-input-present");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.input-present"
+name = "Input Present"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "run"
+title = "Run"
+command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_INPUT\""]
+"#,
+        );
+        link_manifest(&mut app, &root);
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-input-present".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.input-present".into()),
+                action_id: "run".into(),
+                context: None,
+                input: Some("hello from the socket".into()),
+            }),
+        });
+        let ResponseResult::PluginActionInvoked { log, .. } = response_result(&invoke) else {
+            panic!("expected plugin action invocation: {invoke}");
+        };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            if app.state.plugin_command_logs.iter().any(|entry| {
+                entry.log_id == log.log_id && entry.status != PluginCommandStatus::Running
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let logs = app.handle_api_request(Request {
+            id: "logs".into(),
+            method: Method::PluginLogList(PluginLogListParams {
+                plugin_id: Some("example.input-present".into()),
+                limit: Some(10),
+            }),
+        });
+        let ResponseResult::PluginLogList { logs } = response_result(&logs) else {
+            panic!("expected plugin logs: {logs}");
+        };
+        let finished = logs
+            .iter()
+            .find(|entry| entry.log_id == log.log_id)
+            .expect("log should exist");
+        assert_eq!(finished.status, PluginCommandStatus::Succeeded);
+        assert_eq!(finished.stdout.as_deref(), Some("hello from the socket"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_action_invoke_without_input_omits_env_var() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-action-input-absent");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.input-absent"
+name = "Input Absent"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "run"
+title = "Run"
+command = ["sh", "-c", "if [ -z \"${HERDR_PLUGIN_INPUT+x}\" ]; then printf absent; else printf present; fi"]
+"#,
+        );
+        link_manifest(&mut app, &root);
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-input-absent".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.input-absent".into()),
+                action_id: "run".into(),
+                context: None,
+                input: None,
+            }),
+        });
+        let ResponseResult::PluginActionInvoked { log, .. } = response_result(&invoke) else {
+            panic!("expected plugin action invocation: {invoke}");
+        };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            if app.state.plugin_command_logs.iter().any(|entry| {
+                entry.log_id == log.log_id && entry.status != PluginCommandStatus::Running
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let logs = app.handle_api_request(Request {
+            id: "logs".into(),
+            method: Method::PluginLogList(PluginLogListParams {
+                plugin_id: Some("example.input-absent".into()),
+                limit: Some(10),
+            }),
+        });
+        let ResponseResult::PluginLogList { logs } = response_result(&logs) else {
+            panic!("expected plugin logs: {logs}");
+        };
+        let finished = logs
+            .iter()
+            .find(|entry| entry.log_id == log.log_id)
+            .expect("log should exist");
+        assert_eq!(finished.status, PluginCommandStatus::Succeeded);
+        assert_eq!(finished.stdout.as_deref(), Some("absent"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manifest_action_invoke_rejects_oversized_input() {
+        let mut app = test_app();
+        let oversized = "a".repeat(PLUGIN_ACTION_INPUT_MAX_BYTES + 1);
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-input-oversized".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.does-not-matter".into()),
+                action_id: "run".into(),
+                context: None,
+                input: Some(oversized),
+            }),
+        });
+        let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(value["error"]["code"], "plugin_input_too_large");
+        assert!(app.state.plugin_command_logs.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_action_invoke_accepts_input_at_size_limit() {
+        let mut app = test_app();
+        let root = unique_temp_path("plugin-action-input-boundary");
+        write_manifest_content(
+            &root,
+            r#"
+id = "example.input-boundary"
+name = "Input Boundary"
+version = "0.1.0"
+min_herdr_version = "0.6.10"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "run"
+title = "Run"
+command = ["sh", "-c", "printf '%s' \"${#HERDR_PLUGIN_INPUT}\""]
+"#,
+        );
+        link_manifest(&mut app, &root);
+
+        let invoke = app.handle_api_request(Request {
+            id: "invoke-input-boundary".into(),
+            method: Method::PluginActionInvoke(PluginActionInvokeParams {
+                plugin_id: Some("example.input-boundary".into()),
+                action_id: "run".into(),
+                context: None,
+                input: Some("a".repeat(PLUGIN_ACTION_INPUT_MAX_BYTES)),
+            }),
+        });
+        let ResponseResult::PluginActionInvoked { log, .. } = response_result(&invoke) else {
+            panic!("expected plugin action invocation: {invoke}");
+        };
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            app.drain_all_internal_events();
+            if app.state.plugin_command_logs.iter().any(|entry| {
+                entry.log_id == log.log_id && entry.status != PluginCommandStatus::Running
+            }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let logs = app.handle_api_request(Request {
+            id: "logs".into(),
+            method: Method::PluginLogList(PluginLogListParams {
+                plugin_id: Some("example.input-boundary".into()),
+                limit: Some(10),
+            }),
+        });
+        let ResponseResult::PluginLogList { logs } = response_result(&logs) else {
+            panic!("expected plugin logs: {logs}");
+        };
+        let finished = logs
+            .iter()
+            .find(|entry| entry.log_id == log.log_id)
+            .expect("log should exist");
+        assert_eq!(finished.status, PluginCommandStatus::Succeeded);
+        assert_eq!(
+            finished.stdout.as_deref(),
+            Some(PLUGIN_ACTION_INPUT_MAX_BYTES.to_string().as_str())
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -2951,6 +3192,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > {}"]
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: None,
+                input: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
@@ -3358,6 +3600,7 @@ command = ["show-ctx"]
                 plugin_id: Some("example.context".into()),
                 action_id: "show".into(),
                 context: None,
+                input: None,
             }),
         });
 
@@ -3420,6 +3663,7 @@ command = ["show-ctx"]
                 plugin_id: Some("example.worktree-bootstrap".into()),
                 action_id: "bootstrap".into(),
                 context: None,
+                input: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
@@ -3835,6 +4079,7 @@ command = ["act"]
                 plugin_id: Some("example.reject".into()),
                 action_id: "act".into(),
                 context: None,
+                input: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
@@ -3901,6 +4146,7 @@ command = ["act"]
                 plugin_id: Some("example.override".into()),
                 action_id: "act".into(),
                 context: None,
+                input: None,
             }),
         });
         let value: serde_json::Value = serde_json::from_str(&invoke).unwrap();
@@ -3961,6 +4207,7 @@ command = ["act"]
                 plugin_id: Some("example.nodecl".into()),
                 action_id: "act".into(),
                 context: None,
+                input: None,
             }),
         });
         assert!(

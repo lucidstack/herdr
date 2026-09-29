@@ -309,6 +309,10 @@ pub struct PluginActionInvokeParams {
     pub plugin_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<PluginInvocationContext>,
+    /// Opaque string passed to the action process in `HERDR_PLUGIN_INPUT`.
+    /// At most 64 KiB (UTF-8 bytes). When omitted, the variable is not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

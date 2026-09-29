@@ -4017,6 +4017,13 @@
                 }
               ]
             },
+            "input": {
+              "description": "Opaque string passed to the action process in `HERDR_PLUGIN_INPUT`.\nAt most 64 KiB (UTF-8 bytes). When omitted, the variable is not set.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "plugin_id": {
               "type": [
                 "string",
