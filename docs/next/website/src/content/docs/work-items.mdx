@@ -155,6 +155,8 @@ Once an item has a workspace, Herdr checks that its tracker knows you are on it.
 
 Once the pull request linked to a Jira ticket is merged while the ticket is still open, closing it is what is left to do. **Move APP-7 to Done** leads the item's choices and is the default; the start reminder no longer shows, and **Continue on…** stays below for any follow-up work. It applies the ticket's one transition into a done status, or, when the workflow has several (such as Won't Do), the one named Done. If Jira needs more for that transition, such as a resolution, the choice fails with Jira's reason; close the ticket in Jira instead. Once Jira reports it done, the item resolves as usual.
 
+The agent in the item's workspace hears about what these choices do. Once one succeeds, for example **Mark pull request ready for review** from the phone, Herdr leaves the agent a note saying what changed, so it does not keep working from an out-of-date picture. With the omp or Claude Code integration installed, a working agent gets the note straight away as steering, and an idle one sees it with your next prompt.
+
 ### Picking what to work on next
 
 Click **+ Pick next task…** at the bottom of the inbox (or bind `keys.pick_next`, unbound by default) when you are not sure what to take next. Choose the tracker, with Tab or a click when several are configured, and optionally say what you are after. Herdr opens a scratch workspace, **Pick next · Jira** for example, with the agent from your workflow and briefs it to investigate read-only: `herdr work-item search` and `show`, plus your mapped clones through `git -C`. It recommends one ticket and up to two alternatives, with why now, who works on related tickets and any overlap, then asks you.

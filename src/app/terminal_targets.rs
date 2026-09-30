@@ -112,6 +112,14 @@ impl App {
             .find(|target| target.ws_idx == ws_idx && self.target_is_agent(target))
     }
 
+    /// Every agent pane of a workspace, in tab and layout order.
+    pub(crate) fn agent_targets_in_workspace(&self, ws_idx: usize) -> Vec<TerminalTarget> {
+        self.terminal_targets()
+            .into_iter()
+            .filter(|target| target.ws_idx == ws_idx && self.target_is_agent(target))
+            .collect()
+    }
+
     fn target_is_agent(&self, target: &TerminalTarget) -> bool {
         self.state
             .terminals

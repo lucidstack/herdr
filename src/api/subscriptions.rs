@@ -152,6 +152,7 @@ impl ActiveSubscription {
             Subscription::AttentionChanged {} => {
                 Ok(event_subscription(EventKind::AttentionChanged))
             }
+            Subscription::AgentNotesAdded {} => Ok(event_subscription(EventKind::AgentNotesAdded)),
             Subscription::TabCreated {} => Ok(event_subscription(EventKind::TabCreated)),
             Subscription::TabClosed {} => Ok(event_subscription(EventKind::TabClosed)),
             Subscription::TabFocused {} => Ok(event_subscription(EventKind::TabFocused)),

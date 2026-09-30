@@ -27,6 +27,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
         "explain" => agent_explain(&args[1..]),
+        "notes" => agent_notes(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
             Ok(0)
@@ -480,6 +481,30 @@ fn agent_focus(args: &[String]) -> std::io::Result<i32> {
         method: Method::AgentFocus(AgentTarget {
             target: target.clone(),
         }),
+    })?)
+}
+
+fn agent_notes(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str =
+        "usage: herdr agent notes take <target> | herdr agent notes add <target> <text>";
+    let method = match args {
+        [command, target] if command == "take" => Method::AgentNotesTake(AgentTarget {
+            target: target.clone(),
+        }),
+        [command, target, text] if command == "add" => {
+            Method::AgentNotesAdd(crate::api::schema::AgentNotesAddParams {
+                target: target.clone(),
+                text: text.clone(),
+            })
+        }
+        _ => {
+            eprintln!("{USAGE}");
+            return Ok(2);
+        }
+    };
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:notes".into(),
+        method,
     })?)
 }
 
@@ -938,6 +963,8 @@ fn print_agent_help() {
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
+    eprintln!("  herdr agent notes take <target>");
+    eprintln!("  herdr agent notes add <target> <text>");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!(

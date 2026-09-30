@@ -4,6 +4,7 @@
 //! - `actions.rs` — state mutations (testable without PTYs/async)
 
 pub(crate) mod actions;
+mod agent_notes;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;

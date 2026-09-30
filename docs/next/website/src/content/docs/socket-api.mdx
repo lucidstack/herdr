@@ -106,7 +106,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.last_message`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.last_message`, `agent.notes.take`, `agent.notes.add`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -118,6 +118,10 @@ Raw socket method names use dot notation:
 ```json
 {"id":"1","method":"agent.last_message","params":{"target":"w1:p1"}}
 ```
+
+Herdr keeps an agent up to date with changes it makes outside the agent's session. When a work-item action succeeds, such as marking the linked pull request ready for review or moving the ticket to Done, every agent in the item's workspace gets a note about it. `agent.notes.add` queues a note of your own (`target` and `text`, at most 2000 characters) for scripts and plugins that change things an agent should know about. Each new note publishes `agent.notes_added` with the agent's `pane_id` and `workspace_id`. `agent.notes.take` returns the agent's queued notes, oldest first, and clears them. Herdr keeps the newest 20 notes per agent.
+
+The omp and Claude Code integrations take the notes and pass them to the agent: while it works, they steer the running turn; while it is idle, they join the context of its next turn without starting one. Other agents only see the notes a script or plugin passes on.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
 

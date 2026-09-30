@@ -242,6 +242,169 @@ function askBlockedMessage(args: any): string {
   return "waiting for user input";
 }
 
+function field(value: unknown, key: string): unknown {
+  return value && typeof value === "object" && key in value
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+// Replies with the parsed response line, or undefined when Herdr is unreachable.
+function requestResponse(request: unknown, timeoutMs: number): Promise<unknown> {
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  if (!enabled()) {
+    resolve(undefined);
+    return promise;
+  }
+  let done = false;
+  let buffer = "";
+  const socket = net.createConnection(socketEndpoint!);
+  const timeout = setTimeout(() => finish(undefined), timeoutMs);
+  timeout.unref?.();
+  function finish(value: unknown) {
+    if (done) return;
+    done = true;
+    clearTimeout(timeout);
+    socket.destroy();
+    resolve(value);
+  }
+  socket.on("error", () => finish(undefined));
+  socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+  socket.on("data", (chunk) => {
+    buffer += chunk.toString();
+    const newline = buffer.indexOf("\n");
+    if (newline < 0) return;
+    try {
+      finish(JSON.parse(buffer.slice(0, newline)));
+    } catch {
+      finish(undefined);
+    }
+  });
+  socket.on("end", () => finish(undefined));
+  return promise;
+}
+
+// Notes Herdr keeps for this agent about changes it made outside this session, such as
+// marking the pull request ready for review from another client. Herdr announces them
+// with `agent.notes_added`; the extension takes them and hands them to the agent.
+function createNotesChannel(deliver: (text: string) => void) {
+  let stopped = false;
+  let taking = false;
+  let takeAgain = false;
+  let watcher: net.Socket | undefined;
+  let reconnectTimer: NodeJS.Timeout | undefined;
+  let reconnectDelayMs = 250;
+
+  async function take() {
+    if (taking) {
+      takeAgain = true;
+      return;
+    }
+    taking = true;
+    try {
+      do {
+        takeAgain = false;
+        const response = await requestResponse(
+          {
+            id: `${source}:notes:${nextReportSeq()}`,
+            method: "agent.notes.take",
+            params: { target: paneId },
+          },
+          1500,
+        );
+        const notes = field(field(response, "result"), "notes");
+        const text = (Array.isArray(notes) ? notes : [])
+          .map((note) => field(note, "text"))
+          .filter((line): line is string => typeof line === "string" && line.length > 0)
+          .join("\n");
+        if (text) {
+          deliver(text);
+        }
+      } while (takeAgain && !stopped);
+    } finally {
+      taking = false;
+    }
+  }
+
+  function scheduleReconnect() {
+    if (stopped || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      watch();
+    }, reconnectDelayMs);
+    reconnectTimer.unref?.();
+    // A live handoff briefly closes the socket; back off gently while it is gone.
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 5000);
+  }
+
+  function watch() {
+    if (stopped || watcher || !enabled()) return;
+    let buffer = "";
+    const socket = net.createConnection(socketEndpoint!);
+    watcher = socket;
+    socket.unref?.();
+    socket.on("connect", () => {
+      socket.write(
+        `${JSON.stringify({
+          id: `${source}:notes:watch`,
+          method: "events.subscribe",
+          params: { subscriptions: [{ type: "agent.notes_added" }] },
+        })}\n`,
+      );
+    });
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString();
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        let message: unknown;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const data = field(message, "data");
+        if (field(message, "error") !== undefined) {
+          // A server without agent notes; the next session tries again.
+          stopped = true;
+          socket.destroy();
+        } else if (field(message, "result") !== undefined) {
+          // Subscribed, possibly again after a handoff: catch up on anything missed.
+          reconnectDelayMs = 250;
+          void take();
+        } else if (field(data, "type") === "agent_notes_added" && field(data, "pane_id") === paneId) {
+          void take();
+        }
+      }
+    });
+    const closed = () => {
+      if (watcher === socket) {
+        watcher = undefined;
+      }
+      scheduleReconnect();
+    };
+    socket.on("error", closed);
+    socket.on("close", closed);
+  }
+
+  return {
+    start() {
+      stopped = false;
+      watch();
+    },
+    stop() {
+      stopped = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      watcher?.destroy();
+      watcher = undefined;
+    },
+  };
+}
+
 export default function (pi) {
   if (!enabled()) {
     return;
@@ -258,6 +421,11 @@ export default function (pi) {
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let rootSession = false;
+  // While the agent works, a message steers the running turn; while it is idle, it joins
+  // the context of the next turn without starting one.
+  const notes = createNotesChannel((text) => {
+    pi.sendMessage({ customType: "herdr-note", content: text, display: true });
+  });
 
   function clearTimer(timer: ReturnType<typeof setTimeout> | undefined) {
     if (timer) {
@@ -379,6 +547,7 @@ export default function (pi) {
     // A reload can replace this extension mid-run without emitting another agent_start.
     agentActive = ctx?.isIdle?.() === false;
     publishState(true);
+    notes.start();
   });
 
   pi.on("session_switch", (event, ctx) => {
@@ -467,5 +636,6 @@ export default function (pi) {
     if (rootSession) {
       clearPendingTimers();
     }
+    notes.stop();
   });
 }

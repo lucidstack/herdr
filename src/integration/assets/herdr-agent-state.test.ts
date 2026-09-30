@@ -490,8 +490,6 @@ async function startDroppedFirstResponseServer(name: string) {
   const attemptedRequests: unknown[] = [];
   const deliveredRequests: unknown[] = [];
   const recordingServer = createServer((socket) => {
-    connectionCount += 1;
-    const connectionNumber = connectionCount;
     let input = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => {
@@ -501,8 +499,17 @@ async function startDroppedFirstResponseServer(name: string) {
         return;
       }
       const request = JSON.parse(input.slice(0, newline));
+      // Agent notes are a separate channel; answer as a server without them.
+      if (
+        isRecord(request) &&
+        (request.method === "events.subscribe" || request.method === "agent.notes.take")
+      ) {
+        socket.end(`${JSON.stringify({ id: request.id, error: { code: "unknown_method" } })}\n`);
+        return;
+      }
+      connectionCount += 1;
       attemptedRequests.push(request);
-      if (connectionNumber === 1) {
+      if (connectionCount === 1) {
         return;
       }
       deliveredRequests.push(request);
@@ -551,6 +558,75 @@ test("Oh My Pi retries working before a queued idle state", async () => {
   expect(attemptedRequests[1]).toEqual(attemptedRequests[0]);
   expect(requestState(attemptedRequests[0])).toBe("working");
   expect(requestState(attemptedRequests[2])).toBe("idle");
+});
+
+test("Oh My Pi hands the agent the notes Herdr announces", async () => {
+  const recordingSocketPath = join(tmpdir(), `herdr-omp-notes-${process.pid}.sock`);
+  socketPath = recordingSocketPath;
+  await rm(recordingSocketPath, { force: true });
+  const queued: string[] = [];
+  const subscribed = Promise.withResolvers<net.Socket>();
+  const caughtUp = Promise.withResolvers<void>();
+  const notesServer = createServer((socket) => {
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      input += chunk;
+      const newline = input.indexOf("\n");
+      if (newline === -1) {
+        return;
+      }
+      const request = JSON.parse(input.slice(0, newline));
+      input = input.slice(newline + 1);
+      if (!isRecord(request)) {
+        return;
+      }
+      if (request.method === "events.subscribe") {
+        socket.write(`${JSON.stringify({ id: request.id, result: { type: "subscribed" } })}\n`);
+        subscribed.resolve(socket);
+      } else if (request.method === "agent.notes.take") {
+        const notes = queued.splice(0).map((text) => ({ text, created_at: 1 }));
+        socket.end(
+          `${JSON.stringify({ id: request.id, result: { type: "agent_notes", pane_id: "test:p1", notes } })}\n`,
+        );
+        caughtUp.resolve();
+      } else {
+        socket.end("{}\n");
+      }
+    });
+  });
+  server = notesServer;
+  const listening = Promise.withResolvers<void>();
+  notesServer.once("error", listening.reject);
+  notesServer.listen(recordingSocketPath, listening.resolve);
+  await listening.promise;
+  configureIntegrationEnvironment(recordingSocketPath);
+  const { handlers, pi } = createExtensionHarness();
+  const delivered = Promise.withResolvers<unknown>();
+  const { default: install } = await importFresh("./omp/herdr-agent-state.ts");
+  install({ ...pi, sendMessage: delivered.resolve });
+  const context = {
+    hasUI: true,
+    isIdle: () => true,
+    sessionManager: { getSessionFile: () => undefined, getSessionId: () => undefined },
+  };
+  handlers.get("session_start")?.({ reason: "startup" }, context);
+
+  // Subscribed and caught up on nothing; then Herdr queues a note and announces it.
+  const subscription = await subscribed.promise;
+  await caughtUp.promise;
+  queued.push("[Herdr] o/r#7 is ready for review");
+  subscription.write(
+    `${JSON.stringify({ event: "agent_notes_added", data: { type: "agent_notes_added", pane_id: "test:p1", workspace_id: "test" } })}\n`,
+  );
+  const message = await delivered.promise;
+  handlers.get("session_shutdown")?.({}, context);
+
+  expect(message).toEqual({
+    customType: "herdr-note",
+    content: "[Herdr] o/r#7 is ready for review",
+    display: true,
+  });
 });
 
 test("Oh My Pi keeps working when a turn ends with a scheduled continuation", async () => {

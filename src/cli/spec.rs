@@ -422,6 +422,22 @@ fn agent_command() -> Command {
         )
         .subcommand(id_command("focus", "target", "Focus an agent"))
         .subcommand(
+            Command::new("notes")
+                .about("Notes for an agent about what Herdr did outside its session")
+                .subcommand_required(true)
+                .subcommand(id_command(
+                    "take",
+                    "target",
+                    "Print the agent's queued notes and clear them",
+                ))
+                .subcommand(
+                    Command::new("add")
+                        .about("Queue a note for the agent")
+                        .arg(required("target", "TARGET"))
+                        .arg(required("text", "TEXT")),
+                ),
+        )
+        .subcommand(
             Command::new("wait")
                 .about("Wait until an agent reaches one of the requested states")
                 .override_usage("herdr agent wait <TARGET> [OPTIONS]")

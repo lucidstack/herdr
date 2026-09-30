@@ -229,7 +229,27 @@ impl App {
                     } => Some(source_id.clone()),
                     _ => None,
                 };
+                // The agent working on the item did not see this happen.
+                let agent_note = match &event {
+                    WorkItemsEvent::Performed {
+                        key,
+                        result: Ok(outcome),
+                    } => self.work_items.get(key).and_then(|item| {
+                        Some((
+                            item.workspace_id.clone()?,
+                            super::agent_notes::action_note(
+                                outcome,
+                                &item.external_id,
+                                &item.title,
+                            ),
+                        ))
+                    }),
+                    _ => None,
+                };
                 notices = self.work_items.apply_event(event, now).1;
+                if let Some((workspace_id, note)) = agent_note {
+                    self.note_for_workspace_agents(&workspace_id, &note);
+                }
                 if let Some(source_id) = polled_source {
                     self.start_work_items_prepare(&source_id);
                 }
@@ -2470,6 +2490,73 @@ mod tests {
         assert_eq!(repo.worktree_path("review/pr-1"), None);
         wait_for(|| !repo.branch_exists("review/pr-1"));
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn an_action_carried_out_on_an_item_leaves_a_note_for_the_agent_in_its_workspace() {
+        use crate::api::schema::{AgentTarget, WorkItemLinkParams};
+        use crate::detect::{Agent, AgentState};
+
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("ticket")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        let source = FakeSource::with_items(vec![source_item("1")]);
+        app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        api(
+            &mut app,
+            Method::WorkItemLink(WorkItemLinkParams {
+                item_id: "fake:1".into(),
+                workspace_id,
+            }),
+        )
+        .expect("linked");
+
+        api(
+            &mut app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: "do".into(),
+            }),
+        )
+        .expect("action accepted");
+        run_until(&mut app, |app| {
+            list(app)[0]
+                .action_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.succeeded)
+        });
+
+        let take = |app: &mut App| {
+            let Ok(ResponseResult::AgentNotes { notes, .. }) = api(
+                app,
+                Method::AgentNotesTake(AgentTarget {
+                    target: public_pane_id.clone(),
+                }),
+            ) else {
+                panic!("agent notes");
+            };
+            notes
+        };
+        let notes = take(&mut app);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].text.contains("Done") && notes[0].text.contains("Title 1"),
+            "{}",
+            notes[0].text
+        );
+        assert!(take(&mut app).is_empty(), "taking notes clears them");
     }
 
     struct Briefing {

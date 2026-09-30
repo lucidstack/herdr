@@ -46,6 +46,8 @@ pub enum Subscription {
     WorkItemResolved {},
     #[serde(rename = "attention.changed")]
     AttentionChanged {},
+    #[serde(rename = "agent.notes_added")]
+    AgentNotesAdded {},
     #[serde(rename = "tab.created")]
     TabCreated {},
     #[serde(rename = "tab.closed")]
@@ -215,6 +217,7 @@ pub enum EventKind {
     WorkItemUpdated,
     WorkItemResolved,
     AttentionChanged,
+    AgentNotesAdded,
     TabCreated,
     TabClosed,
     TabRenamed,
@@ -250,6 +253,7 @@ impl EventKind {
             EventKind::WorkItemUpdated => "work_item.updated",
             EventKind::WorkItemResolved => "work_item.resolved",
             EventKind::AttentionChanged => "attention.changed",
+            EventKind::AgentNotesAdded => "agent.notes_added",
             EventKind::TabCreated => "tab.created",
             EventKind::TabClosed => "tab.closed",
             EventKind::TabRenamed => "tab.renamed",
@@ -286,6 +290,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkItemUpdated,
     EventKind::WorkItemResolved,
     EventKind::AttentionChanged,
+    EventKind::AgentNotesAdded,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
@@ -318,6 +323,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkItemUpdated,
     EventKind::WorkItemResolved,
     EventKind::AttentionChanged,
+    EventKind::AgentNotesAdded,
     EventKind::TabCreated,
     EventKind::TabClosed,
     EventKind::TabRenamed,
@@ -521,6 +527,12 @@ pub enum EventData {
         /// The need now; absent once it no longer needs you.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attention: Option<super::work_items::AttentionInfo>,
+    },
+    /// Herdr queued notes for the agent in `pane_id` about changes it made outside the
+    /// agent's session. Take them with `agent.notes.take`.
+    AgentNotesAdded {
+        pane_id: String,
+        workspace_id: String,
     },
     TabCreated {
         tab: TabInfo,

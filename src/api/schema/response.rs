@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::{AgentInfo, AgentLastMessageInfo};
+use super::agents::{AgentInfo, AgentLastMessageInfo, AgentNoteInfo};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
@@ -103,6 +103,11 @@ pub enum ResponseResult {
     },
     AgentLastMessage {
         last_message: AgentLastMessageInfo,
+    },
+    /// The agent's queued notes, oldest first. Taking them clears the queue.
+    AgentNotes {
+        pane_id: String,
+        notes: Vec<AgentNoteInfo>,
     },
     AgentStarted {
         agent: AgentInfo,

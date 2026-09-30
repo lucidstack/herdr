@@ -519,6 +519,27 @@
               "type": "object"
             },
             {
+              "description": "Herdr queued notes for the agent in `pane_id` about changes it made outside the\nagent's session. Take them with `agent.notes.take`.",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_notes_added",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "tab": {
                   "$ref": "#/schemas/event/$defs/TabInfo"
@@ -931,6 +952,7 @@
             "work_item_updated",
             "work_item_resolved",
             "attention_changed",
+            "agent_notes_added",
             "tab_created",
             "tab_closed",
             "tab_renamed",
@@ -1849,6 +1871,22 @@
     },
     "request": {
       "$defs": {
+        "AgentNotesAddParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "description": "What the agent should know, e.g. \"The user deployed staging from outside this\nsession\". At most 2000 characters.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "text"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -4700,6 +4738,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "agent.notes_added",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "tab.created",
                   "type": "string"
                 }
@@ -6387,6 +6437,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.notes.take",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.notes.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentNotesAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -7817,6 +7899,26 @@
           ],
           "type": "object"
         },
+        "AgentNoteInfo": {
+          "description": "Something Herdr did outside the agent's session that the agent should know about, e.g.\nmarking its pull request ready for review from another client.",
+          "properties": {
+            "created_at": {
+              "description": "Unix time in seconds when Herdr queued it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "One or two lines addressed to the agent.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "created_at"
+          ],
+          "type": "object"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -8313,6 +8415,27 @@
               "type": "object"
             },
             {
+              "description": "Herdr queued notes for the agent in `pane_id` about changes it made outside the\nagent's session. Take them with `agent.notes.take`.",
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_notes_added",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "tab": {
                   "$ref": "#/schemas/success_response/$defs/TabInfo"
@@ -8740,6 +8863,7 @@
             "work_item_updated",
             "work_item_resolved",
             "attention_changed",
+            "agent_notes_added",
             "tab_created",
             "tab_closed",
             "tab_renamed",
@@ -10739,6 +10863,30 @@
               "required": [
                 "type",
                 "last_message"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "The agent's queued notes, oldest first. Taking them clears the queue.",
+              "properties": {
+                "notes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentNoteInfo"
+                  },
+                  "type": "array"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_notes",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "notes"
               ],
               "type": "object"
             },

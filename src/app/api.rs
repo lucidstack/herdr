@@ -1154,6 +1154,12 @@ impl App {
                     "agent.last_message is handled by the api server",
                 );
             }
+            Method::AgentNotesTake(target) => {
+                return self.handle_agent_notes_take(request.id, target);
+            }
+            Method::AgentNotesAdd(params) => {
+                return self.handle_agent_notes_add(request.id, params);
+            }
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSendKeys(params) => {

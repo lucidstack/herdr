@@ -127,6 +127,17 @@ struct AgentTranscript {
     path: String,
 }
 
+/// Notes kept per agent before the oldest is dropped.
+const MAX_AGENT_NOTES: usize = 20;
+
+/// Something Herdr did outside the agent's session, for its integration to pass on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNote {
+    pub text: String,
+    /// Unix time in seconds.
+    pub created_at: u64,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -146,6 +157,9 @@ pub struct TerminalState {
     /// The transcript file reported for a session whose reference is an id. It counts only
     /// while that session is the terminal's current one.
     agent_transcript: Option<AgentTranscript>,
+    /// Notes for the agent about changes Herdr made outside its session, oldest first,
+    /// waiting for its integration to take them.
+    agent_notes: Vec<AgentNote>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     pub agent_name: Option<String>,
@@ -188,6 +202,7 @@ impl TerminalState {
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
             agent_transcript: None,
+            agent_notes: Vec::new(),
             terminal_title: None,
             manual_label: None,
             agent_name: None,
@@ -1439,6 +1454,20 @@ impl TerminalState {
         session: crate::agent_resume::PersistedAgentSession,
     ) {
         self.persisted_agent_session = Some(session);
+    }
+
+    /// Queues a note for the agent. Only the newest `MAX_AGENT_NOTES` are kept, so an
+    /// agent whose integration never takes them does not grow the queue without bound.
+    pub fn push_agent_note(&mut self, text: String, created_at: u64) {
+        if self.agent_notes.len() == MAX_AGENT_NOTES {
+            self.agent_notes.remove(0);
+        }
+        self.agent_notes.push(AgentNote { text, created_at });
+    }
+
+    /// The queued notes, oldest first, leaving none.
+    pub fn take_agent_notes(&mut self) -> Vec<AgentNote> {
+        std::mem::take(&mut self.agent_notes)
     }
 
     /// The reference of the session Herdr currently attributes to this terminal: the hook

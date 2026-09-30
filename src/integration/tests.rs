@@ -967,10 +967,16 @@ fn install_claude_writes_hook_and_updates_settings() {
         .as_str()
         .unwrap()
         .contains(" session"));
-    assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+    for event in ["UserPromptSubmit", "PostToolUse"] {
+        let entries = settings["hooks"][event].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{event}");
+        assert!(entries[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .ends_with(" notes"));
+    }
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
-    assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
     assert!(settings["hooks"].get("Stop").is_none());
@@ -1019,10 +1025,15 @@ fn install_claude_is_idempotent_for_hook_entries() {
         settings["hooks"]["SessionStart"].as_array().unwrap().len(),
         1
     );
-    assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+    for event in ["UserPromptSubmit", "PostToolUse"] {
+        assert_eq!(
+            settings["hooks"][event].as_array().unwrap().len(),
+            1,
+            "{event}"
+        );
+    }
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
-    assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
     assert!(settings["hooks"].get("Stop").is_none());
@@ -1101,7 +1112,20 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
         settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
         "echo keep-session-end"
     );
-    assert!(settings["hooks"].get("UserPromptSubmit").is_none());
+    // The removed "working" command's place goes to the notes hook, not to a working hook.
+    let post_tool_use = settings["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(post_tool_use.len(), 2);
+    assert!(post_tool_use[1]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .ends_with(" notes"));
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("Stop").is_none());
 

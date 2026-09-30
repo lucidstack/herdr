@@ -52,6 +52,59 @@ impl App {
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
+    /// `agent.notes.take`: the agent's queued notes, oldest first, leaving none.
+    pub(super) fn handle_agent_notes_take(&mut self, id: String, target: AgentTarget) -> String {
+        let resolved = match self.resolve_agent_target(&target.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let pane_id = self
+            .public_pane_id(resolved.ws_idx, resolved.pane_id)
+            .unwrap_or_default();
+        let notes = self
+            .state
+            .terminals
+            .values_mut()
+            .find(|terminal| terminal.id.to_string() == resolved.terminal_id)
+            .map(|terminal| terminal.take_agent_notes())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|note| crate::api::schema::AgentNoteInfo {
+                text: note.text,
+                created_at: note.created_at,
+            })
+            .collect();
+        encode_success(id, ResponseResult::AgentNotes { pane_id, notes })
+    }
+
+    /// `agent.notes.add`: queues a note for the agent, as Herdr does for its own actions.
+    pub(super) fn handle_agent_notes_add(
+        &mut self,
+        id: String,
+        params: crate::api::schema::AgentNotesAddParams,
+    ) -> String {
+        let text = params.text.trim();
+        if text.is_empty() {
+            return encode_error(id, "invalid_note", "note text is empty");
+        }
+        if text.chars().count() > crate::app::agent_notes::MAX_AGENT_NOTE_CHARS {
+            return encode_error(
+                id,
+                "invalid_note",
+                format!(
+                    "note text is longer than {} characters",
+                    crate::app::agent_notes::MAX_AGENT_NOTE_CHARS
+                ),
+            );
+        }
+        let resolved = match self.resolve_agent_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        self.note_for_agent(&resolved, text);
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
         let agent = match self.focus_agent_target(&target.target) {
             Ok(agent) => agent,

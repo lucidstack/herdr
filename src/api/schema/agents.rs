@@ -280,3 +280,21 @@ pub struct AgentLastMessageInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
 }
+
+/// Something Herdr did outside the agent's session that the agent should know about, e.g.
+/// marking its pull request ready for review from another client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentNoteInfo {
+    /// One or two lines addressed to the agent.
+    pub text: String,
+    /// Unix time in seconds when Herdr queued it.
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentNotesAddParams {
+    pub target: String,
+    /// What the agent should know, e.g. "The user deployed staging from outside this
+    /// session". At most 2000 characters.
+    pub text: String,
+}

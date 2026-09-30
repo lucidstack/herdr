@@ -6,7 +6,7 @@
 
 param([string]$Action = "")
 
-if ($Action -ne "session") { exit 0 }
+if ($Action -ne "session" -and $Action -ne "notes") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
@@ -19,14 +19,37 @@ try {
 
 $propertyNames = @($payload.PSObject.Properties.Name)
 if ((Test-Path Env:CURSOR_VERSION) -or $propertyNames -ccontains "cursor_version") { exit 0 }
-if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string] -or $payload.hook_event_name -cne "SessionStart") { exit 0 }
+if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string]) { exit 0 }
 if (-not [string]::IsNullOrWhiteSpace($payload.agent_id)) { exit 0 }
+$herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+
+if ($Action -eq "notes") {
+    # Notes about what Herdr did outside this session. Before a prompt they join its
+    # context; after a tool call they steer the running turn.
+    if ($payload.hook_event_name -cne "UserPromptSubmit" -and $payload.hook_event_name -cne "PostToolUse") { exit 0 }
+    try {
+        $response = (& $herdr agent notes take $env:HERDR_PANE_ID 2>$null | Out-String) | ConvertFrom-Json
+        $lines = @($response.result.notes | Where-Object { $_.text -is [string] -and $_.text } | ForEach-Object { $_.text })
+        if ($lines.Count -gt 0) {
+            @{
+                hookSpecificOutput = @{
+                    hookEventName = $payload.hook_event_name
+                    additionalContext = ($lines -join "`n")
+                }
+            } | ConvertTo-Json -Compress -Depth 4
+        }
+    } catch {
+    }
+    exit 0
+}
+
+if ($payload.hook_event_name -cne "SessionStart") { exit 0 }
 
 $sessionId = $payload.session_id
 if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-$herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+
 try {
     $args = @(
         "pane",

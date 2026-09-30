@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session | notes) ;;
   *) exit 0 ;;
 esac
 
@@ -51,10 +51,60 @@ if hook_input_file:
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
 hook_event_name = str(hook_input.get("hook_event_name") or "")
-if hook_event_name != "SessionStart":
-    raise SystemExit(0)
 is_subagent = bool(hook_input.get("agent_id"))
 if is_subagent:
+    raise SystemExit(0)
+
+
+def request_line(request, timeout):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        client.close()
+        return json.loads(data) if data.strip() else None
+    except Exception:
+        return None
+
+
+if action == "notes":
+    # Notes about what Herdr did outside this session, e.g. marking the pull request ready
+    # for review from another client. Before a prompt they join its context; after a
+    # tool call they steer the running turn.
+    if hook_event_name not in ("UserPromptSubmit", "PostToolUse"):
+        raise SystemExit(0)
+    response = request_line(
+        {
+            "id": f"{source}:notes:{time.time_ns()}",
+            "method": "agent.notes.take",
+            "params": {"target": pane_id},
+        },
+        0.5,
+    )
+    result = response.get("result") if isinstance(response, dict) else None
+    notes = result.get("notes") if isinstance(result, dict) else None
+    lines = [
+        note["text"]
+        for note in notes or []
+        if isinstance(note, dict) and isinstance(note.get("text"), str) and note["text"]
+    ]
+    if lines:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": hook_event_name,
+                "additionalContext": "\n".join(lines),
+            }
+        }))
+    raise SystemExit(0)
+
+if hook_event_name != "SessionStart":
     raise SystemExit(0)
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
@@ -85,16 +135,5 @@ if agent_session_id:
 else:
     raise SystemExit(0)
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+request_line(request, 0.5)
 PY

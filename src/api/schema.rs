@@ -163,6 +163,10 @@ pub enum Method {
     AgentWait(AgentWaitParams),
     #[serde(rename = "agent.last_message")]
     AgentLastMessage(AgentTarget),
+    #[serde(rename = "agent.notes.take")]
+    AgentNotesTake(AgentTarget),
+    #[serde(rename = "agent.notes.add")]
+    AgentNotesAdd(AgentNotesAddParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
