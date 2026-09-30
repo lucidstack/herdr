@@ -1,3 +1,4 @@
+mod activity;
 pub mod client;
 mod event_hub;
 mod last_message;

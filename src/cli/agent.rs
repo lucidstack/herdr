@@ -1,13 +1,15 @@
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentActivityParams, AgentPromptParams, AgentPromptWaitOptions, AgentReadParams,
+    AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams,
+    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
+    ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PANE_SHELL_READINESS_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+const ACTIVITY_USAGE: &str = "usage: herdr agent activity <target> [--since CURSOR] [--limit N]";
 
 pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
     let Some(subcommand) = args.first().map(|arg| arg.as_str()) else {
@@ -19,6 +21,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
         "read" => agent_read(&args[1..]),
+        "activity" => agent_activity(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
         "rename" => agent_rename(&args[1..]),
@@ -954,11 +957,55 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
     super::print_read_response(&response)
 }
 
+fn agent_activity(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_activity_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:activity".into(),
+        method: Method::AgentActivity(params),
+    })?)
+}
+
+fn parse_activity_args(args: &[String]) -> Result<AgentActivityParams, String> {
+    let Some(target) = args.first() else {
+        return Err(ACTIVITY_USAGE.into());
+    };
+    let mut since = None;
+    let mut limit = None;
+    let mut index = 1;
+    while index < args.len() {
+        let value = args.get(index + 1);
+        match args[index].as_str() {
+            "--since" => {
+                since = Some(value.ok_or("missing value for --since")?.clone());
+            }
+            "--limit" => {
+                let value = value.ok_or("missing value for --limit")?;
+                limit =
+                    Some(super::parse_u32_flag("--limit", value).map_err(|err| err.to_string())?);
+            }
+            other => return Err(format!("unknown option: {other}")),
+        }
+        index += 2;
+    }
+    Ok(AgentActivityParams {
+        target: target.clone(),
+        since,
+        limit,
+    })
+}
+
 fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
+    eprintln!("  herdr agent activity <target> [--since CURSOR] [--limit N]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
@@ -983,4 +1030,48 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn activity_takes_a_target_with_an_optional_cursor_and_limit() {
+        assert_eq!(
+            parse_activity_args(&args(&["w1:p1"])),
+            Ok(AgentActivityParams {
+                target: "w1:p1".into(),
+                since: None,
+                limit: None,
+            })
+        );
+        assert_eq!(
+            parse_activity_args(&args(&["w1:p1", "--limit", "20", "--since", "c:1.2.3"])),
+            Ok(AgentActivityParams {
+                target: "w1:p1".into(),
+                since: Some("c:1.2.3".into()),
+                limit: Some(20),
+            })
+        );
+    }
+
+    #[test]
+    fn activity_refuses_arguments_it_cannot_send() {
+        for bad in [
+            &[][..],
+            &["w1:p1", "--since"],
+            &["w1:p1", "--limit"],
+            &["w1:p1", "--limit", "many"],
+            &["w1:p1", "--limit", "-3"],
+            &["w1:p1", "--verbose"],
+            &["w1:p1", "extra"],
+        ] {
+            assert!(parse_activity_args(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
 }

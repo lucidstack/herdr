@@ -63,6 +63,161 @@ fn request_uses_dot_method_names() {
 }
 
 #[test]
+fn agent_activity_request_round_trips_and_omits_unset_options() {
+    let request = Request {
+        id: "req_activity".into(),
+        method: Method::AgentActivity(AgentActivityParams {
+            target: "w1:p1".into(),
+            since: Some("c:1.2.3".into()),
+            limit: Some(50),
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "agent.activity");
+    assert_eq!(
+        json["params"],
+        serde_json::json!({"target": "w1:p1", "since": "c:1.2.3", "limit": 50})
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let bare: Request =
+        serde_json::from_str(r#"{"id":"1","method":"agent.activity","params":{"target":"w1:p1"}}"#)
+            .unwrap();
+    assert_eq!(
+        bare.method,
+        Method::AgentActivity(AgentActivityParams {
+            target: "w1:p1".into(),
+            since: None,
+            limit: None,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&bare).unwrap()["params"],
+        serde_json::json!({"target": "w1:p1"})
+    );
+}
+
+#[test]
+fn agent_activity_result_serialises_with_the_documented_keys() {
+    let response = SuccessResponse {
+        id: "req_1".into(),
+        result: ResponseResult::AgentActivity {
+            activity: AgentActivityInfo {
+                terminal_id: "term_1".into(),
+                pane_id: "w1:p1".into(),
+                agent: Some("claude".into()),
+                status: AgentActivityStatus::Available,
+                turn: Some(AgentActivityTurn {
+                    started_at: Some("2026-09-30T14:02:11.120Z".into()),
+                    finished: false,
+                }),
+                entries: vec![
+                    AgentActivityEntry {
+                        id: "u1".into(),
+                        kind: AgentActivityEntryKind::Prompt,
+                        timestamp: None,
+                        text: Some("Go".into()),
+                        tool: None,
+                    },
+                    AgentActivityEntry {
+                        id: "toolu_1".into(),
+                        kind: AgentActivityEntryKind::Tool,
+                        timestamp: None,
+                        text: None,
+                        tool: Some(AgentActivityTool {
+                            name: "AskUserQuestion".into(),
+                            kind: AgentActivityToolKind::Question,
+                            summary: "AskUserQuestion".into(),
+                            target: None,
+                            status: AgentActivityToolStatus::Running,
+                            output: None,
+                            question: Some(AgentActivityQuestion {
+                                questions: vec![AgentActivityQuestionItem {
+                                    question: "Which?".into(),
+                                    header: None,
+                                    multi_select: false,
+                                    options: vec![AgentActivityQuestionOption {
+                                        label: "a".into(),
+                                        description: None,
+                                    }],
+                                }],
+                            }),
+                        }),
+                    },
+                ],
+                cursor: Some("c:1.2.3".into()),
+                reset: false,
+                truncated: false,
+                transcript_path: None,
+            },
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        serde_json::json!({
+            "id": "req_1",
+            "result": {"type": "agent_activity", "activity": {
+                "terminal_id": "term_1",
+                "pane_id": "w1:p1",
+                "agent": "claude",
+                "status": "available",
+                "turn": {"started_at": "2026-09-30T14:02:11.120Z", "finished": false},
+                "entries": [
+                    {"id": "u1", "kind": "prompt", "text": "Go"},
+                    {"id": "toolu_1", "kind": "tool", "tool": {
+                        "name": "AskUserQuestion",
+                        "kind": "question",
+                        "summary": "AskUserQuestion",
+                        "status": "running",
+                        "question": {"questions": [
+                            {"question": "Which?", "multi_select": false, "options": [{"label": "a"}]},
+                        ]},
+                    }},
+                ],
+                "cursor": "c:1.2.3",
+                "reset": false,
+                "truncated": false,
+            }},
+        })
+    );
+}
+
+#[test]
+fn agent_activity_result_from_a_newer_server_still_decodes() {
+    let response: SuccessResponse = serde_json::from_value(serde_json::json!({
+        "id": "1",
+        "result": {"type": "agent_activity", "activity": {
+            "terminal_id": "term_1",
+            "pane_id": "w1:p1",
+            "status": "not_yet_invented",
+            "entries": [{
+                "id": "e1",
+                "kind": "not_yet_invented",
+                "tool": {
+                    "name": "x",
+                    "kind": "not_yet_invented",
+                    "summary": "s",
+                    "status": "not_yet_invented",
+                },
+            }],
+        }},
+    }))
+    .unwrap();
+
+    let ResponseResult::AgentActivity { activity } = response.result else {
+        panic!("not an activity result");
+    };
+    assert_eq!(activity.status, AgentActivityStatus::Unknown);
+    assert!(!activity.reset && !activity.truncated);
+    assert_eq!(activity.entries[0].kind, AgentActivityEntryKind::Unknown);
+    let tool = activity.entries[0].tool.as_ref().unwrap();
+    assert_eq!(tool.kind, AgentActivityToolKind::Unknown);
+    assert_eq!(tool.status, AgentActivityToolStatus::Unknown);
+}
+
+#[test]
 fn workspace_close_group_intent_defaults_false_and_round_trips() {
     let request: Request = serde_json::from_value(serde_json::json!({
         "id": "close",

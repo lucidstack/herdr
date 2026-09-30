@@ -1154,6 +1154,13 @@ impl App {
                     "agent.last_message is handled by the api server",
                 );
             }
+            Method::AgentActivity(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "agent.activity is handled by the api server",
+                );
+            }
             Method::AgentNotesTake(target) => {
                 return self.handle_agent_notes_take(request.id, target);
             }

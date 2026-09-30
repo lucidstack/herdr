@@ -375,6 +375,23 @@ fn agent_command() -> Command {
                 .arg(flag("ansi")),
         )
         .subcommand(
+            Command::new("activity")
+                .about("Read what an agent is doing in its current turn")
+                .override_usage("herdr agent activity <TARGET> [OPTIONS]")
+                .arg(required("target", "TARGET"))
+                .arg(
+                    option("since", "CURSOR")
+                        .help("Only entries added or changed since this cursor"),
+                )
+                .arg(
+                    option("limit", "N")
+                        .help("Return at most N entries, the newest (default 200, max 500)"),
+                )
+                .after_help(
+                    "Prints the current turn as JSON: the prompt, the agent's notes, its tool calls with their results, and the final message once the turn is over. Pass the cursor from a response to --since to receive only what changed. Reads the session transcript that the agent's integration reports; omp and Claude Code are supported.",
+                ),
+        )
+        .subcommand(
             Command::new("send-keys")
                 .about("Send key presses to an agent")
                 .arg(required("target", "TARGET"))
@@ -1307,6 +1324,22 @@ mod tests {
             ["idle", "working", "blocked", "done", "unknown"]
         );
         assert!(has_option(wait, "timeout"));
+    }
+
+    #[test]
+    fn spec_lists_agent_activity_with_its_options() {
+        let cmd = super::command();
+        let activity = command_path(&cmd, &["agent", "activity"]);
+        assert!(has_option(activity, "since"));
+        assert!(has_option(activity, "limit"));
+        assert!(super::command()
+            .try_get_matches_from([
+                "herdr", "agent", "activity", "w1:p1", "--since", "c:1", "--limit", "5",
+            ])
+            .is_ok());
+        assert!(super::command()
+            .try_get_matches_from(["herdr", "agent", "activity"])
+            .is_err());
     }
 
     #[test]

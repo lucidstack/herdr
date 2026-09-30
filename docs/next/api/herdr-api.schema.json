@@ -1871,6 +1871,33 @@
     },
     "request": {
       "$defs": {
+        "AgentActivityParams": {
+          "properties": {
+            "limit": {
+              "description": "The most entries returned, from 1 to 500 (default 200). When more are due, the\nnewest are kept and `truncated` is set.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "since": {
+              "description": "A cursor from an earlier response. Only entries added or changed since then are\nreturned.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentNotesAddParams": {
           "properties": {
             "target": {
@@ -6437,6 +6464,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.activity",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentActivityParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.notes.take",
               "type": "string"
             },
@@ -7573,6 +7616,362 @@
     },
     "success_response": {
       "$defs": {
+        "AgentActivityEntry": {
+          "properties": {
+            "id": {
+              "description": "Stable across calls for the same entry.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityEntryKind"
+            },
+            "text": {
+              "description": "The text of a `prompt`, `note` or `message`, as markdown and never truncated.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timestamp": {
+              "description": "As the transcript records it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentActivityTool"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present when `kind` is `tool`."
+            }
+          },
+          "required": [
+            "id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "AgentActivityEntryKind": {
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "prompt",
+              "description": "The user's prompt that started the turn.",
+              "type": "string"
+            },
+            {
+              "const": "note",
+              "description": "Assistant text written before or between tool calls.",
+              "type": "string"
+            },
+            {
+              "const": "tool",
+              "description": "A tool call and, once it arrives, its result.",
+              "type": "string"
+            },
+            {
+              "const": "message",
+              "description": "The final assistant message of a finished turn.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentActivityInfo": {
+          "description": "What an agent is doing in its current turn, read from its transcript: from the newest\nuser prompt onwards. Prompts that block the agent are not in transcripts; read them\nfrom the screen with `agent.read`.",
+          "properties": {
+            "agent": {
+              "description": "The agent, e.g. \"omp\" or \"claude\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cursor": {
+              "description": "Pass back as `since` to receive only what changed. Present when `status` is\n`available`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "entries": {
+              "default": [],
+              "description": "The current turn's entries in order, or only those added or changed after `since`.\nAn entry sent again replaces the earlier one with the same `id`.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentActivityEntry"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "reset": {
+              "default": false,
+              "description": "`since` no longer applies, for example because a new turn started: `entries` holds\nthe whole current turn and replaces what the client has.",
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityStatus"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "transcript_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "truncated": {
+              "default": false,
+              "description": "Older entries were left out because of `limit`.",
+              "type": "boolean"
+            },
+            "turn": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentActivityTurn"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present when `status` is `available`."
+            }
+          },
+          "required": [
+            "terminal_id",
+            "pane_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentActivityQuestion": {
+          "properties": {
+            "questions": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentActivityQuestionItem"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "questions"
+          ],
+          "type": "object"
+        },
+        "AgentActivityQuestionItem": {
+          "properties": {
+            "header": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "multi_select": {
+              "default": false,
+              "type": "boolean"
+            },
+            "options": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentActivityQuestionOption"
+              },
+              "type": "array"
+            },
+            "question": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        },
+        "AgentActivityQuestionOption": {
+          "properties": {
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
+        "AgentActivityStatus": {
+          "description": "Whether an agent's current turn could be read from its transcript.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "`turn`, `entries` and `cursor` describe the current turn.",
+              "type": "string"
+            },
+            {
+              "const": "no_activity",
+              "description": "The transcript has no user prompt yet.",
+              "type": "string"
+            },
+            {
+              "const": "no_transcript",
+              "description": "The agent's integration has not reported a transcript for its current session.",
+              "type": "string"
+            },
+            {
+              "const": "unsupported_format",
+              "description": "Herdr has no reader for this agent's transcript format.",
+              "type": "string"
+            },
+            {
+              "const": "unreadable",
+              "description": "The transcript file could not be read.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentActivityTool": {
+          "properties": {
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityToolKind"
+            },
+            "name": {
+              "description": "As the transcript records it, e.g. \"Bash\" or \"edit\".",
+              "type": "string"
+            },
+            "output": {
+              "description": "The end of the result: at most its last 5 lines and 600 characters, without\nterminal escape sequences.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentActivityQuestion"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Present when `kind` is `question`."
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityToolStatus"
+            },
+            "summary": {
+              "description": "One line of at most 120 characters, never empty.",
+              "type": "string"
+            },
+            "target": {
+              "description": "The file path, command or URL the call acts on, at most 200 characters.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "kind",
+            "summary",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentActivityToolKind": {
+          "oneOf": [
+            {
+              "enum": [
+                "shell",
+                "read",
+                "search",
+                "web",
+                "todo",
+                "other",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "edit",
+              "description": "Edits, writes and creates files.",
+              "type": "string"
+            },
+            {
+              "const": "agent",
+              "description": "Subagents and tasks.",
+              "type": "string"
+            },
+            {
+              "const": "question",
+              "description": "Asks the user; `question` holds the questions.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentActivityToolStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "succeeded",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "running",
+              "description": "No result yet.",
+              "type": "string"
+            },
+            {
+              "const": "failed",
+              "description": "The result is marked as an error.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentActivityTurn": {
+          "properties": {
+            "finished": {
+              "description": "The turn's final assistant message exists and no tool call is outstanding.",
+              "type": "boolean"
+            },
+            "started_at": {
+              "description": "When the turn's prompt was written, as the transcript records it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "finished"
+          ],
+          "type": "object"
+        },
         "AgentAttentionInfo": {
           "description": "An agent in a pane outside every work item's workspace.",
           "properties": {
@@ -10863,6 +11262,22 @@
               "required": [
                 "type",
                 "last_message"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "activity": {
+                  "$ref": "#/schemas/success_response/$defs/AgentActivityInfo"
+                },
+                "type": {
+                  "const": "agent_activity",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "activity"
               ],
               "type": "object"
             },

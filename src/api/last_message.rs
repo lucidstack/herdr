@@ -69,7 +69,7 @@ fn read_last_message(agent: AgentInfo) -> AgentLastMessageInfo {
     info
 }
 
-fn encode(response: &impl Serialize) -> String {
+pub(super) fn encode(response: &impl Serialize) -> String {
     serde_json::to_string(response).unwrap_or_else(|_| {
         r#"{"id":"","error":{"code":"internal_error","message":"failed to encode response"}}"#
             .to_string()

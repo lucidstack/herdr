@@ -106,7 +106,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.last_message`, `agent.notes.take`, `agent.notes.add`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.last_message`, `agent.activity`, `agent.notes.take`, `agent.notes.add`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -117,6 +117,20 @@ Raw socket method names use dot notation:
 
 ```json
 {"id":"1","method":"agent.last_message","params":{"target":"w1:p1"}}
+```
+
+`agent.activity` returns what an agent is doing in its current turn, so a client can follow along without reading the terminal. The turn runs from the newest real user prompt in the session transcript to its end, and Herdr reads only that tail of the file, on the connection's own thread. It reads the same transcript as `agent.last_message`, so it needs the agent's integration installed and currently supports omp and Claude Code. The result's `status` is `available`, or says why not: `no_activity` (the transcript has no prompt yet), `no_transcript`, `unsupported_format` or `unreadable`. `entries` is then empty.
+
+`entries` lists the turn in order. The `prompt` entry comes first and holds the user's words in `text`. Assistant text written before or between tool calls is a `note`. Each tool call is one `tool` entry whose `tool` object gives the tool `name` as the transcript records it, a `kind` (`shell`, `read`, `edit`, `search`, `web`, `agent`, `question`, `todo` or `other`), a one-line `summary`, the `target` it acts on (a path, command or URL) when there is one, and a `status`: `running` until the result arrives, then `succeeded` or `failed`. `output` holds the end of the result, at most its last 5 lines and 600 characters without terminal escape sequences, and is absent while the tool runs or when the result has no text. A tool of kind `question`, such as Claude Code's `AskUserQuestion`, carries its questions and options in `question`. When the turn is over, the final assistant text is the single `message` entry, as markdown and never truncated, and `turn.finished` is `true`. A turn the user interrupted is finished too. Thinking, subagent side chains and bookkeeping never appear. A prompt that blocks the agent is not in the transcript, so read it from the screen with `agent.read`.
+
+Every entry has an `id` that stays the same across calls. Pass the `cursor` of a response back as `since` to receive only the entries added or changed since then. A tool whose result arrived comes again, complete, under the same `id`, and clients replace entries by `id`. An entry can also change `kind`: an interrupted response's text becomes the `message`, and a `message` becomes a `note` if the agent carries on. When `since` no longer applies, because a new turn started or the cursor is not one Herdr issued, the response has `reset: true` and `entries` holds the whole current turn, which replaces what the client holds. `limit` (default 200) must be between 1 and 500, otherwise the request fails with `invalid_params`. When more entries are due, the newest `limit` are returned and `truncated` is `true`. Clients that show a turn can poll every couple of seconds with `since`.
+
+```json
+{"id":"1","method":"agent.activity","params":{"target":"w1:p1","since":"c:0.5d3b7c1a9e2f4d10.4d2a","limit":200}}
+```
+
+```json
+{"id":"1","result":{"type":"agent_activity","activity":{"terminal_id":"term_1","pane_id":"w1:p1","agent":"claude","status":"available","turn":{"started_at":"2026-09-30T14:02:11.120Z","finished":false},"entries":[{"id":"toolu_1","kind":"tool","tool":{"name":"Bash","kind":"shell","summary":"Run the tests","target":"cargo test","status":"running"}}],"cursor":"c:0.5d3b7c1a9e2f4d10.5e01","reset":false,"truncated":false,"transcript_path":"/home/me/.claude/projects/app/session.jsonl"}}}
 ```
 
 Herdr keeps an agent up to date with changes it makes outside the agent's session. When a work-item action succeeds, such as marking the linked pull request ready for review or moving the ticket to Done, every agent in the item's workspace gets a note about it. `agent.notes.add` queues a note of your own (`target` and `text`, at most 2000 characters) for scripts and plugins that change things an agent should know about. Each new note publishes `agent.notes_added` with the agent's `pane_id` and `workspace_id`. `agent.notes.take` returns the agent's queued notes, oldest first, and clears them. Herdr keeps the newest 20 notes per agent.

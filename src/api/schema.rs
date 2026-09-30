@@ -163,6 +163,8 @@ pub enum Method {
     AgentWait(AgentWaitParams),
     #[serde(rename = "agent.last_message")]
     AgentLastMessage(AgentTarget),
+    #[serde(rename = "agent.activity")]
+    AgentActivity(AgentActivityParams),
     #[serde(rename = "agent.notes.take")]
     AgentNotesTake(AgentTarget),
     #[serde(rename = "agent.notes.add")]

@@ -1,5 +1,5 @@
-//! Reads an agent's last complete message from the transcript file its hook integration
-//! reports.
+//! Reads an agent's transcript, the file its hook integration reports: the last complete
+//! message here, and what the agent is doing in its current turn in `activity`.
 //!
 //! Transcripts are append-only JSONL files that can grow to tens of megabytes, and the
 //! final message is almost always near the end. The readers walk the file backwards and
@@ -11,6 +11,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use serde::Deserialize;
+
+mod activity;
+
+pub use activity::{activity, DEFAULT_LIMIT, MAX_LIMIT};
 
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -59,6 +63,8 @@ struct ReverseLines<R> {
     reader: R,
     /// File offset of `buf[0]`.
     pos: u64,
+    /// The file's length when reading began. Nothing past it is read.
+    len: u64,
     buf: Vec<u8>,
     /// `buf[..end]` holds the bytes not yet yielded.
     end: usize,
@@ -71,6 +77,7 @@ impl<R: Read + Seek> ReverseLines<R> {
         Ok(Self {
             reader,
             pos,
+            len: pos,
             buf: Vec::new(),
             end: 0,
             chunk,
@@ -91,20 +98,19 @@ impl<R: Read + Seek> ReverseLines<R> {
         self.buf = data;
         Ok(())
     }
-}
 
-impl<R: Read + Seek> Iterator for ReverseLines<R> {
-    type Item = io::Result<Vec<u8>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Yields the next line, last to first, with the file offset it starts at.
+    fn next_with_offset(&mut self) -> Option<io::Result<(u64, Vec<u8>)>> {
         loop {
             if let Some(newline) = self.buf[..self.end].iter().rposition(|&b| b == b'\n') {
-                let line = self.buf[newline + 1..self.end].to_vec();
+                let start = newline + 1;
+                let line = self.buf[start..self.end].to_vec();
+                let offset = self.pos + start as u64;
                 self.end = newline;
                 if line.is_empty() {
                     continue;
                 }
-                return Some(Ok(line));
+                return Some(Ok((offset, line)));
             }
             if self.pos == 0 {
                 if self.end == 0 {
@@ -112,12 +118,21 @@ impl<R: Read + Seek> Iterator for ReverseLines<R> {
                 }
                 let line = self.buf[..self.end].to_vec();
                 self.end = 0;
-                return Some(Ok(line));
+                return Some(Ok((0, line)));
             }
             if let Err(error) = self.read_back() {
                 return Some(Err(error));
             }
         }
+    }
+}
+
+impl<R: Read + Seek> Iterator for ReverseLines<R> {
+    type Item = io::Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_offset()
+            .map(|line| line.map(|(_, line)| line))
     }
 }
 
@@ -394,6 +409,34 @@ mod tests {
             .map(|line| String::from_utf8(line.unwrap()).unwrap())
             .collect();
         assert_eq!(lines, ["last-without-newline", "third", &long, "first"]);
+    }
+
+    #[test]
+    fn reverse_lines_report_where_each_line_starts_and_how_long_the_file_is() {
+        let long = "x".repeat(50);
+        let text = format!("first\n\n{long}\nthird\nlast-without-newline");
+        for chunk in [1, 4, 16, READ_CHUNK] {
+            let mut lines = lines_of(&text, chunk);
+            assert_eq!(lines.len, text.len() as u64);
+            let starts: Vec<(u64, String)> = std::iter::from_fn(|| lines.next_with_offset())
+                .map(|line| {
+                    let (offset, line) = line.unwrap();
+                    (offset, String::from_utf8(line).unwrap())
+                })
+                .collect();
+            assert_eq!(starts.len(), 4, "chunk {chunk}");
+            for (offset, line) in starts {
+                let at = offset as usize;
+                assert!(
+                    at == 0 || text.as_bytes()[at - 1] == b'\n',
+                    "chunk {chunk}: {line:?} does not start a line at {offset}"
+                );
+                assert!(
+                    text[at..].starts_with(&line),
+                    "chunk {chunk}: {line:?} is not at {offset}"
+                );
+            }
+        }
     }
 
     #[test]

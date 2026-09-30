@@ -281,6 +281,184 @@ pub struct AgentLastMessageInfo {
     pub transcript_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityParams {
+    pub target: String,
+    /// A cursor from an earlier response. Only entries added or changed since then are
+    /// returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// The most entries returned, from 1 to 500 (default 200). When more are due, the
+    /// newest are kept and `truncated` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Whether an agent's current turn could be read from its transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActivityStatus {
+    /// `turn`, `entries` and `cursor` describe the current turn.
+    Available,
+    /// The transcript has no user prompt yet.
+    NoActivity,
+    /// The agent's integration has not reported a transcript for its current session.
+    NoTranscript,
+    /// Herdr has no reader for this agent's transcript format.
+    UnsupportedFormat,
+    /// The transcript file could not be read.
+    Unreadable,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityTurn {
+    /// When the turn's prompt was written, as the transcript records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// The turn's final assistant message exists and no tool call is outstanding.
+    pub finished: bool,
+}
+
+/// What an agent is doing in its current turn, read from its transcript: from the newest
+/// user prompt onwards. Prompts that block the agent are not in transcripts; read them
+/// from the screen with `agent.read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityInfo {
+    pub terminal_id: String,
+    pub pane_id: String,
+    /// The agent, e.g. "omp" or "claude".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: AgentActivityStatus,
+    /// Present when `status` is `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<AgentActivityTurn>,
+    /// The current turn's entries in order, or only those added or changed after `since`.
+    /// An entry sent again replaces the earlier one with the same `id`.
+    #[serde(default)]
+    pub entries: Vec<AgentActivityEntry>,
+    /// Pass back as `since` to receive only what changed. Present when `status` is
+    /// `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// `since` no longer applies, for example because a new turn started: `entries` holds
+    /// the whole current turn and replaces what the client has.
+    #[serde(default)]
+    pub reset: bool,
+    /// Older entries were left out because of `limit`.
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActivityEntryKind {
+    /// The user's prompt that started the turn.
+    Prompt,
+    /// Assistant text written before or between tool calls.
+    Note,
+    /// A tool call and, once it arrives, its result.
+    Tool,
+    /// The final assistant message of a finished turn.
+    Message,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityEntry {
+    /// Stable across calls for the same entry.
+    pub id: String,
+    pub kind: AgentActivityEntryKind,
+    /// As the transcript records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// The text of a `prompt`, `note` or `message`, as markdown and never truncated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Present when `kind` is `tool`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<AgentActivityTool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActivityToolKind {
+    Shell,
+    Read,
+    /// Edits, writes and creates files.
+    Edit,
+    Search,
+    Web,
+    /// Subagents and tasks.
+    Agent,
+    /// Asks the user; `question` holds the questions.
+    Question,
+    Todo,
+    Other,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentActivityToolStatus {
+    /// No result yet.
+    Running,
+    Succeeded,
+    /// The result is marked as an error.
+    Failed,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityTool {
+    /// As the transcript records it, e.g. "Bash" or "edit".
+    pub name: String,
+    pub kind: AgentActivityToolKind,
+    /// One line of at most 120 characters, never empty.
+    pub summary: String,
+    /// The file path, command or URL the call acts on, at most 200 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub status: AgentActivityToolStatus,
+    /// The end of the result: at most its last 5 lines and 600 characters, without
+    /// terminal escape sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Present when `kind` is `question`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<AgentActivityQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityQuestion {
+    pub questions: Vec<AgentActivityQuestionItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityQuestionItem {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+    #[serde(default)]
+    pub options: Vec<AgentActivityQuestionOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentActivityQuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Something Herdr did outside the agent's session that the agent should know about, e.g.
 /// marking its pull request ready for review from another client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

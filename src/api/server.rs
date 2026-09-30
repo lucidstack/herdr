@@ -378,6 +378,10 @@ fn handle_connection_with_stop(
                 super::last_message::agent_last_message(request_id.clone(), target, api_tx);
             finish_wait_response(&mut stream, Some(response), &request_id, method, changes_ui)
         }
+        Method::AgentActivity(params) => {
+            let response = super::activity::agent_activity(request_id.clone(), params, api_tx);
+            finish_wait_response(&mut stream, Some(response), &request_id, method, changes_ui)
+        }
         Method::PaneWaitForOutput(params) => {
             let response =
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?;
@@ -552,6 +556,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentPrompt(_) => "agent.prompt",
         Method::AgentWait(_) => "agent.wait",
         Method::AgentLastMessage(_) => "agent.last_message",
+        Method::AgentActivity(_) => "agent.activity",
         Method::AgentNotesTake(_) => "agent.notes.take",
         Method::AgentNotesAdd(_) => "agent.notes.add",
         Method::PaneSplit(_) => "pane.split",
