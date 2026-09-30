@@ -80,8 +80,23 @@ pub(crate) enum WorkItemsEvent {
 /// How often the pull requests of items' workspace branches are looked up again.
 const PULL_REQUEST_LOOKUP_INTERVAL: Duration = Duration::from_secs(60);
 
-/// A due pull request lookup: the sources to ask, and (item key, workspace id) pairs.
-pub(crate) type PullRequestLookup = (Vec<Arc<dyn WorkItemSource>>, Vec<(String, String)>);
+/// Where an item's pull request is looked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PullRequestTarget {
+    /// The branch checked out in the item's workspace.
+    Workspace(String),
+    /// A local branch its source knows the work is on, while the item has no workspace.
+    Branch {
+        repo_root: std::path::PathBuf,
+        branch: String,
+    },
+}
+
+/// A due pull request lookup: the sources to ask, and (item key, target) pairs.
+pub(crate) type PullRequestLookup = (
+    Vec<Arc<dyn WorkItemSource>>,
+    Vec<(String, PullRequestTarget)>,
+);
 
 /// A review worktree created for an item, remembered so its branch can be cleaned up
 /// when Herdr removes the worktree.
@@ -145,6 +160,8 @@ pub(crate) struct WorkItems {
     /// When the pull requests of items' workspace branches are looked up next.
     next_pull_request_lookup: Instant,
     pull_request_lookup_in_flight: bool,
+    /// A lookup was asked for while one ran; it starts as soon as that one finishes.
+    pull_request_lookup_requested: bool,
     /// What needs you now, and since when; worked out by the app from items and agents.
     attention: attention::Tracker,
 }
@@ -244,6 +261,7 @@ impl WorkItems {
             repositories: Vec::new(),
             next_pull_request_lookup: Instant::now(),
             pull_request_lookup_in_flight: false,
+            pull_request_lookup_requested: false,
             attention: attention::Tracker::default(),
         }
     }
@@ -344,13 +362,13 @@ impl WorkItems {
             .state
             .next_snooze_end()
             .map(|until| Instant::now() + Duration::from_secs(until.saturating_sub(unix_now())));
-        // Only while something could have a pull request: items with a workspace.
+        // Only while something could have a pull request.
         let pull_request_lookup = (!self.pull_request_lookup_in_flight
             && self
                 .state
                 .items()
                 .iter()
-                .any(|item| item.workspace_id.is_some() && !item.is_pick_next))
+                .any(|item| self.pull_request_target(item).is_some()))
         .then_some(self.next_pull_request_lookup);
         self.next_poll
             .iter()
@@ -448,6 +466,13 @@ impl WorkItems {
                 let (changed, review_arrived) =
                     self.state.apply_prepared(&key, &updated_at, prepared);
                 self.queue_resolutions();
+                // Its details may have named the branch the work is on: look it up now
+                // rather than at the next interval.
+                if self.state.get(&key).is_some_and(|item| {
+                    item.linked_pull_request.is_none() && self.pull_request_target(item).is_some()
+                }) {
+                    self.request_pull_request_lookup(now);
+                }
                 if changed {
                     self.changed();
                 }
@@ -473,7 +498,13 @@ impl WorkItems {
             WorkItemsEvent::TicketFetchedForAdd { .. } => (false, Vec::new()),
             WorkItemsEvent::PullRequestsFound { results } => {
                 self.pull_request_lookup_in_flight = false;
-                self.next_pull_request_lookup = now + PULL_REQUEST_LOOKUP_INTERVAL;
+                // Something changed while it ran, e.g. another ticket named its branch.
+                self.next_pull_request_lookup =
+                    if std::mem::take(&mut self.pull_request_lookup_requested) {
+                        now
+                    } else {
+                        now + PULL_REQUEST_LOOKUP_INTERVAL
+                    };
                 let mut changed = false;
                 for (key, result) in results {
                     let found = match result {
@@ -484,9 +515,14 @@ impl WorkItems {
                             continue;
                         }
                     };
+                    // A workspace closed while the lookup ran may leave nothing to link.
+                    let still_linkable = self
+                        .state
+                        .get(&key)
+                        .is_some_and(|item| self.pull_request_target(item).is_some());
                     if let Some(item) = self.state.get_mut(&key) {
-                        // A workspace closed while the lookup ran has nothing to link.
-                        if item.workspace_id.is_some() && item.linked_pull_request != found {
+                        let found = found.filter(|_| still_linkable);
+                        if item.linked_pull_request != found {
                             item.linked_pull_request = found;
                             changed = true;
                         }
@@ -500,8 +536,17 @@ impl WorkItems {
         }
     }
 
-    /// When a lookup is due: the sources to ask and the items to look up, as
-    /// (item key, workspace id). Marks the lookup in flight.
+    /// Looks pull requests up again as soon as possible: now, or right after the one running.
+    fn request_pull_request_lookup(&mut self, now: Instant) {
+        if self.pull_request_lookup_in_flight {
+            self.pull_request_lookup_requested = true;
+        } else {
+            self.next_pull_request_lookup = self.next_pull_request_lookup.min(now);
+        }
+    }
+
+    /// When a lookup is due: the sources to ask and the items to look up, with where.
+    /// Marks the lookup in flight.
     pub(crate) fn take_due_pull_request_lookup(
         &mut self,
         now: Instant,
@@ -509,16 +554,11 @@ impl WorkItems {
         if self.pull_request_lookup_in_flight || self.next_pull_request_lookup > now {
             return None;
         }
-        let candidates: Vec<(String, String)> = self
+        let candidates: Vec<(String, PullRequestTarget)> = self
             .state
             .items()
             .iter()
-            .filter(|item| !item.is_pick_next)
-            .filter(|item| {
-                self.source(&item.source_id)
-                    .is_some_and(|source| source.pull_request_of(item).is_none())
-            })
-            .filter_map(|item| Some((item.key.clone(), item.workspace_id.clone()?)))
+            .filter_map(|item| Some((item.key.clone(), self.pull_request_target(item)?)))
             .collect();
         self.next_pull_request_lookup = now + PULL_REQUEST_LOOKUP_INTERVAL;
         if candidates.is_empty() {
@@ -526,6 +566,27 @@ impl WorkItems {
         }
         self.pull_request_lookup_in_flight = true;
         Some((self.sources.clone(), candidates))
+    }
+
+    /// Where `item`'s pull request is looked for: its workspace's branch, or, without a
+    /// workspace, the branch its source knows the work is on. Pull requests with their own
+    /// item, hidden items and "Pick next" have none to look up.
+    fn pull_request_target(&self, item: &WorkItem) -> Option<PullRequestTarget> {
+        if item.is_pick_next {
+            return None;
+        }
+        let source = self.source(&item.source_id)?;
+        if source.pull_request_of(item).is_some() {
+            return None;
+        }
+        if let Some(workspace_id) = &item.workspace_id {
+            return Some(PullRequestTarget::Workspace(workspace_id.clone()));
+        }
+        if item.dismissed || item.resolved {
+            return None;
+        }
+        let (repo_root, branch) = source.work_branch(item)?;
+        Some(PullRequestTarget::Branch { repo_root, branch })
     }
 
     /// Queues workspace removal for items that just resolved, when their source wants that.
@@ -622,7 +683,7 @@ impl WorkItems {
                 });
                 self.next_poll.insert(source_id, now);
                 // A change may be visible on the linked pull request too, e.g. ready for review.
-                self.next_pull_request_lookup = now;
+                self.request_pull_request_lookup(now);
                 WorkItemNotice {
                     title: message,
                     body: Some(context),
@@ -651,7 +712,7 @@ impl WorkItems {
     pub(crate) fn link(&mut self, key: &str, workspace_id: &str) -> Result<(), NotFound> {
         if self.state.link(key, workspace_id)? {
             self.jobs.remove(key);
-            self.next_pull_request_lookup = Instant::now();
+            self.request_pull_request_lookup(Instant::now());
             self.changed();
         }
         Ok(())
@@ -885,6 +946,8 @@ impl WorkItems {
         self.jobs
             .retain(|_, job| job.workspace_id.as_deref() != Some(workspace_id));
         if self.state.workspace_closed(workspace_id) {
+            // Its link went with the workspace; the branch it is on may still find it.
+            self.request_pull_request_lookup(Instant::now());
             self.changed();
         }
     }
@@ -1059,7 +1122,7 @@ impl WorkItems {
         let key = job.key.clone();
         if let Some(item) = self.state.get_mut(&key) {
             item.workspace_id = Some(workspace_id.to_string());
-            self.next_pull_request_lookup = Instant::now();
+            self.request_pull_request_lookup(Instant::now());
             self.changed();
         }
     }
@@ -1395,5 +1458,43 @@ projects = [
                 body: Some("3 new from Fake".into()),
             }]
         );
+    }
+
+    #[test]
+    fn a_lookup_asked_for_while_one_runs_follows_it_instead_of_waiting_the_interval() {
+        let source = FakeSource::with_items(Vec::new());
+        *source.work_branch.lock().unwrap() = Some("ar/work".into());
+        let mut items = WorkItems::for_test(vec![source], Instant::now());
+        poll(&mut items, &["a"]);
+        let now = Instant::now();
+        assert!(items.take_due_pull_request_lookup(now).is_some());
+
+        // A second ticket's details name its branch while the first lookup runs.
+        poll(&mut items, &["a", "b"]);
+        items.apply_event(
+            WorkItemsEvent::Prepared {
+                key: "fake:b".into(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+                prepared: PreparedItem {
+                    waiting: false,
+                    detail: None,
+                    summary: None,
+                    error: None,
+                    done: false,
+                },
+            },
+            now,
+        );
+        items.apply_event(
+            WorkItemsEvent::PullRequestsFound {
+                results: vec![("fake:a".into(), Ok(None))],
+            },
+            now,
+        );
+
+        let (_, candidates) = items
+            .take_due_pull_request_lookup(now)
+            .expect("the asked-for lookup starts at once");
+        assert!(candidates.iter().any(|(key, _)| key == "fake:b"));
     }
 }

@@ -226,7 +226,8 @@ impl WorkItem {
         self.workspace_id = None;
         self.provisioning = None;
         self.phase = WorkItemPhase::Pending;
-        // Found through the workspace's branch; without it the link can no longer be kept current.
+        // Found through the workspace's branch. A lookup on the branch its source knows the
+        // work is on, if any, finds it again.
         self.linked_pull_request = None;
     }
 }

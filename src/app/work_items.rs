@@ -250,21 +250,49 @@ impl App {
         let Some((sources, candidates)) = self.work_items.take_due_pull_request_lookup(now) else {
             return;
         };
-        let checkouts: Vec<(String, std::path::PathBuf, std::path::PathBuf)> = candidates
+        enum Where {
+            Checkout {
+                checkout: std::path::PathBuf,
+                repo_root: std::path::PathBuf,
+            },
+            Branch {
+                repo_root: std::path::PathBuf,
+                branch: String,
+            },
+        }
+        let lookups: Vec<(String, Where)> = candidates
             .into_iter()
-            .filter_map(|(key, workspace_id)| {
-                let ws_idx = self.parse_workspace_id(&workspace_id)?;
-                let space = self.state.workspaces[ws_idx].worktree_space()?;
-                Some((key, space.checkout_path.clone(), space.repo_root.clone()))
+            .filter_map(|(key, target)| {
+                let place = match target {
+                    crate::work_items::PullRequestTarget::Workspace(workspace_id) => {
+                        let ws_idx = self.parse_workspace_id(&workspace_id)?;
+                        let space = self.state.workspaces[ws_idx].worktree_space()?;
+                        Where::Checkout {
+                            checkout: space.checkout_path.clone(),
+                            repo_root: space.repo_root.clone(),
+                        }
+                    }
+                    crate::work_items::PullRequestTarget::Branch { repo_root, branch } => {
+                        Where::Branch { repo_root, branch }
+                    }
+                };
+                Some((key, place))
             })
             .collect();
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let results = checkouts
+            let results = lookups
                 .into_iter()
-                .map(|(key, checkout, repo_root)| {
-                    let found =
-                        provision::find_branch_pull_request(&sources, &checkout, &repo_root);
+                .map(|(key, place)| {
+                    let found = match place {
+                        Where::Checkout {
+                            checkout,
+                            repo_root,
+                        } => provision::find_branch_pull_request(&sources, &checkout, &repo_root),
+                        Where::Branch { repo_root, branch } => {
+                            provision::find_pull_request_on_branch(&sources, &repo_root, &branch)
+                        }
+                    };
                     (key, found)
                 })
                 .collect();
@@ -2262,6 +2290,55 @@ mod tests {
                 .as_ref()
                 .is_some_and(|outcome| outcome.succeeded)
         });
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn merged_pull_request_is_found_on_the_work_branch_without_a_workspace() {
+        use crate::api::schema::{AttentionKind, WorkItemPullRequestInfo};
+        use crate::work_items::source::CLOSE_TICKET_CHOICE_ID;
+
+        let repo = ReviewRepo::new("merged-no-workspace");
+        let (mut app, source) = provisioning_app(&repo);
+        source
+            .closes_merged_tickets
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *source.work_branch.lock().unwrap() = Some("ar/tech-7-form".into());
+        *source.pull_request.lock().unwrap() = Some(WorkItemPullRequestInfo {
+            source_id: "fake".into(),
+            repo: "o/r".into(),
+            number: 5,
+            url: "https://example.test/o/r/pull/5".into(),
+            is_draft: false,
+            status: "merged".into(),
+        });
+        // Arrives once its branch is known, as a ticket whose details name one.
+        source.set_items(vec![source_item("2")]);
+        app.work_items.schedule_all_for_test(Instant::now());
+        let ticket = |app: &mut App| list(app).into_iter().find(|item| item.item_id == "fake:2");
+        run_until(&mut app, |app| {
+            ticket(app).is_some_and(|item| {
+                item.attention.as_ref().map(|attention| attention.kind)
+                    == Some(AttentionKind::ReadyToClose)
+            })
+        });
+
+        let ticket = ticket(&mut app).expect("ticket");
+        assert_eq!(ticket.workspace_id, None);
+        assert_eq!(
+            ticket.default_choice_id.as_deref(),
+            Some(CLOSE_TICKET_CHOICE_ID)
+        );
+        assert_eq!(
+            source
+                .looked_up_branches
+                .lock()
+                .unwrap()
+                .first()
+                .map(String::as_str),
+            Some("ar/tech-7-form")
+        );
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
     }
 

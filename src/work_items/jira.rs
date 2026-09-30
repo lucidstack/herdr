@@ -1357,6 +1357,15 @@ impl WorkItemSource for JiraSource {
         start_reminder_for(&item_detail(item)?)
     }
 
+    fn work_branch(&self, item: &WorkItem) -> Option<(std::path::PathBuf, String)> {
+        let branch = item_detail(item)?.existing_branch?;
+        let project = self.project(project_key(&item.external_id))?;
+        Some((
+            crate::worktree::expand_tilde_absolute_path(&project.path),
+            branch,
+        ))
+    }
+
     fn close_ticket(
         &self,
         item: &WorkItem,
@@ -1558,6 +1567,21 @@ mod tests {
             source().close_ticket(&item("TECH-7", Some(&done)), &merged),
             None
         );
+    }
+
+    #[test]
+    fn work_branch_is_the_issues_existing_branch_in_its_project_clone() {
+        let on_branch = JiraDetail {
+            existing_branch: Some("ar/TECH-7-form".into()),
+            ..detail()
+        };
+        assert_eq!(
+            source().work_branch(&item("TECH-7", Some(&on_branch))),
+            Some(("/src/app".into(), "ar/TECH-7-form".to_string()))
+        );
+        assert_eq!(source().work_branch(&item("TECH-7", Some(&detail()))), None);
+        // A project without a local clone has no branch to look up.
+        assert_eq!(source().work_branch(&item("OPS-3", Some(&on_branch))), None);
     }
 
     #[test]

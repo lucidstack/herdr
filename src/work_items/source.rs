@@ -211,6 +211,11 @@ pub(crate) trait WorkItemSource: Send + Sync {
     ) -> Option<CloseTicket> {
         None
     }
+    /// Pure: the local branch `item`'s work is on, as (clone, branch), so its pull request
+    /// can still be found once the item has no workspace. `None` when unknown.
+    fn work_branch(&self, _item: &WorkItem) -> Option<(std::path::PathBuf, String)> {
+        None
+    }
     /// Pure: text sent to the agent in the item's workspace for a choice whose action is
     /// `BriefAgent`.
     fn follow_up_brief(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {

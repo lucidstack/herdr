@@ -42,6 +42,10 @@ pub(crate) struct FakeSource {
     pub pull_request_prefix: Mutex<Option<String>>,
     /// Offers to close an item's ticket once its linked pull request is merged.
     pub closes_merged_tickets: std::sync::atomic::AtomicBool,
+    /// Branch the work is on while an item has no workspace; `None` means unknown.
+    pub work_branch: Mutex<Option<String>>,
+    /// Every branch `find_pull_request` was asked about, in call order.
+    pub looked_up_branches: Mutex<Vec<String>>,
 }
 
 impl FakeSource {
@@ -63,6 +67,8 @@ impl FakeSource {
             marked_ready: Mutex::new(Vec::new()),
             pull_request_prefix: Mutex::new(None),
             closes_merged_tickets: std::sync::atomic::AtomicBool::new(false),
+            work_branch: Mutex::new(None),
+            looked_up_branches: Mutex::new(Vec::new()),
         })
     }
 
@@ -268,9 +274,18 @@ impl WorkItemSource for FakeSource {
     fn find_pull_request(
         &self,
         _repo_root: &std::path::Path,
-        _branch: &str,
+        branch: &str,
     ) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
+        self.looked_up_branches
+            .lock()
+            .expect("fake source lock")
+            .push(branch.to_string());
         Ok(self.pull_request.lock().expect("fake source lock").clone())
+    }
+
+    fn work_branch(&self, _item: &WorkItem) -> Option<(std::path::PathBuf, String)> {
+        let branch = self.work_branch.lock().expect("fake source lock").clone()?;
+        Some(("/src/app".into(), branch))
     }
 
     fn mark_pull_request_ready(

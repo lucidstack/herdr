@@ -255,9 +255,19 @@ pub(crate) fn find_branch_pull_request(
     let Some(branch) = checked_out_branch(checkout)? else {
         return Ok(None);
     };
+    find_pull_request_on_branch(sources, repo_root, &branch)
+}
+
+/// Blocking: the pull request opened from `branch` of the clone at `repo_root`, asking
+/// each source in turn. `None` when no source hosts one.
+pub(crate) fn find_pull_request_on_branch(
+    sources: &[std::sync::Arc<dyn super::WorkItemSource>],
+    repo_root: &Path,
+    branch: &str,
+) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
     let mut error = None;
     for source in sources {
-        match source.find_pull_request(repo_root, &branch) {
+        match source.find_pull_request(repo_root, branch) {
             Ok(Some(found)) => return Ok(Some(found)),
             Ok(None) => {}
             Err(err) => error = Some(err),
