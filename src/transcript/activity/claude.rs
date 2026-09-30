@@ -15,6 +15,8 @@ struct Entry {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     #[serde(default)]
+    subtype: Option<String>,
+    #[serde(default)]
     uuid: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
@@ -26,6 +28,9 @@ struct Entry {
     compact_summary: Option<bool>,
     #[serde(default)]
     message: Option<Value>,
+    /// The text of a `system` line, which has no message.
+    #[serde(default)]
+    content: Option<Value>,
 }
 
 pub(super) fn parse(line: &[u8]) -> Line {
@@ -36,6 +41,9 @@ pub(super) fn parse(line: &[u8]) -> Line {
     // Subagents run in side chains; their work is not the main agent's turn.
     if entry.sidechain.unwrap_or(false) {
         return Line::Other;
+    }
+    if entry.kind.as_deref() == Some("system") {
+        return system(&entry);
     }
     let (Some(uuid), Some(message)) = (entry.uuid, entry.message) else {
         return Line::Other;
@@ -48,6 +56,28 @@ pub(super) fn parse(line: &[u8]) -> Line {
         }
         _ => Line::Other,
     }
+}
+
+/// Newer Claude Code versions write what a local slash command printed as a `system` line of
+/// its own, where older ones wrote a user message. Every other system line is bookkeeping.
+fn system(entry: &Entry) -> Line {
+    let printed = entry.subtype.as_deref() == Some("local_command")
+        && entry
+            .content
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(is_local_output);
+    if printed {
+        Line::LocalOutput
+    } else {
+        Line::Other
+    }
+}
+
+/// What a local slash command printed, in the tags Claude Code wraps it in.
+fn is_local_output(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<local-command-stdout>") || text.starts_with("<local-command-stderr>")
 }
 
 fn assistant(uuid: &str, timestamp: Option<String>, message: &Value) -> Line {
@@ -135,7 +165,7 @@ fn classify(id: String, timestamp: Option<String>, text: String) -> Line {
     if text.starts_with("[Request interrupted by user") {
         return Line::Interrupt;
     }
-    if text.starts_with("<local-command-stdout>") || text.starts_with("<local-command-stderr>") {
+    if is_local_output(&text) {
         return Line::LocalOutput;
     }
     // The user's own shell commands (`!ls`) and stray reminders never open a turn.
@@ -162,7 +192,10 @@ fn classify(id: String, timestamp: Option<String>, text: String) -> Line {
             .filter(|summary| !summary.is_empty());
         (summary.unwrap_or(text), false)
     } else {
-        (text, false)
+        // A slash command typed as plain text. A prompt that merely starts with a path looks
+        // the same; `read_turn` tells them apart by what follows.
+        let command = is_slash_command(&text);
+        (text, command)
     };
     Line::Prompt(Prompt {
         id,
@@ -170,6 +203,13 @@ fn classify(id: String, timestamp: Option<String>, text: String) -> Line {
         text,
         command,
     })
+}
+
+/// `/name` and whatever follows it.
+fn is_slash_command(text: &str) -> bool {
+    text.strip_prefix('/')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(char::is_alphanumeric)
 }
 
 /// A slash command as the user typed it: `/name args`.

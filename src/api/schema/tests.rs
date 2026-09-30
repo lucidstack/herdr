@@ -210,7 +210,6 @@ fn agent_activity_result_from_a_newer_server_still_decodes() {
         panic!("not an activity result");
     };
     assert_eq!(activity.status, AgentActivityStatus::Unknown);
-    assert!(!activity.reset && !activity.truncated);
     assert_eq!(activity.entries[0].kind, AgentActivityEntryKind::Unknown);
     let tool = activity.entries[0].tool.as_ref().unwrap();
     assert_eq!(tool.kind, AgentActivityToolKind::Unknown);

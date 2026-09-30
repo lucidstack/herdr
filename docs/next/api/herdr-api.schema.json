@@ -1874,7 +1874,7 @@
         "AgentActivityParams": {
           "properties": {
             "limit": {
-              "description": "The most entries returned, from 1 to 500 (default 200). When more are due, the\nnewest are kept and `truncated` is set.",
+              "description": "The most entries returned, from 1 to 500 (default 200). When the turn has more, the\nnewest are kept and `truncated` is set. With `since`, when more entries changed than\n`limit`, the answer is a `reset` holding the newest `limit` entries of the whole turn.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -7717,7 +7717,7 @@
             },
             "reset": {
               "default": false,
-              "description": "`since` no longer applies, for example because a new turn started: `entries` holds\nthe whole current turn and replaces what the client has.",
+              "description": "`since` no longer applies: a new turn started, the cursor is not one Herdr issued, or\nmore entries changed than `limit` allows. `entries` then holds the current turn, its\nnewest `limit` entries at most, and replaces what the client has.",
               "type": "boolean"
             },
             "status": {
@@ -7734,7 +7734,7 @@
             },
             "truncated": {
               "default": false,
-              "description": "Older entries were left out because of `limit`.",
+              "description": "Older entries of the turn were left out because of `limit`.",
               "type": "boolean"
             },
             "turn": {

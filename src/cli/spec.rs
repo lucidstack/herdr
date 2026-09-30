@@ -388,7 +388,7 @@ fn agent_command() -> Command {
                         .help("Return at most N entries, the newest (default 200, max 500)"),
                 )
                 .after_help(
-                    "Prints the current turn as JSON: the prompt, the agent's notes, its tool calls with their results, and the final message once the turn is over. Pass the cursor from a response to --since to receive only what changed. Reads the session transcript that the agent's integration reports; omp and Claude Code are supported.",
+                    "Prints the current turn as JSON: the prompt, the agent's notes, its tool calls with their results, and the final message once the turn is over. Pass the cursor from a response to --since to receive only what changed. A response with reset set replaces what you hold: the cursor no longer applied, or more entries changed than --limit allows, so it holds the turn's newest entries. Reads the session transcript that the agent's integration reports; omp and Claude Code are supported.",
                 ),
         )
         .subcommand(

@@ -288,8 +288,9 @@ pub struct AgentActivityParams {
     /// returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
-    /// The most entries returned, from 1 to 500 (default 200). When more are due, the
-    /// newest are kept and `truncated` is set.
+    /// The most entries returned, from 1 to 500 (default 200). When the turn has more, the
+    /// newest are kept and `truncated` is set. With `since`, when more entries changed than
+    /// `limit`, the answer is a `reset` holding the newest `limit` entries of the whole turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }
@@ -343,11 +344,12 @@ pub struct AgentActivityInfo {
     /// `available`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// `since` no longer applies, for example because a new turn started: `entries` holds
-    /// the whole current turn and replaces what the client has.
+    /// `since` no longer applies: a new turn started, the cursor is not one Herdr issued, or
+    /// more entries changed than `limit` allows. `entries` then holds the current turn, its
+    /// newest `limit` entries at most, and replaces what the client has.
     #[serde(default)]
     pub reset: bool,
-    /// Older entries were left out because of `limit`.
+    /// Older entries of the turn were left out because of `limit`.
     #[serde(default)]
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

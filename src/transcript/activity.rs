@@ -15,7 +15,9 @@
 //! It names the state a client has seen without the server remembering anything. Every
 //! entry records the offset of the newest line that created or changed it, so `since`
 //! returns the entries at or past the cursor's end offset. A cursor from another turn,
-//! another file or the future is answered with the whole turn and `reset`.
+//! another file or the future is answered with the whole turn and `reset`. So is one that
+//! more entries changed after than `limit` allows: sending only the newest of them would
+//! leave a gap, so the client gets the turn's newest entries to replace what it holds.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Seek};
@@ -55,9 +57,11 @@ pub struct Activity {
     /// The turn's entries in order, or only those added or changed since the cursor given.
     pub entries: Vec<AgentActivityEntry>,
     pub cursor: String,
-    /// The cursor given no longer applies: `entries` is the whole turn.
+    /// The cursor given no longer applies, or more entries changed since than the limit
+    /// allows: `entries` holds the turn, its newest ones up to the limit, and replaces what
+    /// the client holds.
     pub reset: bool,
-    /// Older entries were left out to respect the limit.
+    /// Older entries of the turn were left out to respect the limit.
     pub truncated: bool,
 }
 
@@ -92,8 +96,8 @@ struct Prompt {
     id: String,
     timestamp: Option<String>,
     text: String,
-    /// A slash command. Local ones (`/model`, `/clear`) never reach the model, so one opens
-    /// a turn only when the model answered it.
+    /// Typed as a slash command. A local one (`/model`, `/clear`) prints its result and never
+    /// reaches the model, so it opens a turn only when that output does not follow it.
     command: bool,
 }
 
@@ -202,8 +206,9 @@ fn read_turn<R: Read + Seek>(
     let mut first = true;
     // The lines after the one being examined, newest first.
     let mut collected = Vec::new();
-    let mut model_active = false;
-    let mut local_output = false;
+    // Whether the next line after the one being examined, bookkeeping aside, is what a local
+    // slash command printed.
+    let mut local_output_next = false;
     while let Some(line) = lines.next_with_offset() {
         let (offset, bytes) = line?;
         if std::mem::take(&mut first) && offset + bytes.len() as u64 == len {
@@ -212,8 +217,11 @@ fn read_turn<R: Read + Seek>(
             end = offset;
         }
         match parse(format, &bytes) {
-            // A local slash command prints its result and the model never answers it.
-            Line::Prompt(prompt) if prompt.command && local_output && !model_active => {}
+            // A local slash command prints its result and the model never answers it: what it
+            // printed follows it directly, and the turn is an earlier one.
+            Line::Prompt(prompt) if prompt.command && local_output_next => {
+                local_output_next = false;
+            }
             Line::Prompt(prompt) => {
                 let mut turn = Turn::new(offset, end, prompt);
                 for (offset, line) in collected.into_iter().rev() {
@@ -222,11 +230,14 @@ fn read_turn<R: Read + Seek>(
                 return Ok(Some(turn));
             }
             line @ (Line::Assistant(_) | Line::ToolResults(_)) => {
-                model_active = true;
+                local_output_next = false;
                 collected.push((offset, line));
             }
-            Line::Interrupt => collected.push((offset, Line::Interrupt)),
-            Line::LocalOutput => local_output = true,
+            Line::Interrupt => {
+                local_output_next = false;
+                collected.push((offset, Line::Interrupt));
+            }
+            Line::LocalOutput => local_output_next = true,
             Line::Other => {}
         }
     }
@@ -486,6 +497,19 @@ impl Turn {
                     resume = Some(cursor.end);
                 }
                 _ => reset = true,
+            }
+        }
+        // More changes than the limit allows would leave a gap between what the client holds
+        // and the newest entries it is sent. It gets the turn's newest entries to replace what
+        // it holds instead, as if the cursor no longer applied.
+        if let Some(end) = resume {
+            let changed = entries
+                .iter()
+                .filter(|(touched, _)| *touched >= end)
+                .count();
+            if changed > limit {
+                resume = None;
+                reset = true;
             }
         }
         let mut entries: Vec<AgentActivityEntry> = entries
