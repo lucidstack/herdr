@@ -2193,6 +2193,80 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn merged_pull_request_makes_closing_the_ticket_the_default_and_what_needs_you() {
+        use crate::api::schema::{AttentionKind, WorkItemPullRequestInfo};
+        use crate::work_items::source::{CLOSE_TICKET_CHOICE_ID, START_WORK_CHOICE_ID};
+
+        let repo = ReviewRepo::new("merged-pr");
+        let (mut app, source) = provisioning_app(&repo);
+        source
+            .closes_merged_tickets
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // The tracker also lags behind: without the merge this would be the default.
+        *source.start_reminder.lock().unwrap() = Some("Not assigned to you".into());
+        *source.pull_request.lock().unwrap() = Some(WorkItemPullRequestInfo {
+            source_id: "fake".into(),
+            repo: "o/r".into(),
+            number: 5,
+            url: "https://example.test/o/r/pull/5".into(),
+            is_draft: false,
+            status: "merged".into(),
+        });
+        source.set_items(vec![source_item("1")]);
+        app.work_items.schedule_all_for_test(Instant::now());
+        run_until(&mut app, |app| list(app).len() == 1);
+        choose_local(&mut app).expect("local choice accepted");
+        run_until(&mut app, |app| {
+            list(app)[0]
+                .attention
+                .as_ref()
+                .map(|attention| attention.kind)
+                == Some(AttentionKind::ReadyToClose)
+        });
+
+        let ticket = list(&mut app).remove(0);
+        let choice_ids: Vec<_> = ticket
+            .choices
+            .iter()
+            .map(|choice| choice.choice_id.as_str())
+            .collect();
+        assert_eq!(choice_ids[0], CLOSE_TICKET_CHOICE_ID);
+        assert_eq!(
+            ticket.default_choice_id.as_deref(),
+            Some(CLOSE_TICKET_CHOICE_ID)
+        );
+        assert!(
+            !choice_ids.contains(&START_WORK_CHOICE_ID),
+            "no work is left to start: {choice_ids:?}"
+        );
+        assert!(
+            choice_ids.contains(&"local"),
+            "more work stays possible: {choice_ids:?}"
+        );
+        assert_eq!(
+            ticket.attention.unwrap().reason,
+            "#5 merged; fake:1 is still open"
+        );
+
+        api(
+            &mut app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: CLOSE_TICKET_CHOICE_ID.into(),
+            }),
+        )
+        .expect("closing accepted");
+        run_until(&mut app, |app| {
+            list(app)[0]
+                .action_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.succeeded)
+        });
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn choosing_again_after_closing_reopens_the_existing_worktree() {
         use crate::api::schema::{TabListParams, WorkItemStepStatus, WorkspaceCloseParams};
 

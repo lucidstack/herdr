@@ -40,6 +40,8 @@ pub(crate) struct FakeSource {
     pub marked_ready: Mutex<Vec<(String, u64)>>,
     /// Items whose external id starts with this prefix are pull request `o/r#<id>`.
     pub pull_request_prefix: Mutex<Option<String>>,
+    /// Offers to close an item's ticket once its linked pull request is merged.
+    pub closes_merged_tickets: std::sync::atomic::AtomicBool,
 }
 
 impl FakeSource {
@@ -60,6 +62,7 @@ impl FakeSource {
             pull_request: Mutex::new(None),
             marked_ready: Mutex::new(Vec::new()),
             pull_request_prefix: Mutex::new(None),
+            closes_merged_tickets: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -118,6 +121,29 @@ impl WorkItemSource for FakeSource {
                 confirm: None,
             },
         })
+    }
+
+    fn close_ticket(
+        &self,
+        item: &WorkItem,
+        pull_request: &crate::api::schema::WorkItemPullRequestInfo,
+    ) -> Option<super::source::CloseTicket> {
+        self.closes_merged_tickets
+            .load(Ordering::SeqCst)
+            .then(|| super::source::CloseTicket {
+                reason: format!(
+                    "#{} merged; {} is still open",
+                    pull_request.number, item.key
+                ),
+                choice: WorkItemChoiceInfo {
+                    choice_id: super::source::CLOSE_TICKET_CHOICE_ID.into(),
+                    label: "Move to Done".into(),
+                    description: None,
+                    action: WorkItemChoiceAction::Perform,
+                    disabled_reason: None,
+                    confirm: None,
+                },
+            })
     }
 
     fn prepare(&self, _item: &SourceItem) -> PreparedItem {

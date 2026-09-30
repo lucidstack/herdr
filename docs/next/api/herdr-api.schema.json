@@ -156,6 +156,11 @@
               "type": "string"
             },
             {
+              "const": "ready_to_close",
+              "description": "Your pull request is merged, but its ticket is still open in the tracker.",
+              "type": "string"
+            },
+            {
               "const": "new",
               "description": "Newly arrived and not acted on yet: a review request, an assignment, a mention.",
               "type": "string"
@@ -7926,6 +7931,11 @@
             {
               "const": "ready_to_merge",
               "description": "Your pull request is approved and waits for you to merge it.",
+              "type": "string"
+            },
+            {
+              "const": "ready_to_close",
+              "description": "Your pull request is merged, but its ticket is still open in the tracker.",
               "type": "string"
             },
             {

@@ -777,9 +777,12 @@ impl WorkItems {
             );
         };
         let mut choices = source.choices(item);
-        let reminder = (item.workspace_id.is_some() && !item.start_reminder_muted)
-            .then(|| source.start_reminder(item))
-            .flatten();
+        let close = self.close_ticket(item);
+        // Once the work has landed there is no work left to start.
+        let reminder =
+            (close.is_none() && item.workspace_id.is_some() && !item.start_reminder_muted)
+                .then(|| source.start_reminder(item))
+                .flatten();
         if let Some(reminder) = &reminder {
             if reminder.choice.disabled_reason.is_none() {
                 choices.default_choice_id = Some(reminder.choice.choice_id.clone());
@@ -843,7 +846,28 @@ impl WorkItems {
                 },
             );
         }
+        if let Some(close) = close {
+            // Closing the ticket is what is left to do, ahead of starting more work.
+            if close.choice.disabled_reason.is_none() {
+                choices.default_choice_id = Some(close.choice.choice_id.clone());
+            }
+            choices.choices.insert(0, close.choice);
+        }
         (choices, reminder)
+    }
+
+    /// How to close `item`'s ticket, while its linked pull request is merged and the
+    /// tracker still has the ticket open.
+    fn close_ticket(&self, item: &WorkItem) -> Option<source::CloseTicket> {
+        let pull_request = item
+            .linked_pull_request
+            .as_ref()
+            .filter(|pull_request| pull_request.status == "merged")?;
+        if item.resolved {
+            return None;
+        }
+        self.source(&item.source_id)?
+            .close_ticket(item, pull_request)
     }
 
     /// "Don't remind me for this ticket".
@@ -1175,6 +1199,12 @@ impl WorkItems {
             || item.phase == WorkItemPhase::AwaitingExternal
         {
             return None;
+        }
+        if let Some(close) = self.close_ticket(item) {
+            return Some(attention::Need::new(
+                AttentionKind::ReadyToClose,
+                close.reason,
+            ));
         }
         let need = self.source(&item.source_id)?.tracker_need(item)?;
         (need.kind != AttentionKind::New || item.phase == WorkItemPhase::Pending).then_some(need)

@@ -19,8 +19,9 @@ use super::github::{one_line, slug, truncate_chars};
 use super::process::{failure_detail, run_with_input, run_with_timeout};
 use super::provision::find_existing_work;
 use super::source::{
-    ItemChoices, PreparedItem, ProvisionPlan, SourceItem, StartReminder, TicketDetail,
-    WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec, START_WORK_CHOICE_ID,
+    CloseTicket, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, StartReminder, TicketDetail,
+    WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec, CLOSE_TICKET_CHOICE_ID,
+    START_WORK_CHOICE_ID,
 };
 use super::state::WorkItem;
 
@@ -290,8 +291,8 @@ fn project_key(issue_key: &str) -> &str {
 }
 
 const WRITE_SCOPE_HINT: &str = "Jira refused the change: the API token needs write:jira-work to \
-     assign and start issues. After replacing it, run `herdr server live-handoff` from a shell \
-     that has the new token so the server picks it up";
+     assign, start and close issues. After replacing it, run `herdr server live-handoff` from a \
+     shell that has the new token so the server picks it up";
 
 /// What starting work on an issue changes in Jira.
 #[derive(Debug, PartialEq, Eq)]
@@ -333,6 +334,27 @@ fn start_plan(detail: &JiraDetail) -> Result<StartPlan, String> {
         assign: detail.assigned_to_me == Some(false),
         transition,
     })
+}
+
+/// The transition that closes an issue: its only one into a done status, or among several
+/// (e.g. "Done" and "Won't Do") the one named Done.
+fn done_transition(transitions: &[JiraTransition]) -> Result<JiraTransition, String> {
+    match transitions {
+        [transition] => Ok(transition.clone()),
+        [] => Err("No transition leads to a done status; move it in Jira".into()),
+        several => {
+            let mut named = several
+                .iter()
+                .filter(|transition| transition.to.trim().eq_ignore_ascii_case("done"));
+            match (named.next(), named.next()) {
+                (Some(transition), None) => Ok(transition.clone()),
+                _ => Err(format!(
+                    "{} transitions lead to a done status; move it in Jira",
+                    several.len()
+                )),
+            }
+        }
+    }
 }
 
 fn item_detail(item: &WorkItem) -> Option<JiraDetail> {
@@ -411,8 +433,9 @@ impl JiraSource {
         Ok(me)
     }
 
-    /// Transitions of `key` into an in-progress status.
-    fn in_progress_transitions(&self, key: &str) -> Result<Vec<JiraTransition>, String> {
+    /// Transitions of `key` into a status of `category`: `indeterminate` (in progress) or
+    /// `done`.
+    fn transitions_into(&self, key: &str, category: &str) -> Result<Vec<JiraTransition>, String> {
         let response: TransitionsResponse =
             serde_json::from_slice(&self.api("GET", &format!("issue/{key}/transitions"), None)?)
                 .map_err(|err| format!("unexpected Jira response: {err}"))?;
@@ -423,13 +446,25 @@ impl JiraSource {
                 let to = transition.to?;
                 to.status_category
                     .as_ref()
-                    .is_some_and(|category| category.key == "indeterminate")
+                    .is_some_and(|status_category| status_category.key == category)
                     .then_some(JiraTransition {
                         id: transition.id,
                         to: to.name,
                     })
             })
             .collect())
+    }
+
+    /// Moves the issue to its done status, once the work for it is merged.
+    fn close_issue(&self, item: &WorkItem) -> Result<String, String> {
+        let key = &item.external_id;
+        let transition = done_transition(&self.transitions_into(key, "done")?)?;
+        self.write(
+            "POST",
+            &format!("issue/{key}/transitions"),
+            &serde_json::json!({ "transition": { "id": transition.id } }).to_string(),
+        )?;
+        Ok(format!("{key} moved to {}", transition.to))
     }
 
     /// A change to an issue.
@@ -990,7 +1025,7 @@ impl WorkItemSource for JiraSource {
         };
         // Only an issue still to do needs a transition to start it.
         let in_progress_transitions = if status_category == "new" {
-            self.in_progress_transitions(&item.external_id)
+            self.transitions_into(&item.external_id, "indeterminate")
                 .unwrap_or_else(|err| {
                     error.get_or_insert(format!("transitions unavailable: {err}"));
                     Vec::new()
@@ -1322,9 +1357,46 @@ impl WorkItemSource for JiraSource {
         start_reminder_for(&item_detail(item)?)
     }
 
+    fn close_ticket(
+        &self,
+        item: &WorkItem,
+        pull_request: &crate::api::schema::WorkItemPullRequestInfo,
+    ) -> Option<CloseTicket> {
+        let detail = item_detail(item);
+        if detail
+            .as_ref()
+            .is_some_and(|detail| detail.status_category == "done")
+        {
+            return None;
+        }
+        let key = &item.external_id;
+        let status = detail
+            .map(|detail| detail.status)
+            .filter(|status| !status.is_empty())
+            .unwrap_or_else(|| "open".into());
+        Some(CloseTicket {
+            reason: format!(
+                "{}#{} merged; {key} is still {status}",
+                pull_request.repo, pull_request.number
+            ),
+            choice: WorkItemChoiceInfo {
+                choice_id: CLOSE_TICKET_CHOICE_ID.into(),
+                label: format!("Move {key} to Done"),
+                description: Some(format!(
+                    "{}#{} is merged; updates the issue in Jira",
+                    pull_request.repo, pull_request.number
+                )),
+                action: WorkItemChoiceAction::Perform,
+                disabled_reason: None,
+                confirm: None,
+            },
+        })
+    }
+
     fn perform(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
         match choice_id {
             START_WORK_CHOICE_ID => self.start_work(item),
+            CLOSE_TICKET_CHOICE_ID => self.close_issue(item),
             _ => Err(format!("choice {choice_id} cannot be carried out here")),
         }
     }
@@ -1458,6 +1530,58 @@ mod tests {
                 .collect(),
             ..detail()
         }
+    }
+
+    #[test]
+    fn merged_work_offers_to_close_an_open_issue_but_not_a_done_one() {
+        let merged = crate::api::schema::WorkItemPullRequestInfo {
+            source_id: "github".into(),
+            repo: "o/r".into(),
+            number: 12,
+            url: "https://example.test/o/r/pull/12".into(),
+            is_draft: false,
+            status: "merged".into(),
+        };
+        let close = source()
+            .close_ticket(&item("TECH-7", Some(&detail())), &merged)
+            .expect("an open issue can be closed");
+        assert_eq!(close.reason, "o/r#12 merged; TECH-7 is still In Progress");
+        assert_eq!(close.choice.label, "Move TECH-7 to Done");
+        assert_eq!(close.choice.choice_id, CLOSE_TICKET_CHOICE_ID);
+
+        let done = JiraDetail {
+            status: "Done".into(),
+            status_category: "done".into(),
+            ..detail()
+        };
+        assert_eq!(
+            source().close_ticket(&item("TECH-7", Some(&done)), &merged),
+            None
+        );
+    }
+
+    #[test]
+    fn closing_picks_the_one_done_transition_or_the_one_named_done() {
+        let transitions = |names: &[&str]| -> Vec<JiraTransition> {
+            names
+                .iter()
+                .enumerate()
+                .map(|(index, to)| JiraTransition {
+                    id: (index + 31).to_string(),
+                    to: (*to).into(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            done_transition(&transitions(&["Released"])).map(|transition| transition.to),
+            Ok("Released".to_string())
+        );
+        assert_eq!(
+            done_transition(&transitions(&["Won't Do", "Done"])).map(|transition| transition.id),
+            Ok("32".to_string())
+        );
+        assert!(done_transition(&transitions(&["Won't Do", "Duplicate"])).is_err());
+        assert!(done_transition(&[]).is_err());
     }
 
     #[test]

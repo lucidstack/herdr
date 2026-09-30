@@ -129,6 +129,18 @@ pub(crate) const MUTE_START_REMINDER_CHOICE_ID: &str = "mute_start_reminder";
 pub(crate) const PULL_REQUEST_READY_CHOICE_ID: &str = "pull_request_ready";
 /// Opens an item's linked pull request in the browser.
 pub(crate) const PULL_REQUEST_OPEN_CHOICE_ID: &str = "pull_request_open";
+/// Moves an item's ticket to a done status once its linked pull request is merged. Its
+/// action is `Perform`, carried out by the item's source.
+pub(crate) const CLOSE_TICKET_CHOICE_ID: &str = "close_ticket";
+
+/// The work landed, but the tracker still has the ticket open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CloseTicket {
+    /// One line for the user, e.g. "owner/repo#12 merged; TECH-7 is still In Progress".
+    pub reason: String,
+    /// The fix, whose id is `CLOSE_TICKET_CHOICE_ID`.
+    pub choice: crate::api::schema::WorkItemChoiceInfo,
+}
 
 /// The tracker has not caught up with work you started: the ticket is not assigned to
 /// you, or still in a to-do status.
@@ -188,6 +200,15 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// Pure: whether the tracker lags behind work started on `item`. Only asked for items
     /// with a workspace whose reminder is not muted.
     fn start_reminder(&self, _item: &WorkItem) -> Option<StartReminder> {
+        None
+    }
+    /// Pure: how to close `item`'s ticket now that `pull_request`, found for its workspace,
+    /// is merged. `None` when the ticket is already done or the source cannot close it.
+    fn close_ticket(
+        &self,
+        _item: &WorkItem,
+        _pull_request: &crate::api::schema::WorkItemPullRequestInfo,
+    ) -> Option<CloseTicket> {
         None
     }
     /// Pure: text sent to the agent in the item's workspace for a choice whose action is

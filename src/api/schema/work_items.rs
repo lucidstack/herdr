@@ -245,6 +245,8 @@ pub enum AttentionKind {
     ChecksFailing,
     /// Your pull request is approved and waits for you to merge it.
     ReadyToMerge,
+    /// Your pull request is merged, but its ticket is still open in the tracker.
+    ReadyToClose,
     /// Newly arrived and not acted on yet: a review request, an assignment, a mention.
     New,
     #[serde(other)]
