@@ -175,7 +175,7 @@ pub(crate) fn render_context_menu(
     let screen = buffer.area;
     let max_item_width = items
         .iter()
-        .map(|item| display_width(item.label))
+        .map(|item| display_width(&item.label))
         .max()
         .unwrap_or(0);
     let width = max_item_width
@@ -202,17 +202,44 @@ pub(crate) fn render_context_menu(
             break;
         }
         let row = Rect::new(inner.x, row_y, inner.width, 1);
-        let highlighted = index == menu.highlighted;
-        let style = if highlighted {
-            Style::default()
-                .fg(panel_contrast_fg(palette))
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.text).bg(palette.panel_bg)
-        };
-        buffer.set_style(row, style);
-        put_text(buffer, row.x, row.y, row.width, item.label, style);
+        let plain = Style::default().fg(palette.text).bg(palette.panel_bg);
+        match item.action {
+            // A divider between groups, and the header naming a group.
+            None if item.label.is_empty() => {
+                buffer.set_style(row, plain);
+                let rule = "─".repeat(usize::from(row.width));
+                put_text(
+                    buffer,
+                    row.x,
+                    row.y,
+                    row.width,
+                    &rule,
+                    Style::default()
+                        .fg(palette.surface_dim)
+                        .bg(palette.panel_bg),
+                );
+            }
+            None => {
+                let style = Style::default()
+                    .fg(palette.subtext0)
+                    .bg(palette.panel_bg)
+                    .add_modifier(Modifier::BOLD);
+                buffer.set_style(row, style);
+                put_text(buffer, row.x, row.y, row.width, &item.label, style);
+            }
+            Some(_) => {
+                let style = if index == menu.highlighted {
+                    Style::default()
+                        .fg(panel_contrast_fg(palette))
+                        .bg(palette.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    plain
+                };
+                buffer.set_style(row, style);
+                put_text(buffer, row.x, row.y, row.width, &item.label, style);
+            }
+        }
         rows.push((row, index));
     }
     Some(OverlayRender {

@@ -1396,8 +1396,15 @@ impl ClientShellState {
                     if let (Some((_, index)), Some(ClientShellOverlay::ContextMenu(menu))) =
                         (row_hit, self.overlay.as_mut())
                     {
-                        menu.highlighted = index;
-                        outcome.repaint = true;
+                        // Headers and dividers cannot be chosen, so they keep the highlight.
+                        if menu
+                            .items()
+                            .get(index)
+                            .is_some_and(|item| item.action.is_some())
+                        {
+                            menu.highlighted = index;
+                            outcome.repaint = true;
+                        }
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {

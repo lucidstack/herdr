@@ -544,16 +544,23 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
-    WorkItemChoose,
+    /// The item's choice `index` in menu group `group`, carried out through its dialog.
+    WorkItemRunChoice {
+        group: u8,
+        index: u8,
+    },
+    /// The dialog of menu group `group`'s item, with every choice.
+    WorkItemMoreChoices {
+        group: u8,
+    },
     WorkItemProgress,
-    WorkItemFocus,
-    WorkItemOpenUrl,
+    /// Link `index` of the item's menu.
+    WorkItemOpenLink(u8),
     WorkItemSnoozeHour,
     WorkItemSnoozeDay,
     WorkItemDismiss,
     WorkItemUnhide,
     WorkItemLink,
-    WorkItemPullRequest,
 }
 
 #[derive(Debug)]
@@ -583,13 +590,32 @@ pub(super) enum ClientContextMenuTarget {
         is_linked_worktree: bool,
         has_progress: bool,
         hidden: bool,
-        /// The tracker lags behind work started on the item; its dialog offers the fix.
-        start_reminder: bool,
         /// The focused workspace, when it could become the item's workspace.
         link_target: Option<String>,
-        /// A pull request item is folded into this one; its own choices are one step away.
-        has_pull_request_item: bool,
+        /// The item's likely next steps, then its folded pull request's.
+        groups: Vec<WorkItemMenuGroup>,
+        /// Where the item and its pull request open in the browser.
+        links: Vec<WorkItemMenuLink>,
     },
+}
+
+/// Choices of one item offered straight from its menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WorkItemMenuGroup {
+    pub(super) item_id: String,
+    /// Shown above the choices when the menu holds more than the right-clicked item.
+    pub(super) header: Option<String>,
+    /// (choice id, label), the default first.
+    pub(super) choices: Vec<(String, String)>,
+    /// Opens the item's dialog for the choices not listed.
+    pub(super) more_label: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WorkItemMenuLink {
+    /// E.g. "Open TECH-7 in Jira".
+    pub(super) label: String,
+    pub(super) url: String,
 }
 
 #[derive(Debug)]
@@ -600,9 +626,11 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) highlighted: usize,
 }
 
+/// A menu row. Rows without an action are a group's header, or a divider when their
+/// label is empty; neither can be chosen.
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
-    pub(super) action: ClientContextMenuAction,
+    pub(super) label: std::borrow::Cow<'static, str>,
+    pub(super) action: Option<ClientContextMenuAction>,
 }
 
 #[derive(Debug)]

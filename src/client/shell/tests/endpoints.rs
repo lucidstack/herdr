@@ -702,7 +702,7 @@ fn saved_machine_preserves_endpoint_scoped_worktree_collapses() {
         Some(ClientShellOverlay::ContextMenu(menu)) => menu
             .items()
             .iter()
-            .position(|item| item.action == ClientContextMenuAction::ToggleGroup)
+            .position(|item| item.action == Some(ClientContextMenuAction::ToggleGroup))
             .expect("collapse menu item"),
         _ => panic!("workspace context menu"),
     };

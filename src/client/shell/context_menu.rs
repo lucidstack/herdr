@@ -1,129 +1,198 @@
+use std::borrow::Cow;
+
 use super::*;
 
+/// Rows of a menu built group by group. Groups go in order of intent: acting on the
+/// target, opening it elsewhere, organising it, setting it aside, then removing it.
+#[derive(Default)]
+struct MenuRows {
+    rows: Vec<ClientContextMenuItem>,
+    divider_pending: bool,
+}
+
+impl MenuRows {
+    /// Separates what comes next from the rows before it, once anything follows.
+    fn divide(&mut self) {
+        self.divider_pending = !self.rows.is_empty();
+    }
+
+    fn push(&mut self, label: Cow<'static, str>, action: Option<ClientContextMenuAction>) {
+        if std::mem::take(&mut self.divider_pending) {
+            self.rows.push(ClientContextMenuItem {
+                label: Cow::Borrowed(""),
+                action: None,
+            });
+        }
+        self.rows.push(ClientContextMenuItem { label, action });
+    }
+
+    fn action(&mut self, label: impl Into<Cow<'static, str>>, action: ClientContextMenuAction) {
+        self.push(label.into(), Some(action));
+    }
+
+    fn header(&mut self, label: String) {
+        self.push(Cow::Owned(label), None);
+    }
+}
+
 impl ClientContextMenuOverlay {
+    /// A menu at (`x`, `y`) with its first choosable row highlighted.
+    pub(super) fn new(target: ClientContextMenuTarget, x: u16, y: u16) -> Self {
+        let mut menu = Self {
+            target,
+            x,
+            y,
+            highlighted: 0,
+        };
+        menu.highlighted = menu
+            .items()
+            .iter()
+            .position(|item| item.action.is_some())
+            .unwrap_or(0);
+        menu
+    }
+
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let mut menu = MenuRows::default();
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
-                vec![item("Rename", Action::Rename), item("Close", Action::Close)]
+                menu.action("Rename", Action::Rename);
+                menu.divide();
+                menu.action("Close", Action::Close);
             }
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-            ],
+            } => {
+                menu.action("New worktree", Action::NewWorktree);
+                menu.action("Open worktree...", Action::OpenWorktree);
+                menu.divide();
+                menu.action("Rename", Action::Rename);
+                menu.divide();
+                menu.action("Close", Action::Close);
+            }
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: true,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-                item("Delete worktree checkout...", Action::RemoveWorktree),
-            ],
+            } => {
+                menu.action("Rename", Action::Rename);
+                menu.divide();
+                menu.action("Close", Action::Close);
+                menu.action("Delete worktree checkout...", Action::RemoveWorktree);
+            }
             ClientContextMenuTarget::Workspace {
                 has_worktree_children: true,
                 collapsed,
                 ..
-            } => vec![
-                item("Rename", Action::Rename),
-                item("Close group", Action::Close),
-                item("New worktree", Action::NewWorktree),
-                item("Open worktree...", Action::OpenWorktree),
-                item(
+            } => {
+                menu.action("New worktree", Action::NewWorktree);
+                menu.action("Open worktree...", Action::OpenWorktree);
+                menu.divide();
+                menu.action("Rename", Action::Rename);
+                menu.action(
                     if *collapsed { "Expand" } else { "Collapse" },
                     Action::ToggleGroup,
-                ),
-            ],
-            ClientContextMenuTarget::Tab { .. } => vec![
-                item("New tab", Action::NewTab),
-                item("Rename", Action::Rename),
-                item("Close", Action::Close),
-            ],
+                );
+                menu.divide();
+                menu.action("Close group", Action::Close);
+            }
+            ClientContextMenuTarget::Tab { .. } => {
+                menu.action("New tab", Action::NewTab);
+                menu.action("Rename", Action::Rename);
+                menu.divide();
+                menu.action("Close", Action::Close);
+            }
             ClientContextMenuTarget::Pane {
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
                 ..
             } => {
-                let mut items = vec![item("Rename pane", Action::RenamePane)];
+                menu.action("Rename pane", Action::RenamePane);
                 if *has_manual_label {
-                    items.push(item("Clear pane name", Action::ClearPaneName));
+                    menu.action("Clear pane name", Action::ClearPaneName);
                 }
                 if source_pane_id.is_some() {
-                    items.push(item("Swap with focused pane", Action::SwapWithFocusedPane));
+                    menu.action("Swap with focused pane", Action::SwapWithFocusedPane);
                 }
-                items.extend([
-                    item("Split right", Action::SplitRight),
-                    item("Split down", Action::SplitDown),
-                    item("Zoom", Action::Zoom),
-                    item(
-                        if *right_click_passthrough {
-                            "Use Herdr right-click menu"
-                        } else {
-                            "Send right-clicks to pane"
-                        },
-                        Action::ToggleRightClickPassthrough,
-                    ),
-                    item("Close pane", Action::ClosePane),
-                ]);
-                items
+                menu.action("Split right", Action::SplitRight);
+                menu.action("Split down", Action::SplitDown);
+                menu.action("Zoom", Action::Zoom);
+                menu.action(
+                    if *right_click_passthrough {
+                        "Use Herdr right-click menu"
+                    } else {
+                        "Send right-clicks to pane"
+                    },
+                    Action::ToggleRightClickPassthrough,
+                );
+                menu.divide();
+                menu.action("Close pane", Action::ClosePane);
             }
+            // A left click already opens the item's workspace, progress or choices, so
+            // the menu leads with what to do next instead.
             ClientContextMenuTarget::WorkItem {
                 workspace_id,
                 is_linked_worktree,
                 has_progress,
                 hidden,
-                start_reminder,
                 link_target,
-                has_pull_request_item,
+                groups,
+                links,
                 ..
             } => {
-                let mut items = Vec::new();
-                if workspace_id.is_some() {
-                    items.push(item("Go to workspace", Action::WorkItemFocus));
-                    // The item's dialog is the only place its tracker fix is offered.
-                    if *start_reminder {
-                        items.push(item("Update ticket status...", Action::WorkItemChoose));
+                for (group_index, group) in groups.iter().enumerate() {
+                    let group_index = group_index as u8;
+                    menu.divide();
+                    if let Some(header) = &group.header {
+                        menu.header(header.clone());
                     }
-                } else {
-                    items.push(item("Choose what to do...", Action::WorkItemChoose));
+                    for (index, (_, label)) in group.choices.iter().enumerate() {
+                        menu.action(
+                            label.clone(),
+                            Action::WorkItemRunChoice {
+                                group: group_index,
+                                index: index as u8,
+                            },
+                        );
+                    }
+                    if let Some(more) = group.more_label {
+                        menu.action(more, Action::WorkItemMoreChoices { group: group_index });
+                    }
                 }
-                if *has_pull_request_item {
-                    items.push(item("Pull request actions...", Action::WorkItemPullRequest));
-                }
+                menu.divide();
                 if *has_progress {
-                    items.push(item("Show progress", Action::WorkItemProgress));
+                    menu.action("Show progress", Action::WorkItemProgress);
                 }
-                items.push(item("Open in browser", Action::WorkItemOpenUrl));
-                if *hidden {
-                    items.push(item("Show in inbox again", Action::WorkItemUnhide));
-                } else {
-                    items.extend([
-                        item("Snooze for 1 hour", Action::WorkItemSnoozeHour),
-                        item("Snooze for 1 day", Action::WorkItemSnoozeDay),
-                        item("Dismiss", Action::WorkItemDismiss),
-                    ]);
+                for (index, link) in links.iter().enumerate() {
+                    menu.action(link.label.clone(), Action::WorkItemOpenLink(index as u8));
                 }
+                // Organise it or set it aside.
+                menu.divide();
                 if link_target.is_some() {
-                    items.push(item("Link to current workspace", Action::WorkItemLink));
+                    menu.action("Link to current workspace", Action::WorkItemLink);
+                }
+                if *hidden {
+                    menu.action("Show in inbox again", Action::WorkItemUnhide);
+                } else {
+                    menu.action("Snooze for 1 hour", Action::WorkItemSnoozeHour);
+                    menu.action("Snooze for 1 day", Action::WorkItemSnoozeDay);
+                    menu.action("Dismiss", Action::WorkItemDismiss);
                 }
                 if workspace_id.is_some() {
-                    items.push(if *is_linked_worktree {
-                        item("Delete worktree checkout...", Action::RemoveWorktree)
+                    menu.divide();
+                    if *is_linked_worktree {
+                        menu.action("Delete worktree checkout...", Action::RemoveWorktree);
                     } else {
-                        item("Close workspace", Action::Close)
-                    });
+                        menu.action("Close workspace", Action::Close);
+                    }
                 }
-                items
             }
         }
+        menu.rows
     }
 }
 
@@ -157,18 +226,20 @@ impl ClientShellState {
         let collapsed = worktree.is_some_and(|worktree| {
             self.group_is_collapsed(&self.active_endpoint_id, &worktree.key)
         });
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Workspace {
-                workspace_id,
-                is_git: worktree.is_some() || workspace.branch.is_some(),
-                is_linked_worktree: worktree.is_some_and(|worktree| worktree.is_linked_worktree),
-                has_worktree_children,
-                collapsed,
-            },
-            x,
-            y,
-            highlighted: 0,
-        }));
+        self.overlay = Some(ClientShellOverlay::ContextMenu(
+            ClientContextMenuOverlay::new(
+                ClientContextMenuTarget::Workspace {
+                    workspace_id,
+                    is_git: worktree.is_some() || workspace.branch.is_some(),
+                    is_linked_worktree: worktree
+                        .is_some_and(|worktree| worktree.is_linked_worktree),
+                    has_worktree_children,
+                    collapsed,
+                },
+                x,
+                y,
+            ),
+        ));
     }
 
     pub(super) fn open_tab_context_menu(&mut self, tab_id: String, x: u16, y: u16) {
@@ -179,15 +250,16 @@ impl ClientShellState {
         else {
             return;
         };
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Tab {
-                tab_id,
-                workspace_id: tab.workspace_id.clone(),
-            },
-            x,
-            y,
-            highlighted: 0,
-        }));
+        self.overlay = Some(ClientShellOverlay::ContextMenu(
+            ClientContextMenuOverlay::new(
+                ClientContextMenuTarget::Tab {
+                    tab_id,
+                    workspace_id: tab.workspace_id.clone(),
+                },
+                x,
+                y,
+            ),
+        ));
     }
 
     pub(super) fn open_pane_context_menu(&mut self, pane_id: String, x: u16, y: u16) {
@@ -201,30 +273,40 @@ impl ClientShellState {
             .focused_pane_id
             .clone()
             .filter(|focused| focused != &pane_id);
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target: ClientContextMenuTarget::Pane {
-                pane_id,
-                workspace_id: pane.workspace_id.clone(),
-                source_pane_id,
-                has_manual_label: pane.label.is_some(),
-                right_click_passthrough: pane.right_click_passthrough,
-            },
-            x,
-            y,
-            highlighted: 0,
-        }));
+        self.overlay = Some(ClientShellOverlay::ContextMenu(
+            ClientContextMenuOverlay::new(
+                ClientContextMenuTarget::Pane {
+                    pane_id,
+                    workspace_id: pane.workspace_id.clone(),
+                    source_pane_id,
+                    has_manual_label: pane.label.is_some(),
+                    right_click_passthrough: pane.right_click_passthrough,
+                },
+                x,
+                y,
+            ),
+        ));
     }
 
+    /// Moves the highlight `delta` choosable rows, past headers and dividers, stopping at
+    /// either end.
     pub(super) fn move_context_menu_selection(&mut self, delta: isize) {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() else {
             return;
         };
-        let item_count = menu.items().len();
-        if item_count == 0 {
-            return;
+        let items = menu.items();
+        let step = delta.signum();
+        for _ in 0..delta.unsigned_abs() {
+            let mut next = menu.highlighted as isize + step;
+            while (0..items.len() as isize).contains(&next) && items[next as usize].action.is_none()
+            {
+                next += step;
+            }
+            if !(0..items.len() as isize).contains(&next) {
+                return;
+            }
+            menu.highlighted = next as usize;
         }
-        menu.highlighted = (menu.highlighted as isize + delta)
-            .clamp(0, item_count.saturating_sub(1) as isize) as usize;
     }
 
     pub(super) fn activate_context_menu_item(
@@ -235,9 +317,18 @@ impl ClientShellState {
         let Some(ClientShellOverlay::ContextMenu(menu)) = self.overlay.take() else {
             return;
         };
-        let Some(action) = menu.items().get(index).map(|item| item.action) else {
-            outcome.repaint = true;
-            return;
+        let row = menu.items().get(index).map(|item| item.action);
+        let action = match row {
+            Some(Some(action)) => action,
+            // A header or divider: nothing to do, the menu stays.
+            Some(None) => {
+                self.overlay = Some(ClientShellOverlay::ContextMenu(menu));
+                return;
+            }
+            None => {
+                outcome.repaint = true;
+                return;
+            }
         };
         match menu.target {
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
@@ -265,11 +356,17 @@ impl ClientShellState {
                 item_id,
                 workspace_id,
                 link_target,
+                groups,
+                links,
                 ..
             } => self.activate_work_item_context_action(
-                item_id,
-                workspace_id,
-                link_target,
+                super::work_items::WorkItemContextMenu {
+                    item_id,
+                    workspace_id,
+                    link_target,
+                    groups,
+                    links,
+                },
                 action,
                 outcome,
             ),

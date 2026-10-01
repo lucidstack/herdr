@@ -2336,8 +2336,9 @@ fn merge_summary(detail: &GithubDetail, pr_author: Option<&str>) -> String {
     }
 }
 
-/// Merge choices, your default method first, then `work` (addressing review comments in a
-/// workspace), then opening it on GitHub.
+/// Merge choices: your default method first, then `work` on the review (the agent's
+/// follow-ups before working on it by hand), then the other merge methods, then opening
+/// it on GitHub.
 fn merge_choices(
     item: &WorkItem,
     detail: Option<&GithubDetail>,
@@ -2353,7 +2354,7 @@ fn merge_choices(
     let blocker = merge_blocker(detail);
     let base = &detail.base_ref_name;
     let number = detail.number;
-    let mut choices: Vec<WorkItemChoiceInfo> = detail
+    let mut methods: Vec<WorkItemChoiceInfo> = detail
         .merge_methods
         .iter()
         .filter_map(|method| MERGE_METHODS.iter().find(|(name, _, _)| name == method))
@@ -2368,13 +2369,19 @@ fn merge_choices(
             )),
         })
         .collect();
-    let default = choices
+    let default = methods
         .iter()
         .find(|choice| choice.disabled_reason.is_none())
         .map_or(GITHUB_CHOICE_ID.to_string(), |choice| {
             choice.choice_id.clone()
         });
+    let other_methods = methods.split_off(methods.len().min(1));
+    // The modes list working on it by hand first; once it is approved, handing the
+    // comments to the agent is the likelier next step.
+    work.reverse();
+    let mut choices = methods;
     choices.append(&mut work);
+    choices.extend(other_methods);
     choices.push(open_on_github(item, "Open on GitHub"));
     ItemChoices {
         choices,
@@ -3832,14 +3839,15 @@ esac
             .iter()
             .map(|choice| choice.choice_id.as_str())
             .collect();
+        // Your default method, then the review follow-ups, agent first, then the others.
         assert_eq!(
             ids,
             vec![
                 "merge_squash",
-                "merge_commit",
-                "address",
-                "address_agent",
                 "push_reply",
+                "address_agent",
+                "address",
+                "merge_commit",
                 "github"
             ]
         );

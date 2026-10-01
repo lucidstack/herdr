@@ -215,6 +215,155 @@ fn provisioning_running(item: &WorkItemInfo) -> bool {
         .is_some_and(|provisioning| !provisioning.finished)
 }
 
+/// What an item's context menu needs once it is chosen from.
+pub(super) struct WorkItemContextMenu {
+    pub(super) item_id: String,
+    pub(super) workspace_id: Option<String>,
+    pub(super) link_target: Option<String>,
+    pub(super) groups: Vec<WorkItemMenuGroup>,
+    pub(super) links: Vec<WorkItemMenuLink>,
+}
+
+/// Choices an item's menu lists before pointing to the dialog for the rest.
+const MENU_CHOICES: usize = 2;
+
+/// The item's key as people write it: "TECH-7", or "#12" for a GitHub issue or pull
+/// request.
+fn display_key(item: &WorkItemInfo) -> &str {
+    let reference = item.item_id.rsplit(':').next().unwrap_or(&item.item_id);
+    reference
+        .rfind('#')
+        .map_or(reference, |hash| &reference[hash..])
+}
+
+/// The next steps an item's menu offers: its default choice first, then the next ones,
+/// up to `MENU_CHOICES`. Opening in the browser has its own rows, and so has the
+/// workspace an item already has, which a left click opens.
+fn menu_group(
+    item: &WorkItemInfo,
+    header: Option<String>,
+    more: [&'static str; 2],
+) -> Option<WorkItemMenuGroup> {
+    let has_workspace = item.workspace_id.is_some();
+    let offered = |choice: &&crate::api::schema::WorkItemChoiceInfo| {
+        choice.disabled_reason.is_none()
+            && !matches!(choice.action, WorkItemChoiceAction::OpenUrl { .. })
+            && !(has_workspace && choice.action == WorkItemChoiceAction::ProvisionWorkspace)
+    };
+    let mut ordered: Vec<_> = item.choices.iter().filter(offered).collect();
+    if let Some(default) = ordered
+        .iter()
+        .position(|choice| Some(choice.choice_id.as_str()) == item.default_choice_id.as_deref())
+    {
+        let default = ordered.remove(default);
+        ordered.insert(0, default);
+    }
+    let choices: Vec<(String, String)> = ordered
+        .iter()
+        .take(MENU_CHOICES)
+        .map(|choice| (choice.choice_id.clone(), choice.label.clone()))
+        .collect();
+    let unlisted = item.choices.iter().any(|choice| {
+        !matches!(choice.action, WorkItemChoiceAction::OpenUrl { .. })
+            && !choices.iter().any(|(id, _)| *id == choice.choice_id)
+    });
+    let [more_choices, all_choices] = more;
+    let more_label = unlisted.then_some(if choices.is_empty() {
+        all_choices
+    } else {
+        more_choices
+    });
+    (!choices.is_empty() || more_label.is_some()).then_some(WorkItemMenuGroup {
+        item_id: item.item_id.clone(),
+        header,
+        choices,
+        more_label,
+    })
+}
+
+/// The item's next steps, then those of the pull request folded into it, each under a
+/// header when both are there.
+fn menu_groups(item: &WorkItemInfo, pull_request: Option<&WorkItemInfo>) -> Vec<WorkItemMenuGroup> {
+    let own_header = pull_request.map(|_| match item.tracker_state.as_deref() {
+        Some(state) => format!(
+            "{} · {}",
+            display_key(item),
+            state.split(" · ").next().unwrap_or(state)
+        ),
+        None => display_key(item).to_string(),
+    });
+    let own = menu_group(
+        item,
+        own_header,
+        ["More choices...", "Choose what to do..."],
+    );
+    // The pull request's own line, e.g. "#11938 ready to merge".
+    let pull_request = pull_request.and_then(|pull_request| {
+        let header = pull_request
+            .context
+            .split(" · ")
+            .next()
+            .unwrap_or(&pull_request.context)
+            .to_string();
+        menu_group(
+            pull_request,
+            Some(header),
+            ["More pull request choices...", "Pull request choices..."],
+        )
+    });
+    let mut groups: Vec<_> = own.into_iter().chain(pull_request).collect();
+    // What can be done straight away leads; a group that only points to its dialog follows.
+    groups.sort_by_key(|group| group.choices.is_empty());
+    // A lone group needs no header: it is the item that was clicked.
+    if let [group] = groups.as_mut_slice() {
+        if group.item_id == item.item_id {
+            group.header = None;
+        }
+    }
+    groups
+}
+
+/// Where the item, and its pull request, open in the browser, each named by key and
+/// service: "Open TECH-7 in Jira", "Open #12 on GitHub".
+fn menu_links(
+    item: &WorkItemInfo,
+    pull_request: Option<&WorkItemInfo>,
+    sources: &[crate::api::schema::WorkItemSourceInfo],
+) -> Vec<WorkItemMenuLink> {
+    let link = |key: &str, source_id: &str, url: &str| {
+        let service = sources
+            .iter()
+            .find(|source| source.source_id == source_id)
+            .map_or(source_id, |source| source.label.as_str());
+        let on = if service.eq_ignore_ascii_case("github") {
+            "on"
+        } else {
+            "in"
+        };
+        WorkItemMenuLink {
+            label: format!("Open {key} {on} {service}"),
+            url: url.to_string(),
+        }
+    };
+    let mut links = vec![link(display_key(item), &item.source_id, &item.url)];
+    let pull_request = match pull_request {
+        Some(pull_request) => Some(link(
+            display_key(pull_request),
+            &pull_request.source_id,
+            &pull_request.url,
+        )),
+        None => item.linked_pull_request.as_ref().map(|pull_request| {
+            link(
+                &format!("#{}", pull_request.number),
+                &pull_request.source_id,
+                &pull_request.url,
+            )
+        }),
+    };
+    links.extend(pull_request.filter(|pull_request| pull_request.url != item.url));
+    links
+}
+
 fn provisioning_failed(item: &WorkItemInfo) -> bool {
     item.provisioning.as_ref().is_some_and(|provisioning| {
         provisioning.finished
@@ -1443,14 +1592,22 @@ impl ClientShellState {
         let Some(item) = self.local_work_item(item_id) else {
             return false;
         };
+        let snapshot = self.snapshot.as_deref();
         let workspace = item.workspace_id.as_deref().and_then(|workspace_id| {
-            self.snapshot.as_deref().and_then(|snapshot| {
+            snapshot.and_then(|snapshot| {
                 snapshot
                     .workspaces
                     .iter()
                     .find(|workspace| workspace.workspace_id == workspace_id)
             })
         });
+        let sources = snapshot
+            .and_then(|snapshot| {
+                active_projection(&self.work_items, &self.active_endpoint_id, snapshot)
+            })
+            .map(|projection| projection.sources.as_slice())
+            .unwrap_or_default();
+        let pull_request = self.folded_pull_request_item(item_id);
         let target = ClientContextMenuTarget::WorkItem {
             item_id: item.item_id.clone(),
             workspace_id: workspace.map(|workspace| workspace.workspace_id.clone()),
@@ -1459,32 +1616,32 @@ impl ClientShellState {
                 .is_some_and(|worktree| worktree.is_linked_worktree),
             has_progress: item.provisioning.is_some(),
             hidden: is_hidden(item),
-            start_reminder: item.start_reminder.is_some(),
-            link_target: self
-                .snapshot
-                .as_deref()
+            link_target: snapshot
                 .and_then(|snapshot| snapshot.focused_workspace_id.clone())
                 .filter(|focused| item.workspace_id.as_deref() != Some(focused.as_str())),
-            has_pull_request_item: self.folded_pull_request_item(item_id).is_some(),
+            groups: menu_groups(item, pull_request),
+            links: menu_links(item, pull_request, sources),
         };
-        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
-            target,
-            x,
-            y,
-            highlighted: 0,
-        }));
+        self.overlay = Some(ClientShellOverlay::ContextMenu(
+            ClientContextMenuOverlay::new(target, x, y),
+        ));
         true
     }
 
     pub(super) fn activate_work_item_context_action(
         &mut self,
-        item_id: String,
-        workspace_id: Option<String>,
-        link_target: Option<String>,
+        menu: WorkItemContextMenu,
         action: ClientContextMenuAction,
         outcome: &mut ClientShellInput,
     ) {
         const HOUR: u64 = 60 * 60;
+        let WorkItemContextMenu {
+            item_id,
+            workspace_id,
+            link_target,
+            groups,
+            links,
+        } = menu;
         let Some(item) = self.local_work_item(&item_id).cloned() else {
             return;
         };
@@ -1495,23 +1652,44 @@ impl ClientShellState {
             })
         };
         match action {
-            ClientContextMenuAction::WorkItemChoose => {
-                self.mark_work_item_seen(&item, outcome);
-                self.open_work_item_overlay(item, false);
+            ClientContextMenuAction::WorkItemRunChoice { group, index } => {
+                let Some(group) = groups.get(usize::from(group)) else {
+                    return;
+                };
+                let Some((choice_id, _)) = group.choices.get(usize::from(index)) else {
+                    return;
+                };
+                let Some(owner) = self.local_work_item(&group.item_id).cloned() else {
+                    return;
+                };
+                let Some(choice_index) = owner
+                    .choices
+                    .iter()
+                    .position(|choice| &choice.choice_id == choice_id)
+                else {
+                    return;
+                };
+                // Through the item's dialog, as if chosen there: it asks before what cannot
+                // be undone and shows how the choice ends.
+                self.mark_work_item_seen(&owner, outcome);
+                self.open_work_item_overlay(owner, false);
+                self.confirm_work_item_choice(choice_index, outcome);
             }
-            ClientContextMenuAction::WorkItemProgress => self.open_work_item_overlay(item, true),
-            ClientContextMenuAction::WorkItemFocus => {
-                if let Some(workspace_id) = workspace_id {
-                    self.mark_work_item_seen(&item, outcome);
-                    self.push_endpoint_method(
-                        Method::WorkspaceFocus(WorkspaceTarget { workspace_id }),
-                        outcome,
-                    );
+            ClientContextMenuAction::WorkItemMoreChoices { group } => {
+                let owner = groups
+                    .get(usize::from(group))
+                    .and_then(|group| self.local_work_item(&group.item_id).cloned());
+                if let Some(owner) = owner {
+                    self.mark_work_item_seen(&owner, outcome);
+                    self.open_work_item_overlay(owner, false);
                 }
             }
-            ClientContextMenuAction::WorkItemOpenUrl => {
-                self.mark_work_item_seen(&item, outcome);
-                self.open_web_link(item.url, outcome);
+            ClientContextMenuAction::WorkItemProgress => self.open_work_item_overlay(item, true),
+            ClientContextMenuAction::WorkItemOpenLink(index) => {
+                if let Some(link) = links.into_iter().nth(usize::from(index)) {
+                    self.mark_work_item_seen(&item, outcome);
+                    self.open_web_link(link.url, outcome);
+                }
             }
             ClientContextMenuAction::WorkItemSnoozeHour => {
                 self.push_endpoint_method(hide(Some(HOUR)), outcome)
@@ -1535,12 +1713,6 @@ impl ClientShellState {
             }
             ClientContextMenuAction::WorkItemUnhide => self
                 .push_endpoint_method(Method::WorkItemUnhide(WorkItemTarget { item_id }), outcome),
-            ClientContextMenuAction::WorkItemPullRequest => {
-                if let Some(pull_request) = self.folded_pull_request_item(&item_id).cloned() {
-                    self.mark_work_item_seen(&pull_request, outcome);
-                    self.open_work_item_overlay(pull_request, false);
-                }
-            }
             ClientContextMenuAction::RemoveWorktree | ClientContextMenuAction::Close => {
                 if let Some(workspace_id) = workspace_id {
                     self.activate_workspace_context_action(workspace_id, action, outcome);

@@ -737,31 +737,56 @@ fn ticket_shows_a_status_line_per_service_and_its_pull_request_folds_in() {
     let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
         panic!("item menu opens");
     };
-    let actions = menu
+    let labels: Vec<String> = menu
         .items()
         .iter()
-        .position(|entry| entry.label == "Pull request actions...")
-        .expect("folded pull request reachable");
+        .map(|entry| entry.label.to_string())
+        .collect();
+    // The pull request's choices sit under its own header, below the ticket's.
+    let header = labels
+        .iter()
+        .position(|label| label == "o/r #8")
+        .expect("pull request header");
+    assert_eq!(labels[header + 1], "Review locally", "{labels:?}");
+    assert!(
+        labels.contains(&"Open #8 on GitHub".to_string()),
+        "{labels:?}"
+    );
     state.compose(106, 30).expect("frame");
-    let (row, _) = state.hits.context_menu_rows[actions];
-    mouse(
+    let (row, _) = state.hits.context_menu_rows[header + 1];
+    let chosen = mouse(
         &mut state,
         MouseEventKind::Down(MouseButton::Left),
         row.x + 1,
         row.y,
     );
-    assert!(matches!(
-        state.overlay.as_ref(),
-        Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#8"
-    ));
+    assert!(
+        endpoint_methods(&chosen).iter().any(|method| matches!(
+            method,
+            Method::WorkItemChoose(params)
+                if params.item_id == "github:o/r#8" && params.choice_id == "local"
+        )),
+        "the pull request's choice runs, not the ticket's"
+    );
 }
 
 #[test]
-fn item_menu_of_a_started_item_opens_its_tracker_fix() {
+fn item_menu_leads_with_a_started_items_tracker_fix() {
     let mut started = item("7");
     started.seen = true;
     started.workspace_id = Some("ws_2".into());
-    started.start_reminder = Some("You're working on this, but it isn't assigned to you".into());
+    started.choices.insert(
+        0,
+        WorkItemChoiceInfo {
+            choice_id: "start_work".into(),
+            label: "Assign to me".into(),
+            description: None,
+            action: WorkItemChoiceAction::Perform,
+            disabled_reason: None,
+            confirm: None,
+        },
+    );
+    started.default_choice_id = Some("start_work".into());
     let mut state = shell_with(vec![started]);
     state.compose(106, 30).expect("frame");
     let rect = state.hits.work_items[0].rect;
@@ -774,23 +799,37 @@ fn item_menu_of_a_started_item_opens_its_tracker_fix() {
     let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
         panic!("item menu opens");
     };
-    let update = menu
-        .items()
-        .iter()
-        .position(|entry| entry.label == "Update ticket status...")
-        .expect("tracker fix offered");
+    let items = menu.items();
+    assert_eq!(items[menu.highlighted].label, "Assign to me");
+    // A left click already opens the workspace, so the menu does not offer it again.
+    assert!(items.iter().all(|entry| entry.label != "Review locally"));
     state.compose(106, 30).expect("frame");
-    let (row, _) = state.hits.context_menu_rows[update];
-    mouse(
+    let (row, _) = state.hits.context_menu_rows[menu_index(&state, "Assign to me")];
+    let chosen = mouse(
         &mut state,
         MouseEventKind::Down(MouseButton::Left),
         row.x + 1,
         row.y,
     );
+    assert!(endpoint_methods(&chosen).iter().any(|method| matches!(
+        method,
+        Method::WorkItemChoose(params) if params.choice_id == "start_work"
+    )));
     assert!(matches!(
         state.overlay.as_ref(),
-        Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#7"
+        Some(ClientShellOverlay::WorkItem(overlay))
+            if overlay.item.running_choice_id.as_deref() == Some("start_work")
     ));
+}
+
+fn menu_index(state: &ClientShellState, label: &str) -> usize {
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu open");
+    };
+    menu.items()
+        .iter()
+        .position(|entry| entry.label == label)
+        .unwrap_or_else(|| panic!("{label} offered"))
 }
 
 #[test]
@@ -949,4 +988,130 @@ fn briefing_the_agent_closes_the_dialog_and_asks_the_server() {
         [Method::WorkItemChoose(params)] if params.choice_id == "push_reply"
     ));
     assert!(state.overlay.is_none());
+}
+
+#[test]
+fn ticket_menu_leads_with_its_pull_requests_next_step_and_names_where_links_go() {
+    let choice = |id: &str, label: &str, action: WorkItemChoiceAction| WorkItemChoiceInfo {
+        choice_id: id.into(),
+        label: label.into(),
+        description: None,
+        action,
+        disabled_reason: None,
+        confirm: None,
+    };
+    let open = |url: &str| WorkItemChoiceAction::OpenUrl { url: url.into() };
+    let mut ticket = item("7");
+    ticket.item_id = "jira:TECH-2073".into();
+    ticket.source_id = "jira".into();
+    ticket.context = "TECH-2073".into();
+    ticket.title = "Add a LeadIn strategy decorator".into();
+    ticket.url = "https://x.atlassian.net/browse/TECH-2073".into();
+    ticket.tracker_state = Some("In Progress · Andrea Rossi".into());
+    ticket.workspace_id = Some("ws_2".into());
+    ticket.choices = vec![
+        choice(
+            "pull_request_open",
+            "Open pull request",
+            open("https://github.com/o/r/pull/11938"),
+        ),
+        choice(
+            "local",
+            "Continue on ar/tech-2073",
+            WorkItemChoiceAction::ProvisionWorkspace,
+        ),
+        choice(
+            "local_agent",
+            "Ask agent to implement it",
+            WorkItemChoiceAction::ProvisionWorkspace,
+        ),
+        choice(
+            "jira",
+            "Open in Jira",
+            open("https://x.atlassian.net/browse/TECH-2073"),
+        ),
+    ];
+    ticket.default_choice_id = Some("local".into());
+    let mut pull = item("11938");
+    pull.item_id = "github:merge:o/r#11938".into();
+    pull.context = "#11938 ready to merge · o/r".into();
+    pull.folded_into = Some("jira:TECH-2073".into());
+    let mut push = choice(
+        "push_reply",
+        "Ask agent to push and reply",
+        WorkItemChoiceAction::BriefAgent,
+    );
+    push.disabled_reason = Some("Work on it locally first".into());
+    pull.choices = vec![
+        choice(
+            "merge_squash",
+            "Squash and merge",
+            WorkItemChoiceAction::Perform,
+        ),
+        push,
+        choice(
+            "address_agent",
+            "Ask agent to address the feedback",
+            WorkItemChoiceAction::ProvisionWorkspace,
+        ),
+        choice(
+            "address",
+            "Work on it locally",
+            WorkItemChoiceAction::ProvisionWorkspace,
+        ),
+        choice(
+            "merge_commit",
+            "Create a merge commit",
+            WorkItemChoiceAction::Perform,
+        ),
+        choice(
+            "github",
+            "Open on GitHub",
+            open("https://github.com/o/r/pull/11938"),
+        ),
+    ];
+    pull.default_choice_id = Some("merge_squash".into());
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(two_workspace_snapshot()));
+    state.set_pane_surface(surface());
+    let mut projected = projection(1, vec![ticket, pull, item("9")]);
+    projected.sources.push(WorkItemSourceInfo {
+        source_id: "jira".into(),
+        label: "Jira".into(),
+        error: None,
+    });
+    state.set_endpoint_work_items(&ClientEndpointId::Local, projected);
+    state.compose(106, 30).expect("frame");
+    let rect = state.hits.work_items[0].rect;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        rect.x + 2,
+        rect.y,
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    let items = menu.items();
+    let labels: Vec<&str> = items.iter().map(|entry| entry.label.as_ref()).collect();
+    // The merge is what can be done straight away, so it leads and is highlighted.
+    assert_eq!(labels[0], "#11938 ready to merge");
+    assert_eq!(labels[menu.highlighted], "Squash and merge");
+    // A disabled follow-up is left to the dialog, which says why.
+    assert!(
+        !labels.contains(&"Ask agent to push and reply"),
+        "{labels:?}"
+    );
+    assert!(labels.contains(&"Open TECH-2073 in Jira"), "{labels:?}");
+    assert!(labels.contains(&"Open #11938 on GitHub"), "{labels:?}");
+    // Its workspace opens on a left click and is not offered again.
+    assert!(!labels.contains(&"Continue on ar/tech-2073"), "{labels:?}");
+    assert_eq!(labels.last(), Some(&"Close workspace"));
+
+    // Down skips the header and divider between the two groups.
+    state.move_context_menu_selection(3);
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu stays open");
+    };
+    assert_eq!(menu.items()[menu.highlighted].label, "Choose what to do...");
 }
