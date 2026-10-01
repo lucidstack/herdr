@@ -599,52 +599,144 @@ impl GithubSource {
     }
 }
 
-/// Where an open pull request's reviews stand. GitHub only computes a review decision when
-/// the repository requires reviews, so without one the latest reviews decide.
-fn review_status(decision: Option<&str>, reviews: &[GithubReview]) -> &'static str {
-    match decision.filter(|decision| !decision.is_empty()) {
-        Some("APPROVED") => "approved",
-        Some("CHANGES_REQUESTED") => "changes requested",
-        Some(_) => "awaiting review",
-        None if reviews
-            .iter()
-            .any(|review| review.state == "CHANGES_REQUESTED") =>
-        {
-            "changes requested"
-        }
-        None if is_approved(None, reviews) => "approved",
-        None => "awaiting review",
+/// At most this many reviewers are named in a status line; the rest are counted.
+const NAMED_REVIEWERS: usize = 2;
+
+/// `@a, @b +2`.
+fn named_reviewers(logins: &[&str]) -> String {
+    let named = logins
+        .iter()
+        .take(NAMED_REVIEWERS)
+        .map(|login| format!("@{login}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match logins.len().saturating_sub(NAMED_REVIEWERS) {
+        0 => named,
+        rest => format!("{named} +{rest}"),
     }
 }
 
-/// A pull request's state in one line, e.g. "draft", "approved · CI failing", "merged".
+/// Logins, other than `viewer`, whose latest review is in `state`.
+fn reviewers_in<'a>(
+    reviews: &'a [GithubReview],
+    state: &str,
+    viewer: Option<&str>,
+) -> Vec<&'a str> {
+    reviews
+        .iter()
+        .filter(|review| review.state == state)
+        .filter_map(|review| review.author.as_ref().map(|author| author.login.as_str()))
+        .filter(|login| viewer.is_none_or(|viewer| !login.eq_ignore_ascii_case(viewer)))
+        .collect()
+}
+
+/// Where an open pull request's reviews stand, yours first, then everyone else's verdict
+/// with who gave it, e.g. "awaiting your review · approved by @alice". GitHub only computes
+/// a review decision when the repository requires reviews, so without one the latest
+/// reviews decide. `viewer` is your login, when known.
+fn review_status(
+    decision: Option<&str>,
+    reviews: &[GithubReview],
+    requests: &[GithubReviewRequest],
+    viewer: Option<&str>,
+) -> String {
+    let is_viewer = |login: &str| viewer.is_some_and(|viewer| login.eq_ignore_ascii_case(viewer));
+    // A fresh request for your review outweighs the review you gave before it.
+    let yours = if requests.iter().any(|request| is_viewer(&request.login)) {
+        Some("awaiting your review")
+    } else {
+        reviews
+            .iter()
+            .find(|review| {
+                review
+                    .author
+                    .as_ref()
+                    .is_some_and(|author| is_viewer(&author.login))
+            })
+            .and_then(|review| match review.state.as_str() {
+                "APPROVED" => Some("you approved"),
+                "CHANGES_REQUESTED" => Some("you requested changes"),
+                _ => None,
+            })
+    };
+    let decision = decision.filter(|decision| !decision.is_empty());
+    let changes_requested = match decision {
+        Some(decision) => decision == "CHANGES_REQUESTED",
+        None => reviews
+            .iter()
+            .any(|review| review.state == "CHANGES_REQUESTED"),
+    };
+    let verdict = |state: &str, label: &str| {
+        let others = reviewers_in(reviews, state, viewer);
+        if !others.is_empty() {
+            Some(format!("{label} by {}", named_reviewers(&others)))
+        } else if yours.is_some() && reviews.iter().any(|review| review.state == state) {
+            // Only your own review gives this verdict, and `yours` already says so.
+            None
+        } else {
+            Some(label.to_string())
+        }
+    };
+    let others = if changes_requested {
+        verdict("CHANGES_REQUESTED", "changes requested")
+    } else if is_approved(decision, reviews) {
+        verdict("APPROVED", "approved")
+    } else if yours == Some("awaiting your review") {
+        None
+    } else {
+        Some("awaiting review".to_string())
+    };
+    match (yours, others) {
+        (Some(yours), Some(others)) => format!("{yours} · {others}"),
+        (Some(yours), None) => yours.to_string(),
+        (None, Some(others)) => others,
+        (None, None) => "awaiting review".to_string(),
+    }
+}
+
+/// What GitHub says about a pull request's reviews, for its one-line status.
+struct ReviewState<'a> {
+    decision: Option<&'a str>,
+    reviews: &'a [GithubReview],
+    requests: &'a [GithubReviewRequest],
+    viewer: Option<&'a str>,
+}
+
+/// A pull request's state in one line, e.g. "draft", "approved by @bob · CI failing",
+/// "merged".
 fn pull_request_status(
     state: &str,
     is_draft: bool,
-    decision: Option<&str>,
-    reviews: &[GithubReview],
+    review: ReviewState<'_>,
     (failing, running): (bool, bool),
 ) -> String {
     if !state.eq_ignore_ascii_case("open") {
         return state.to_lowercase();
     }
     let review = if is_draft {
-        "draft"
+        "draft".to_string()
     } else {
-        review_status(decision, reviews)
+        review_status(
+            review.decision,
+            review.reviews,
+            review.requests,
+            review.viewer,
+        )
     };
     match (failing, running) {
         (true, _) => format!("{review} · CI failing"),
         (false, true) => format!("{review} · checks running"),
-        (false, false) => review.to_string(),
+        (false, false) => review,
     }
 }
 
 /// The first pull request of a `gh pr list --json` answer, with its state in one line.
+/// `viewer` is your login, when known.
 fn parse_branch_pull_request(
     bytes: &[u8],
     source_id: &str,
     repo: &str,
+    viewer: Option<&str>,
 ) -> Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -659,6 +751,8 @@ fn parse_branch_pull_request(
         review_decision: Option<String>,
         #[serde(default)]
         latest_reviews: Vec<GithubReview>,
+        #[serde(default)]
+        review_requests: Vec<GithubReviewRequest>,
         #[serde(default)]
         status_check_rollup: Vec<Check>,
     }
@@ -708,8 +802,12 @@ fn parse_branch_pull_request(
         status: pull_request_status(
             &pull.state,
             pull.is_draft,
-            pull.review_decision.as_deref(),
-            &pull.latest_reviews,
+            ReviewState {
+                decision: pull.review_decision.as_deref(),
+                reviews: &pull.latest_reviews,
+                requests: &pull.review_requests,
+                viewer,
+            },
             (failing, running),
         ),
         url: pull.url,
@@ -718,8 +816,10 @@ fn parse_branch_pull_request(
 }
 
 /// One aliased GraphQL query reading many pull requests' state at once.
+/// Teams requested for review come back without a login.
 const PULL_REQUEST_STATUS_FIELDS: &str = "number url state isDraft reviewDecision \
-    latestReviews(first: 50) { nodes { state } } \
+    latestReviews(first: 50) { nodes { state author { login } } } \
+    reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 
 /// Pull requests read per GraphQL query, keeping each well under GitHub's node limits.
@@ -753,11 +853,12 @@ fn pull_request_status_query(pulls: &[(String, u64)]) -> (String, Vec<String>) {
 }
 
 /// Each of `pulls` from a `pull_request_status_query` answer, `None` where GitHub could not
-/// resolve it, e.g. a repository you lost access to.
+/// resolve it, e.g. a repository you lost access to. `viewer` is your login, when known.
 fn parse_pull_request_statuses(
     bytes: &[u8],
     source_id: &str,
     pulls: &[(String, u64)],
+    viewer: Option<&str>,
 ) -> Result<Vec<Option<crate::api::schema::WorkItemPullRequestInfo>>, String> {
     #[derive(Deserialize)]
     struct Response {
@@ -784,7 +885,20 @@ fn parse_pull_request_statuses(
         #[serde(default)]
         latest_reviews: Option<GraphqlReviews>,
         #[serde(default)]
+        review_requests: Option<ReviewRequests>,
+        #[serde(default)]
         commits: Option<Commits>,
+    }
+    #[derive(Deserialize)]
+    struct ReviewRequests {
+        #[serde(default)]
+        nodes: Vec<Option<ReviewRequest>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReviewRequest {
+        #[serde(default)]
+        requested_reviewer: Option<GithubReviewRequest>,
     }
     #[derive(Deserialize)]
     struct Commits {
@@ -821,6 +935,12 @@ fn parse_pull_request_statuses(
                 .iter()
                 .flat_map(|reviews| reviews.nodes.iter().flatten().cloned())
                 .collect();
+            let requests: Vec<GithubReviewRequest> = pull
+                .review_requests
+                .into_iter()
+                .flat_map(|requests| requests.nodes.into_iter().flatten())
+                .filter_map(|request| request.requested_reviewer)
+                .collect();
             let rollup = pull
                 .commits
                 .and_then(|commits| commits.nodes.into_iter().flatten().last())
@@ -839,8 +959,12 @@ fn parse_pull_request_statuses(
                 status: pull_request_status(
                     &pull.state,
                     pull.is_draft,
-                    pull.review_decision.as_deref(),
-                    &reviews,
+                    ReviewState {
+                        decision: pull.review_decision.as_deref(),
+                        reviews: &reviews,
+                        requests: &requests,
+                        viewer,
+                    },
                     checks,
                 ),
                 url: pull.url,
@@ -2228,9 +2352,10 @@ impl WorkItemSource for GithubSource {
             "--limit",
             "1",
             "--json",
-            "number,url,state,isDraft,reviewDecision,latestReviews,statusCheckRollup",
+            "number,url,state,isDraft,reviewDecision,latestReviews,reviewRequests,statusCheckRollup",
         ])?;
-        parse_branch_pull_request(&output, self.id(), &repo.name)
+        let viewer = self.viewer_login().ok();
+        parse_branch_pull_request(&output, self.id(), &repo.name, viewer.as_deref())
     }
 
     fn mark_pull_request_ready(
@@ -2254,6 +2379,11 @@ impl WorkItemSource for GithubSource {
         pulls: &[(String, u64)],
     ) -> Result<Vec<Option<crate::api::schema::WorkItemPullRequestInfo>>, String> {
         let mut statuses = Vec::with_capacity(pulls.len());
+        if pulls.is_empty() {
+            return Ok(statuses);
+        }
+        // Without your login the statuses still read, only not from your side.
+        let viewer = self.viewer_login().ok();
         for batch in pulls.chunks(PULL_REQUEST_STATUS_BATCH) {
             let (query, fields) = pull_request_status_query(batch);
             let query_arg = format!("query={query}");
@@ -2273,7 +2403,12 @@ impl WorkItemSource for GithubSource {
                 }
                 Err(err) => return Err(format!("gh failed: {err}")),
             };
-            statuses.extend(parse_pull_request_statuses(&stdout, self.id(), batch)?);
+            statuses.extend(parse_pull_request_statuses(
+                &stdout,
+                self.id(),
+                batch,
+                viewer.as_deref(),
+            )?);
         }
         Ok(statuses)
     }
@@ -2974,7 +3109,7 @@ mod tests {
     #[test]
     fn branch_pull_request_state_reads_as_one_line() {
         let parse = |json: &str| {
-            parse_branch_pull_request(json.as_bytes(), "github", "o/r")
+            parse_branch_pull_request(json.as_bytes(), "github", "o/r", None)
                 .expect("parses")
                 .map(|pull| (pull.is_draft, pull.status))
         };
@@ -3037,14 +3172,18 @@ mod tests {
         // GitHub answers what it resolved and nulls the rest.
         let json = br#"{"data":{
             "p0":{"pullRequest":{"number":1,"url":"u1","state":"OPEN","isDraft":false,
-                "reviewDecision":null,"latestReviews":{"nodes":[{"state":"APPROVED"}]},
+                "reviewDecision":null,
+                "latestReviews":{"nodes":[{"state":"APPROVED","author":{"login":"alice"}}]},
+                "reviewRequests":{"nodes":[{"requestedReviewer":{}},
+                    {"requestedReviewer":{"login":"Me"}}]},
                 "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE"}}}]}}},
             "p1":{"pullRequest":{"number":2,"url":"u2","state":"OPEN","isDraft":true,
                 "reviewDecision":"REVIEW_REQUIRED","latestReviews":{"nodes":[]},
                 "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]}}},
             "p2":null},
             "errors":[{"type":"NOT_FOUND","path":["p2"]}]}"#;
-        let statuses = parse_pull_request_statuses(json, "github", &pulls).expect("parses");
+        let statuses =
+            parse_pull_request_statuses(json, "github", &pulls, Some("me")).expect("parses");
         let lines: Vec<Option<(bool, &str)>> = statuses
             .iter()
             .map(|status| {
@@ -3056,10 +3195,78 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                Some((false, "approved · CI failing")),
+                // Someone else's approval does not stand in for the review asked of you.
+                Some((
+                    false,
+                    "awaiting your review · approved by @alice · CI failing"
+                )),
                 Some((true, "draft · checks running")),
                 None,
             ]
+        );
+    }
+
+    #[test]
+    fn review_status_reads_from_your_side_and_names_the_other_reviewers() {
+        let review = |login: &str, state: &str| GithubReview {
+            author: Some(GithubLogin {
+                login: login.into(),
+            }),
+            state: state.into(),
+            body: String::new(),
+        };
+        let requested = |login: &str| GithubReviewRequest {
+            login: login.into(),
+        };
+        let me = Some("me");
+        let status =
+            |decision: Option<&str>, reviews: &[GithubReview], requests: &[GithubReviewRequest]| {
+                review_status(decision, reviews, requests, me)
+            };
+
+        assert_eq!(
+            status(Some("APPROVED"), &[review("me", "APPROVED")], &[]),
+            "you approved"
+        );
+        // Your approval is not enough when the repository wants more.
+        assert_eq!(
+            status(Some("REVIEW_REQUIRED"), &[review("me", "APPROVED")], &[]),
+            "you approved · awaiting review"
+        );
+        // Asked again after requesting changes: the request is what is left for you.
+        assert_eq!(
+            status(
+                Some("CHANGES_REQUESTED"),
+                &[review("me", "CHANGES_REQUESTED")],
+                &[requested("me")]
+            ),
+            "awaiting your review"
+        );
+        assert_eq!(
+            status(
+                None,
+                &[review("me", "APPROVED"), review("bob", "CHANGES_REQUESTED")],
+                &[]
+            ),
+            "you approved · changes requested by @bob"
+        );
+        // Your own pull request: only the others' verdict, with who gave it.
+        assert_eq!(
+            status(
+                Some("APPROVED"),
+                &[
+                    review("ann", "APPROVED"),
+                    review("bob", "APPROVED"),
+                    review("cyd", "COMMENTED"),
+                    review("dee", "APPROVED"),
+                ],
+                &[]
+            ),
+            "approved by @ann, @bob +1"
+        );
+        assert_eq!(
+            status(Some("REVIEW_REQUIRED"), &[], &[requested("bob")]),
+            "awaiting review"
         );
     }
 
