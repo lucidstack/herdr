@@ -1,0 +1,23 @@
+name: Upstream herdr releases
+
+# Vetch forked from herdr and no longer merges it. Each new stable herdr release becomes an
+# issue labelled `upstream`, to read and port from by hand.
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open an issue for each new release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/upstream-releases.sh
