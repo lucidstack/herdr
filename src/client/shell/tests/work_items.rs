@@ -50,6 +50,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         running_choice_id: None,
         action_outcome: None,
         linked_pull_request: None,
+        linked_ticket: None,
         folded_into: None,
         attention: None,
     }
@@ -664,6 +665,29 @@ fn item_menu_links_the_focused_workspace() {
         [Method::WorkItemLink(params)]
             if params.item_id == "github:o/r#7" && params.workspace_id == "ws_1"
     ));
+}
+
+#[test]
+fn pull_request_shows_the_ticket_its_title_names_on_a_line_of_its_own() {
+    let mut pull = item("8");
+    pull.title = "[TECH-7] Fix login".into();
+    pull.linked_ticket = Some(crate::api::schema::WorkItemLinkedTicketInfo {
+        source_id: "jira".into(),
+        key: "TECH-7".into(),
+        url: "https://example.atlassian.net/browse/TECH-7".into(),
+        tracker_state: "In Progress · Ada".into(),
+    });
+    let mut state = shell_with(vec![pull, item("9")]);
+    state.compose(106, 30).expect("frame");
+    assert_eq!(state.hits.work_items[0].rect.height, 3);
+    let text = screen_text(&mut state);
+    let lines: Vec<&str> = text.lines().collect();
+    let title_row = lines
+        .iter()
+        .position(|line| line.contains("[TECH-7] Fix login"))
+        .expect("title drawn");
+    // The sidebar truncates the rest of the line.
+    assert!(lines[title_row + 1].contains("jira TECH-7 · In"), "{text}");
 }
 
 #[test]

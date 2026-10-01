@@ -676,6 +676,21 @@ impl JiraSource {
         Err(http_error(status, &response))
     }
 
+    /// The `fields` of one issue; `None` when `key` does not exist.
+    fn issue(&self, key: &str, fields: &str) -> Result<Option<IssueFields>, String> {
+        let (status, body) =
+            self.api_with_status("GET", &format!("issue/{key}?fields={fields}"), None)?;
+        if status == 404 {
+            return Ok(None);
+        }
+        if !(200..300).contains(&status) {
+            return Err(http_error(status, &body));
+        }
+        let issue: IssueResponse = serde_json::from_slice(&body)
+            .map_err(|err| format!("unexpected Jira response: {err}"))?;
+        Ok(Some(issue.fields))
+    }
+
     /// Branch new work starts from: configured, else the remote's HEAD.
     fn base_branch(&self, project: &JiraProjectConfig) -> Result<String, String> {
         if let Some(base) = project.base_branch.as_ref().filter(|base| !base.is_empty()) {
@@ -727,6 +742,28 @@ fn tracker_state(status: &str, assignee: Option<&str>) -> String {
     } else {
         format!("{status} · {assignee}")
     }
+}
+
+/// The issue key a title starts with, bare or in brackets: `TECH-12` for "TECH-12 Fix",
+/// "[TECH-12] Fix" or "TECH-12: Fix". Project keys start with an uppercase letter and hold
+/// uppercase letters, digits and underscores.
+fn title_issue_key(title: &str) -> Option<&str> {
+    let rest = title.trim_start();
+    let rest = rest.strip_prefix(['[', '(']).unwrap_or(rest);
+    if !rest.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let project_len = rest
+        .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+        .unwrap_or(rest.len());
+    let number = rest[project_len..].strip_prefix('-')?;
+    let digits = number
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(number.len());
+    if digits == 0 || number[digits..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(&rest[..project_len + 1 + digits])
 }
 
 /// One page of search results as items, and the token of the next page.
@@ -1279,17 +1316,9 @@ impl WorkItemSource for JiraSource {
         }
         let fields = "summary,description,issuetype,priority,status,labels,comment,updated,\
                       assignee,reporter";
-        let (status, body) =
-            self.api_with_status("GET", &format!("issue/{key}?fields={fields}"), None)?;
-        if status == 404 {
+        let Some(fields) = self.issue(key, fields)? else {
             return Ok(None);
-        }
-        if !(200..300).contains(&status) {
-            return Err(http_error(status, &body));
-        }
-        let issue: IssueResponse = serde_json::from_slice(&body)
-            .map_err(|err| format!("unexpected Jira response: {err}"))?;
-        let fields = issue.fields;
+        };
         let status_name = fields
             .status
             .as_ref()
@@ -1350,6 +1379,33 @@ impl WorkItemSource for JiraSource {
             description,
             comments,
             source_item,
+        }))
+    }
+
+    fn ticket_key_in_title(&self, title: &str) -> Option<String> {
+        title_issue_key(title).map(str::to_string)
+    }
+
+    fn linked_ticket(
+        &self,
+        key: &str,
+    ) -> Result<Option<crate::api::schema::WorkItemLinkedTicketInfo>, String> {
+        if let Some(error) = &self.build_error {
+            return Err(error.clone());
+        }
+        let Some(fields) = self.issue(key, "status,assignee")? else {
+            return Ok(None);
+        };
+        let status = fields.status.map(|status| status.name).unwrap_or_default();
+        let assignee = fields
+            .assignee
+            .map(|person| person.display_name)
+            .filter(|name| !name.is_empty());
+        Ok(Some(crate::api::schema::WorkItemLinkedTicketInfo {
+            source_id: SOURCE_ID.into(),
+            key: key.to_string(),
+            url: self.browse_url(key),
+            tracker_state: tracker_state(&status, assignee.as_deref()),
         }))
     }
 
@@ -1453,6 +1509,23 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[test]
+    fn only_a_key_at_the_start_of_a_title_names_an_issue() {
+        for (title, key) in [
+            ("TECH-12 Fix login", Some("TECH-12")),
+            ("[TECH-12] Fix login", Some("TECH-12")),
+            ("  (OPS2-7): Fix login", Some("OPS2-7")),
+            ("TECH_OPS-3", Some("TECH_OPS-3")),
+            ("Fix login for TECH-12", None),
+            ("tech-12 Fix login", None),
+            ("TECH- Fix login", None),
+            ("TECH-12a Fix login", None),
+            ("2FA-1 Fix login", None),
+        ] {
+            assert_eq!(title_issue_key(title), key, "{title}");
+        }
+    }
+
     fn source() -> JiraSource {
         JiraSource::new(JiraWorkItemsConfig {
             site: "example.atlassian.net".into(),
@@ -1480,6 +1553,7 @@ mod tests {
             updated_at: "2026-09-24T15:51:59.000+0100".into(),
             tracker_state: Some("In Progress · Tony".into()),
             linked_pull_request: None,
+            linked_ticket: None,
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,
             prepare_error: None,

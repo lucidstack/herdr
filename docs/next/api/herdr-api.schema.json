@@ -1495,6 +1495,17 @@
               ],
               "description": "The pull request opened from the branch of the item's workspace, for items that\nare not pull requests themselves."
             },
+            "linked_ticket": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkItemLinkedTicketInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The tracker ticket this item's title names, for items of another source, e.g. the\nJira issue a pull request titled \"[TECH-12] Fix login\" is for."
+            },
             "notice": {
               "type": [
                 "string",
@@ -1581,6 +1592,33 @@
             "url",
             "phase",
             "seen"
+          ],
+          "type": "object"
+        },
+        "WorkItemLinkedTicketInfo": {
+          "description": "A tracker ticket named in the title of an item from another source.",
+          "properties": {
+            "key": {
+              "description": "Ticket key in the tracker's form, e.g. `TECH-123`.",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "Source tracking it, e.g. \"jira\".",
+              "type": "string"
+            },
+            "tracker_state": {
+              "description": "Where the ticket stands in its tracker, e.g. \"In Progress · Ada\".",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "key",
+            "url",
+            "tracker_state"
           ],
           "type": "object"
         },
@@ -12748,6 +12786,17 @@
               ],
               "description": "The pull request opened from the branch of the item's workspace, for items that\nare not pull requests themselves."
             },
+            "linked_ticket": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemLinkedTicketInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The tracker ticket this item's title names, for items of another source, e.g. the\nJira issue a pull request titled \"[TECH-12] Fix login\" is for."
+            },
             "notice": {
               "type": [
                 "string",
@@ -12834,6 +12883,33 @@
             "url",
             "phase",
             "seen"
+          ],
+          "type": "object"
+        },
+        "WorkItemLinkedTicketInfo": {
+          "description": "A tracker ticket named in the title of an item from another source.",
+          "properties": {
+            "key": {
+              "description": "Ticket key in the tracker's form, e.g. `TECH-123`.",
+              "type": "string"
+            },
+            "source_id": {
+              "description": "Source tracking it, e.g. \"jira\".",
+              "type": "string"
+            },
+            "tracker_state": {
+              "description": "Where the ticket stands in its tracker, e.g. \"In Progress · Ada\".",
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "key",
+            "url",
+            "tracker_state"
           ],
           "type": "object"
         },

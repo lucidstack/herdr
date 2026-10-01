@@ -12,6 +12,9 @@ use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemTicke
 /// Scripted source: each poll returns the current `items`.
 #[derive(Default)]
 pub(crate) struct FakeSource {
+    id: &'static str,
+    /// Titles whose first word starts with this prefix name that word as one of its tickets.
+    ticket_prefix: Option<&'static str>,
     pub items: Mutex<Vec<SourceItem>>,
     pub prepare_calls: AtomicUsize,
     /// Plan returned for the "local" choice; `None` makes it unavailable.
@@ -50,7 +53,18 @@ pub(crate) struct FakeSource {
 
 impl FakeSource {
     pub(crate) fn with_items(items: Vec<SourceItem>) -> Arc<Self> {
-        Arc::new(Self {
+        Arc::new(Self::new("fake", None, items))
+    }
+
+    /// A second source, `id`, whose tickets are named by titles starting with `prefix`.
+    pub(crate) fn tracker(id: &'static str, prefix: &'static str) -> Arc<Self> {
+        Arc::new(Self::new(id, Some(prefix), Vec::new()))
+    }
+
+    fn new(id: &'static str, ticket_prefix: Option<&'static str>, items: Vec<SourceItem>) -> Self {
+        Self {
+            id,
+            ticket_prefix,
             items: Mutex::new(items),
             prepare_calls: AtomicUsize::new(0),
             plan: Mutex::new(None),
@@ -69,7 +83,7 @@ impl FakeSource {
             closes_merged_tickets: std::sync::atomic::AtomicBool::new(false),
             work_branch: Mutex::new(None),
             looked_up_branches: Mutex::new(Vec::new()),
-        })
+        }
     }
 
     pub(crate) fn set_items(&self, items: Vec<SourceItem>) {
@@ -95,7 +109,7 @@ pub(crate) fn source_item(id: &str) -> SourceItem {
 
 impl WorkItemSource for FakeSource {
     fn id(&self) -> &str {
-        "fake"
+        self.id
     }
 
     fn label(&self) -> &str {
@@ -108,6 +122,12 @@ impl WorkItemSource for FakeSource {
 
     fn poll(&self) -> Result<Vec<SourceItem>, String> {
         Ok(self.items.lock().expect("fake source lock").clone())
+    }
+
+    fn ticket_key_in_title(&self, title: &str) -> Option<String> {
+        let word = title.split_whitespace().next()?;
+        word.starts_with(self.ticket_prefix?)
+            .then(|| word.to_string())
     }
 
     fn start_reminder(&self, _item: &WorkItem) -> Option<super::source::StartReminder> {

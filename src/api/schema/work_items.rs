@@ -208,6 +208,10 @@ pub struct WorkItemInfo {
     /// are not pull requests themselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_pull_request: Option<WorkItemPullRequestInfo>,
+    /// The tracker ticket this item's title names, for items of another source, e.g. the
+    /// Jira issue a pull request titled "[TECH-12] Fix login" is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_ticket: Option<WorkItemLinkedTicketInfo>,
     /// The item whose linked pull request this item is: shown with that item instead of
     /// on its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,6 +296,18 @@ pub struct WorkItemPullRequestInfo {
     pub is_draft: bool,
     /// One line for the user, e.g. "draft", "awaiting review · checks running", "merged".
     pub status: String,
+}
+
+/// A tracker ticket named in the title of an item from another source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemLinkedTicketInfo {
+    /// Source tracking it, e.g. "jira".
+    pub source_id: String,
+    /// Ticket key in the tracker's form, e.g. `TECH-123`.
+    pub key: String,
+    pub url: String,
+    /// Where the ticket stands in its tracker, e.g. "In Progress · Ada".
+    pub tracker_state: String,
 }
 
 /// How a `Perform` choice ended.

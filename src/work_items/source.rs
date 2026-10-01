@@ -245,6 +245,19 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn pull_request_of(&self, _item: &WorkItem) -> Option<(String, u64)> {
         None
     }
+    /// Pure: the key of one of this source's tickets that `title`, the title of another
+    /// source's item, starts with, e.g. `TECH-12` for "[TECH-12] Fix login".
+    fn ticket_key_in_title(&self, _title: &str) -> Option<String> {
+        None
+    }
+    /// Blocking; background thread only. The status line of the ticket named `key`, for
+    /// the items whose titles name it; `None` when the key does not exist.
+    fn linked_ticket(
+        &self,
+        _key: &str,
+    ) -> Result<Option<crate::api::schema::WorkItemLinkedTicketInfo>, String> {
+        Ok(None)
+    }
     /// Pure: what the tracker asks of you for `item`, whatever Herdr is doing about it.
     /// Newly arrived by default; Herdr only reports `New` until a choice is made.
     fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {

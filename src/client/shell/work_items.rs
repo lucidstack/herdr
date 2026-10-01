@@ -746,9 +746,11 @@ fn repository_home<'a>(
 }
 
 /// Context and title, plus one status line per service the item is on: its own tracker's,
-/// then its linked pull request's.
+/// the ticket its title names, then its linked pull request's.
 fn item_rows(item: &WorkItemInfo) -> u16 {
-    2 + u16::from(item.tracker_state.is_some()) + u16::from(item.linked_pull_request.is_some())
+    2 + u16::from(item.tracker_state.is_some())
+        + u16::from(item.linked_ticket.is_some())
+        + u16::from(item.linked_pull_request.is_some())
 }
 
 /// The mark in front of a status line from `source_id`.
@@ -885,6 +887,13 @@ fn render_item_rows(
                 Style::default().fg(palette.overlay0),
             );
         }
+    }
+    if let Some(ticket) = &item.linked_ticket {
+        status_row(
+            &ticket.source_id,
+            &format!("{} · {}", ticket.key, ticket.tracker_state),
+            Style::default().fg(palette.overlay0),
+        );
     }
     if let Some(pull_request) = &item.linked_pull_request {
         // Amber while it waits on you: a draft to mark ready, or its own inbox event.

@@ -2929,6 +2929,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             tracker_state: None,
             linked_pull_request: None,
+            linked_ticket: None,
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,
             prepare_error: None,

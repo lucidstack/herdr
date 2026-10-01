@@ -179,6 +179,8 @@ impl App {
         }
         self.start_pull_request_lookup(now);
         let revision = self.work_items.revision();
+        // May link tickets already in the inbox, a visible change.
+        self.start_ticket_lookup(now);
         for job_id in self.work_items.job_ids() {
             self.advance_work_item_worktree(job_id, now);
             self.advance_work_item_agent(job_id, now);
@@ -317,6 +319,24 @@ impl App {
                 })
                 .collect();
             send_event(&event_tx, WorkItemsEvent::PullRequestsFound { results });
+        });
+    }
+
+    /// Looks up, on a background thread, the tickets named in item titles.
+    fn start_ticket_lookup(&mut self, now: Instant) {
+        let Some(lookups) = self.work_items.take_due_ticket_lookup(now) else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let results = lookups
+                .into_iter()
+                .map(|(item_key, source, ticket_key)| {
+                    let found = source.linked_ticket(&ticket_key);
+                    (item_key, ticket_key, found)
+                })
+                .collect();
+            send_event(&event_tx, WorkItemsEvent::TicketsFound { results });
         });
     }
 

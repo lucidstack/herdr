@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::api::schema::{
-    WorkItemActionOutcome, WorkItemInfo, WorkItemPhase, WorkItemProvisioningInfo,
-    WorkItemPullRequestInfo,
+    WorkItemActionOutcome, WorkItemInfo, WorkItemLinkedTicketInfo, WorkItemPhase,
+    WorkItemProvisioningInfo, WorkItemPullRequestInfo,
 };
 
 use super::source::{ItemChoices, PreparedItem, SourceItem};
@@ -27,6 +27,9 @@ pub(crate) struct WorkItem {
     /// The pull request opened from the branch of the item's workspace.
     #[serde(default)]
     pub linked_pull_request: Option<WorkItemPullRequestInfo>,
+    /// The tracker ticket the title names, for items of another source.
+    #[serde(default)]
+    pub linked_ticket: Option<WorkItemLinkedTicketInfo>,
     #[serde(default)]
     pub detail: Option<serde_json::Value>,
     #[serde(default)]
@@ -106,6 +109,7 @@ impl WorkItem {
             updated_at: item.updated_at,
             tracker_state: item.tracker_state,
             linked_pull_request: None,
+            linked_ticket: None,
             detail: None,
             summary: None,
             prepare_error: None,
@@ -144,6 +148,7 @@ impl WorkItem {
             updated_at: "0".to_string(),
             tracker_state: None,
             linked_pull_request: None,
+            linked_ticket: None,
             detail: None,
             summary: None,
             prepare_error: None,
@@ -217,6 +222,7 @@ impl WorkItem {
             running_choice_id: self.action_running.clone(),
             action_outcome: self.action_outcome.clone(),
             linked_pull_request: self.linked_pull_request.clone(),
+            linked_ticket: self.linked_ticket.clone(),
             folded_into,
             attention,
         }

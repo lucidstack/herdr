@@ -75,10 +75,73 @@ pub(crate) enum WorkItemsEvent {
             Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String>,
         )>,
     },
+    /// Tickets named in item titles, looked up in their trackers, as
+    /// (item key, ticket key, result).
+    TicketsFound {
+        results: Vec<(
+            String,
+            String,
+            Result<Option<crate::api::schema::WorkItemLinkedTicketInfo>, String>,
+        )>,
+    },
 }
 
 /// How often the pull requests of items' workspace branches are looked up again.
 const PULL_REQUEST_LOOKUP_INTERVAL: Duration = Duration::from_secs(60);
+/// How often tickets named in item titles are looked up again.
+const TICKET_LOOKUP_INTERVAL: Duration = Duration::from_secs(120);
+
+/// When a periodic background lookup runs next, and whether one is running.
+#[derive(Debug)]
+struct LookupSchedule {
+    next: Instant,
+    in_flight: bool,
+    /// Asked for while one ran; the next starts as soon as that one finishes.
+    requested: bool,
+}
+
+impl LookupSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now,
+            in_flight: false,
+            requested: false,
+        }
+    }
+
+    /// When the next one is due, unless one is running.
+    fn deadline(&self) -> Option<Instant> {
+        (!self.in_flight).then_some(self.next)
+    }
+
+    /// As soon as possible: now, or right after the one running.
+    fn request(&mut self, now: Instant) {
+        if self.in_flight {
+            self.requested = true;
+        } else {
+            self.next = self.next.min(now);
+        }
+    }
+
+    /// Whether one is due; if so, the next one after it is `interval` from now. The
+    /// caller marks it in flight once it starts one.
+    fn take_due(&mut self, now: Instant, interval: Duration) -> bool {
+        if self.in_flight || self.next > now {
+            return false;
+        }
+        self.next = now + interval;
+        true
+    }
+
+    fn finish(&mut self, now: Instant, interval: Duration) {
+        self.in_flight = false;
+        self.next = if std::mem::take(&mut self.requested) {
+            now
+        } else {
+            now + interval
+        };
+    }
+}
 
 /// Where an item's pull request is looked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +160,9 @@ pub(crate) type PullRequestLookup = (
     Vec<Arc<dyn WorkItemSource>>,
     Vec<(String, PullRequestTarget)>,
 );
+
+/// A due ticket lookup: (item key, tracker, ticket key) triples.
+pub(crate) type TicketLookup = Vec<(String, Arc<dyn WorkItemSource>, String)>;
 
 /// A review worktree created for an item, remembered so its branch can be cleaned up
 /// when Herdr removes the worktree.
@@ -157,11 +223,10 @@ pub(crate) struct WorkItems {
     focus_requested: bool,
     /// Mapped local clones, reachable from the inbox even without an item.
     repositories: Vec<Repository>,
-    /// When the pull requests of items' workspace branches are looked up next.
-    next_pull_request_lookup: Instant,
-    pull_request_lookup_in_flight: bool,
-    /// A lookup was asked for while one ran; it starts as soon as that one finishes.
-    pull_request_lookup_requested: bool,
+    /// Lookups of the pull requests of items' workspace branches.
+    pull_request_lookup: LookupSchedule,
+    /// Lookups of the tickets named in item titles.
+    ticket_lookup: LookupSchedule,
     /// What needs you now, and since when; worked out by the app from items and agents.
     attention: attention::Tracker,
 }
@@ -259,9 +324,8 @@ impl WorkItems {
             pick_next: PickNextState::default(),
             focus_requested: false,
             repositories: Vec::new(),
-            next_pull_request_lookup: Instant::now(),
-            pull_request_lookup_in_flight: false,
-            pull_request_lookup_requested: false,
+            pull_request_lookup: LookupSchedule::new(Instant::now()),
+            ticket_lookup: LookupSchedule::new(Instant::now()),
             attention: attention::Tracker::default(),
         }
     }
@@ -362,14 +426,19 @@ impl WorkItems {
             .state
             .next_snooze_end()
             .map(|until| Instant::now() + Duration::from_secs(until.saturating_sub(unix_now())));
-        // Only while something could have a pull request.
-        let pull_request_lookup = (!self.pull_request_lookup_in_flight
-            && self
-                .state
+        // Only while something could have a pull request, or names a ticket.
+        let pull_request_lookup = self.pull_request_lookup.deadline().filter(|_| {
+            self.state
                 .items()
                 .iter()
-                .any(|item| self.pull_request_target(item).is_some()))
-        .then_some(self.next_pull_request_lookup);
+                .any(|item| self.pull_request_target(item).is_some())
+        });
+        let ticket_lookup = self.ticket_lookup.deadline().filter(|_| {
+            self.state
+                .items()
+                .iter()
+                .any(|item| self.named_ticket(item).is_some())
+        });
         self.next_poll
             .iter()
             .filter(|(id, _)| !self.polls_in_flight.contains(*id))
@@ -382,6 +451,7 @@ impl WorkItems {
             )
             .chain(snooze_end)
             .chain(pull_request_lookup)
+            .chain(ticket_lookup)
             .min()
     }
 
@@ -453,6 +523,7 @@ impl WorkItems {
                     .into_iter()
                     .collect();
                 self.queue_resolutions();
+                self.request_ticket_lookup_for_new_names(now);
                 if changed {
                     self.changed();
                 }
@@ -497,14 +568,9 @@ impl WorkItems {
             // Handled by the app driver, which owns the response channel.
             WorkItemsEvent::TicketFetchedForAdd { .. } => (false, Vec::new()),
             WorkItemsEvent::PullRequestsFound { results } => {
-                self.pull_request_lookup_in_flight = false;
                 // Something changed while it ran, e.g. another ticket named its branch.
-                self.next_pull_request_lookup =
-                    if std::mem::take(&mut self.pull_request_lookup_requested) {
-                        now
-                    } else {
-                        now + PULL_REQUEST_LOOKUP_INTERVAL
-                    };
+                self.pull_request_lookup
+                    .finish(now, PULL_REQUEST_LOOKUP_INTERVAL);
                 let mut changed = false;
                 for (key, result) in results {
                     let found = match result {
@@ -533,15 +599,56 @@ impl WorkItems {
                 }
                 (changed, Vec::new())
             }
+            WorkItemsEvent::TicketsFound { results } => {
+                self.ticket_lookup.finish(now, TICKET_LOOKUP_INTERVAL);
+                let mut changed = false;
+                for (item_key, ticket_key, result) in results {
+                    let found = match result {
+                        Ok(found) => found,
+                        // Keep what was found last; the next lookup tries again.
+                        Err(error) => {
+                            tracing::warn!(item = %item_key, ticket = %ticket_key, %error, "ticket lookup failed");
+                            continue;
+                        }
+                    };
+                    // The title may have changed while the lookup ran.
+                    let still_named = self
+                        .state
+                        .get(&item_key)
+                        .and_then(|item| self.named_ticket(item))
+                        .is_some_and(|(_, key)| key == ticket_key);
+                    if !still_named {
+                        continue;
+                    }
+                    if let Some(item) = self.state.get_mut(&item_key) {
+                        if item.linked_ticket != found {
+                            item.linked_ticket = found;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    self.changed();
+                }
+                (changed, Vec::new())
+            }
         }
     }
 
     /// Looks pull requests up again as soon as possible: now, or right after the one running.
     fn request_pull_request_lookup(&mut self, now: Instant) {
-        if self.pull_request_lookup_in_flight {
-            self.pull_request_lookup_requested = true;
-        } else {
-            self.next_pull_request_lookup = self.next_pull_request_lookup.min(now);
+        self.pull_request_lookup.request(now);
+    }
+
+    /// Looks tickets up as soon as possible when a new or retitled item names one it is
+    /// not linked to yet, rather than at the next interval.
+    fn request_ticket_lookup_for_new_names(&mut self, now: Instant) {
+        if self.state.items().iter().any(|item| {
+            self.named_ticket(item).is_some_and(|(_, key)| {
+                item.linked_ticket.as_ref().map(|ticket| &ticket.key) != Some(&key)
+            })
+        }) {
+            self.ticket_lookup.request(now);
         }
     }
 
@@ -551,7 +658,10 @@ impl WorkItems {
         &mut self,
         now: Instant,
     ) -> Option<PullRequestLookup> {
-        if self.pull_request_lookup_in_flight || self.next_pull_request_lookup > now {
+        if !self
+            .pull_request_lookup
+            .take_due(now, PULL_REQUEST_LOOKUP_INTERVAL)
+        {
             return None;
         }
         let candidates: Vec<(String, PullRequestTarget)> = self
@@ -560,12 +670,90 @@ impl WorkItems {
             .iter()
             .filter_map(|item| Some((item.key.clone(), self.pull_request_target(item)?)))
             .collect();
-        self.next_pull_request_lookup = now + PULL_REQUEST_LOOKUP_INTERVAL;
         if candidates.is_empty() {
             return None;
         }
-        self.pull_request_lookup_in_flight = true;
+        self.pull_request_lookup.in_flight = true;
         Some((self.sources.clone(), candidates))
+    }
+
+    /// When a ticket lookup is due: the tickets named in item titles that are not in the
+    /// inbox themselves, to ask their trackers about. Tickets in the inbox are linked from
+    /// there right away, and links whose title no longer names a ticket are dropped. Marks
+    /// the lookup in flight.
+    pub(crate) fn take_due_ticket_lookup(&mut self, now: Instant) -> Option<TicketLookup> {
+        if !self.ticket_lookup.take_due(now, TICKET_LOOKUP_INTERVAL) {
+            return None;
+        }
+        let named: Vec<_> = self
+            .state
+            .items()
+            .iter()
+            .map(|item| {
+                let named = self
+                    .named_ticket(item)
+                    .map(|(source, key)| (source.clone(), key));
+                (item.key.clone(), named)
+            })
+            .collect();
+        let mut lookups = Vec::new();
+        let mut changed = false;
+        for (item_key, named) in named {
+            let linked = match named {
+                None => None,
+                Some((source, ticket_key)) => {
+                    let in_inbox = self
+                        .state
+                        .get(&state::item_key(source.id(), &ticket_key))
+                        .and_then(|ticket| {
+                            Some(crate::api::schema::WorkItemLinkedTicketInfo {
+                                source_id: ticket.source_id.clone(),
+                                key: ticket.external_id.clone(),
+                                url: ticket.url.clone(),
+                                tracker_state: ticket.tracker_state.clone()?,
+                            })
+                        });
+                    match in_inbox {
+                        Some(linked) => Some(linked),
+                        None => {
+                            // Keep showing the last lookup of the same ticket until this one ends.
+                            let current = self
+                                .state
+                                .get(&item_key)
+                                .and_then(|item| item.linked_ticket.clone())
+                                .filter(|linked| linked.key == ticket_key);
+                            lookups.push((item_key.clone(), source, ticket_key));
+                            current
+                        }
+                    }
+                }
+            };
+            if let Some(item) = self.state.get_mut(&item_key) {
+                if item.linked_ticket != linked {
+                    item.linked_ticket = linked;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        if lookups.is_empty() {
+            return None;
+        }
+        self.ticket_lookup.in_flight = true;
+        Some(lookups)
+    }
+
+    /// The ticket `item`'s title names, as (tracker, key), when another source tracks it.
+    fn named_ticket(&self, item: &WorkItem) -> Option<(&Arc<dyn WorkItemSource>, String)> {
+        if item.is_pick_next {
+            return None;
+        }
+        self.sources
+            .iter()
+            .filter(|source| source.id() != item.source_id)
+            .find_map(|source| Some((source, source.ticket_key_in_title(&item.title)?)))
     }
 
     /// Where `item`'s pull request is looked for: its workspace's branch, or, without a
@@ -724,6 +912,7 @@ impl WorkItems {
     pub(crate) fn add_ticket(&mut self, source_id: &str, item: SourceItem) -> WorkItem {
         let (item, inserted) = self.state.insert_manual(source_id, item);
         if inserted {
+            self.request_ticket_lookup_for_new_names(Instant::now());
             self.changed();
         }
         item
@@ -1496,5 +1685,125 @@ projects = [
             .take_due_pull_request_lookup(now)
             .expect("the asked-for lookup starts at once");
         assert!(candidates.iter().any(|(key, _)| key == "fake:b"));
+    }
+
+    fn poll_source(items: &mut WorkItems, source_id: &str, result: Vec<SourceItem>) {
+        items.apply_event(
+            WorkItemsEvent::Polled {
+                source_id: source_id.into(),
+                result: Ok(result),
+            },
+            Instant::now(),
+        );
+    }
+
+    fn titled(id: &str, title: &str) -> SourceItem {
+        SourceItem {
+            title: title.into(),
+            ..source_item(id)
+        }
+    }
+
+    fn with_tracker() -> WorkItems {
+        WorkItems::for_test(
+            vec![
+                FakeSource::with_items(Vec::new()),
+                FakeSource::tracker("tracker", "T-"),
+            ],
+            Instant::now(),
+        )
+    }
+
+    fn linked(key: &str) -> crate::api::schema::WorkItemLinkedTicketInfo {
+        crate::api::schema::WorkItemLinkedTicketInfo {
+            source_id: "tracker".into(),
+            key: key.into(),
+            url: format!("https://example.test/{key}"),
+            tracker_state: "In Progress · Ada".into(),
+        }
+    }
+
+    fn linked_ticket(items: &WorkItems, key: &str) -> Option<String> {
+        items
+            .item_info(key)
+            .and_then(|info| info.linked_ticket)
+            .map(|ticket| format!("{} {} {}", ticket.key, ticket.url, ticket.tracker_state))
+    }
+
+    #[test]
+    fn a_title_naming_a_ticket_in_the_inbox_links_it_without_asking_its_tracker() {
+        let mut items = with_tracker();
+        let ticket = SourceItem {
+            tracker_state: Some("In Progress · Ada".into()),
+            ..source_item("T-1")
+        };
+        poll_source(&mut items, "tracker", vec![ticket]);
+        poll_source(&mut items, "fake", vec![titled("pr", "T-1 Fix login")]);
+
+        assert!(items.take_due_ticket_lookup(Instant::now()).is_none());
+        assert_eq!(
+            linked_ticket(&items, "fake:pr").as_deref(),
+            Some("T-1 https://example.test/T-1 In Progress · Ada")
+        );
+    }
+
+    #[test]
+    fn a_title_naming_a_ticket_outside_the_inbox_links_it_once_its_tracker_answers() {
+        let mut items = with_tracker();
+        poll_source(&mut items, "fake", vec![titled("pr", "T-2 Fix login")]);
+        let now = Instant::now();
+
+        let lookups = items.take_due_ticket_lookup(now).expect("lookup due");
+        let asked: Vec<(&str, &str, &str)> = lookups
+            .iter()
+            .map(|(item, source, key)| (item.as_str(), source.id(), key.as_str()))
+            .collect();
+        assert_eq!(asked, [("fake:pr", "tracker", "T-2")]);
+        items.apply_event(
+            WorkItemsEvent::TicketsFound {
+                results: vec![("fake:pr".into(), "T-2".into(), Ok(Some(linked("T-2"))))],
+            },
+            now,
+        );
+        assert_eq!(
+            linked_ticket(&items, "fake:pr").as_deref(),
+            Some("T-2 https://example.test/T-2 In Progress · Ada")
+        );
+    }
+
+    #[test]
+    fn an_answer_for_a_ticket_the_title_stopped_naming_while_it_ran_is_dropped() {
+        let mut items = with_tracker();
+        poll_source(&mut items, "fake", vec![titled("pr", "T-2 Fix login")]);
+        let now = Instant::now();
+        items.take_due_ticket_lookup(now).expect("lookup due");
+
+        poll_source(&mut items, "fake", vec![titled("pr", "Fix login")]);
+        items.apply_event(
+            WorkItemsEvent::TicketsFound {
+                results: vec![("fake:pr".into(), "T-2".into(), Ok(Some(linked("T-2"))))],
+            },
+            now,
+        );
+        assert_eq!(linked_ticket(&items, "fake:pr"), None);
+    }
+
+    #[test]
+    fn a_retitled_item_loses_its_link_at_the_next_lookup() {
+        let mut items = with_tracker();
+        poll_source(&mut items, "fake", vec![titled("pr", "T-2 Fix login")]);
+        let now = Instant::now();
+        items.take_due_ticket_lookup(now).expect("lookup due");
+        items.apply_event(
+            WorkItemsEvent::TicketsFound {
+                results: vec![("fake:pr".into(), "T-2".into(), Ok(Some(linked("T-2"))))],
+            },
+            now,
+        );
+
+        poll_source(&mut items, "fake", vec![titled("pr", "Fix login")]);
+        let later = now + TICKET_LOOKUP_INTERVAL;
+        assert!(items.take_due_ticket_lookup(later).is_none());
+        assert_eq!(linked_ticket(&items, "fake:pr"), None);
     }
 }
