@@ -1553,6 +1553,7 @@ mod tests {
             updated_at: "2026-09-24T15:51:59.000+0100".into(),
             tracker_state: Some("In Progress · Tony".into()),
             linked_pull_request: None,
+            own_pull_request: None,
             linked_ticket: None,
             detail: detail.map(|detail| serde_json::to_value(detail).unwrap()),
             summary: None,

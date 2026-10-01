@@ -41,6 +41,9 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
     if let Some(state) = &item.tracker_state {
         heading.push_str(&format!(" · {state}"));
     }
+    if let Some(pull_request) = &item.own_pull_request {
+        heading.push_str(&format!(" · {}", pull_request.status));
+    }
     if let Some(author) = &item.author {
         heading.push_str(&format!(" · @{author}"));
     }

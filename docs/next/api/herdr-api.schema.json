@@ -1512,6 +1512,17 @@
                 "null"
               ]
             },
+            "own_pull_request": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkItemPullRequestInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the pull request this item is stands, for items that are pull requests\nthemselves, e.g. a review request: draft, awaiting review, approved, merged."
+            },
             "phase": {
               "$ref": "#/schemas/event/$defs/WorkItemPhase"
             },
@@ -1666,7 +1677,7 @@
           "type": "object"
         },
         "WorkItemPullRequestInfo": {
-          "description": "A pull request found for the branch an item is worked on.",
+          "description": "A pull request's state: one found for the branch an item is worked on, or the one an\nitem is.",
           "properties": {
             "is_draft": {
               "description": "Open and still a draft: it waits for you to mark it ready for review.",
@@ -12803,6 +12814,17 @@
                 "null"
               ]
             },
+            "own_pull_request": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemPullRequestInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the pull request this item is stands, for items that are pull requests\nthemselves, e.g. a review request: draft, awaiting review, approved, merged."
+            },
             "phase": {
               "$ref": "#/schemas/success_response/$defs/WorkItemPhase"
             },
@@ -12976,7 +12998,7 @@
           "type": "object"
         },
         "WorkItemPullRequestInfo": {
-          "description": "A pull request found for the branch an item is worked on.",
+          "description": "A pull request's state: one found for the branch an item is worked on, or the one an\nitem is.",
           "properties": {
             "is_draft": {
               "description": "Open and still a draft: it waits for you to mark it ready for review.",

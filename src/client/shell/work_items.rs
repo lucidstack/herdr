@@ -566,29 +566,17 @@ pub(super) fn render_items_section<'a>(
         y += 1;
     }
     for (index, item) in visible.iter().copied().enumerate().skip(scroll) {
-        let nested = item.workspace_id.as_deref().and_then(|workspace_id| {
+        let workspace = item.workspace_id.as_deref().and_then(|workspace_id| {
             snapshot
                 .workspaces
                 .iter()
-                .enumerate()
-                .find(|(_, workspace)| workspace.workspace_id == workspace_id)
+                .find(|workspace| workspace.workspace_id == workspace_id)
         });
-        let nested_rows = nested.map(|(_, workspace)| {
-            super::render::sidebar::workspace_rows(
-                workspace,
-                workspace.agent_status,
-                true,
-                &config.spaces,
-            )
-        });
-        let nested_height = nested_rows
-            .as_ref()
-            .map_or(0, |rows| rows.len().max(1) as u16);
         let remaining = visible.len() - index;
         let item_height = item_rows(item);
         // Keep one row for the "more" marker unless this is the last item.
         let reserve = u16::from(remaining > 1);
-        if y.saturating_add(item_height + nested_height + reserve) > items_limit {
+        if y.saturating_add(item_height + reserve) > items_limit {
             let row_y = y.min(items_limit.saturating_sub(1));
             hits.inbox.more_below = Rect::new(area.x, row_y, width, 1);
             put_text(
@@ -609,6 +597,12 @@ pub(super) fn render_items_section<'a>(
             item_rect,
             item,
             folding_hosts.contains(item.item_id.as_str()),
+            workspace.map(|workspace| {
+                (
+                    status_icon(workspace.agent_status, config.status_indicators),
+                    status_color(workspace.agent_status, palette),
+                )
+            }),
             focused_workspace_id,
             view.spinner_frame,
             config.service_icons,
@@ -619,40 +613,10 @@ pub(super) fn render_items_section<'a>(
             item_id: item.item_id.clone(),
         });
         y += item_height;
-        if let (Some((workspace_index, workspace)), Some(rows)) = (nested, nested_rows) {
-            let rect = Rect::new(area.x, y, area.width.saturating_sub(1), nested_height);
-            let selected = false;
-            if workspace.focused {
-                buffer.set_style(rect, Style::default().bg(palette.active_row_bg));
-            }
-            super::render::sidebar::render_workspace_rows(
-                buffer,
-                rect,
-                workspace.agent_status,
-                config.status_indicators,
-                &WorkspaceEntry {
-                    index: workspace_index,
-                    indented: true,
-                    last_child: true,
-                },
-                rows,
-                workspace.focused,
-                selected,
-                false,
-                false,
-                palette,
-            );
-            hits.workspaces.push(WorkspaceHit {
-                rect,
-                endpoint_id: endpoint_id.clone(),
-                workspace_id: workspace.workspace_id.clone(),
-                indented: true,
-                group_toggle: None,
-            });
-            if let Some(workspace_id) = item.workspace_id.as_deref() {
-                nested_workspace_ids.push(workspace_id);
-            }
-            y += nested_height;
+        // The item stands for its workspace: a click on it focuses the workspace, and its
+        // agent's status shows on the item's first row.
+        if let Some(workspace) = workspace {
+            nested_workspace_ids.push(workspace.workspace_id.as_str());
         }
     }
     if !repositories.is_empty() && y < area.bottom() {
@@ -894,10 +858,12 @@ fn repository_home<'a>(
         .find(|(_, workspace)| workspace.workspace_id == workspace_id)
 }
 
-/// Context and title, plus one status line per service the item is on: its own tracker's,
-/// the ticket its title names, then its linked pull request's.
+/// Context and title, plus one status line per service the item is on: its own tracker's
+/// or, for a pull request, its own state; the ticket its title names; then its linked pull
+/// request's.
 fn item_rows(item: &WorkItemInfo) -> u16 {
     2 + u16::from(item.tracker_state.is_some())
+        + u16::from(item.own_pull_request.is_some())
         + u16::from(item.linked_ticket.is_some())
         + u16::from(item.linked_pull_request.is_some())
 }
@@ -921,6 +887,7 @@ fn render_item_rows(
     rect: Rect,
     item: &WorkItemInfo,
     has_folded: bool,
+    agent: Option<(&str, ratatui::style::Color)>,
     focused_workspace_id: Option<&str>,
     spinner_frame: usize,
     icons: crate::config::ServiceIcons,
@@ -953,7 +920,8 @@ fn render_item_rows(
     } else if provisioning_failed(item) {
         Some(("✗", palette.red))
     } else {
-        None
+        // The workspace's agent, the way the spaces list shows it.
+        agent
     };
     let status_width = u16::from(status.is_some()) * 2;
     let context_style = if item.seen {
@@ -1036,6 +1004,14 @@ fn render_item_rows(
                 Style::default().fg(palette.overlay0),
             );
         }
+    }
+    // The item is the pull request: its number is in the context row already.
+    if let Some(pull_request) = &item.own_pull_request {
+        status_row(
+            &pull_request.source_id,
+            &pull_request.status,
+            Style::default().fg(palette.overlay0),
+        );
     }
     if let Some(ticket) = &item.linked_ticket {
         status_row(

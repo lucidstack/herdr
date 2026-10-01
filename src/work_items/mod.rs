@@ -68,12 +68,14 @@ pub(crate) enum WorkItemsEvent {
         result: Result<Box<TicketDetail>, String>,
         respond_to: std::sync::mpsc::Sender<String>,
     },
-    /// Pull requests looked up for items' workspace branches, per item key.
+    /// Pull requests looked up for items' workspace branches, per item key, and the state
+    /// of pull request items' own pull requests, per item key, for those that could be read.
     PullRequestsFound {
         results: Vec<(
             String,
             Result<Option<crate::api::schema::WorkItemPullRequestInfo>, String>,
         )>,
+        own: Vec<(String, crate::api::schema::WorkItemPullRequestInfo)>,
     },
     /// Tickets named in item titles, looked up in their trackers, as
     /// (item key, ticket key, result).
@@ -155,11 +157,25 @@ pub(crate) enum PullRequestTarget {
     },
 }
 
-/// A due pull request lookup: the sources to ask, and (item key, target) pairs.
-pub(crate) type PullRequestLookup = (
-    Vec<Arc<dyn WorkItemSource>>,
-    Vec<(String, PullRequestTarget)>,
-);
+/// A due pull request lookup.
+pub(crate) struct PullRequestLookup {
+    /// The sources to ask about branches.
+    pub sources: Vec<Arc<dyn WorkItemSource>>,
+    /// (item key, target) pairs whose branch's pull request is looked for.
+    pub branches: Vec<(String, PullRequestTarget)>,
+    /// Pull request items shown on their own, per hosting source: the item keys and, in the
+    /// same order, their (repository, number).
+    pub own: Vec<OwnPullRequestLookup>,
+}
+
+pub(crate) struct OwnPullRequestLookup {
+    pub source: Arc<dyn WorkItemSource>,
+    pub keys: Vec<String>,
+    pub pulls: Vec<(String, u64)>,
+}
+
+/// The source hosting the pull request an item is, and its (repository, number).
+type OwnPullRequestTarget<'a> = (&'a Arc<dyn WorkItemSource>, (String, u64));
 
 /// A due ticket lookup: (item key, tracker, ticket key) triples.
 pub(crate) type TicketLookup = Vec<(String, Arc<dyn WorkItemSource>, String)>;
@@ -524,6 +540,15 @@ impl WorkItems {
                     .collect();
                 self.queue_resolutions();
                 self.request_ticket_lookup_for_new_names(now);
+                // A pull request item has no state to show until it is looked up.
+                let hosts = self.pull_request_hosts();
+                if self.state.items().iter().any(|item| {
+                    item.source_id == source_id
+                        && item.own_pull_request.is_none()
+                        && self.own_pull_request_target(item, &hosts).is_some()
+                }) {
+                    self.request_pull_request_lookup(now);
+                }
                 if changed {
                     self.changed();
                 }
@@ -567,7 +592,7 @@ impl WorkItems {
             }
             // Handled by the app driver, which owns the response channel.
             WorkItemsEvent::TicketFetchedForAdd { .. } => (false, Vec::new()),
-            WorkItemsEvent::PullRequestsFound { results } => {
+            WorkItemsEvent::PullRequestsFound { results, own } => {
                 // Something changed while it ran, e.g. another ticket named its branch.
                 self.pull_request_lookup
                     .finish(now, PULL_REQUEST_LOOKUP_INTERVAL);
@@ -590,6 +615,23 @@ impl WorkItems {
                         let found = found.filter(|_| still_linkable);
                         if item.linked_pull_request != found {
                             item.linked_pull_request = found;
+                            changed = true;
+                        }
+                    }
+                }
+                for (key, found) in own {
+                    let Some(item) = self.state.get(&key) else {
+                        continue;
+                    };
+                    let is_it = self
+                        .source(&item.source_id)
+                        .and_then(|source| source.pull_request_of(item))
+                        .is_some_and(|(repo, number)| {
+                            repo.eq_ignore_ascii_case(&found.repo) && number == found.number
+                        });
+                    if let Some(item) = self.state.get_mut(&key).filter(|_| is_it) {
+                        if item.own_pull_request.as_ref() != Some(&found) {
+                            item.own_pull_request = Some(found);
                             changed = true;
                         }
                     }
@@ -652,8 +694,8 @@ impl WorkItems {
         }
     }
 
-    /// When a lookup is due: the sources to ask and the items to look up, with where.
-    /// Marks the lookup in flight.
+    /// When a lookup is due: the sources to ask and the items to look up, with where, plus
+    /// the pull request items shown on their own. Marks the lookup in flight.
     pub(crate) fn take_due_pull_request_lookup(
         &mut self,
         now: Instant,
@@ -664,17 +706,61 @@ impl WorkItems {
         {
             return None;
         }
-        let candidates: Vec<(String, PullRequestTarget)> = self
+        let branches: Vec<(String, PullRequestTarget)> = self
             .state
             .items()
             .iter()
             .filter_map(|item| Some((item.key.clone(), self.pull_request_target(item)?)))
             .collect();
-        if candidates.is_empty() {
+        let hosts = self.pull_request_hosts();
+        let mut own: Vec<OwnPullRequestLookup> = Vec::new();
+        for item in self.state.items() {
+            let Some((source, pull)) = self.own_pull_request_target(item, &hosts) else {
+                continue;
+            };
+            match own
+                .iter_mut()
+                .find(|lookup| lookup.source.id() == source.id())
+            {
+                Some(lookup) => {
+                    lookup.keys.push(item.key.clone());
+                    lookup.pulls.push(pull);
+                }
+                None => own.push(OwnPullRequestLookup {
+                    source: source.clone(),
+                    keys: vec![item.key.clone()],
+                    pulls: vec![pull],
+                }),
+            }
+        }
+        if branches.is_empty() && own.is_empty() {
             return None;
         }
         self.pull_request_lookup.in_flight = true;
-        Some((self.sources.clone(), candidates))
+        Some(PullRequestLookup {
+            sources: self.sources.clone(),
+            branches,
+            own,
+        })
+    }
+
+    /// The source hosting the pull request `item` is, and its (repository, number), when the
+    /// item shows that pull request's state itself: not hidden, not "Pick next", and not
+    /// folded into the item it was opened for, which shows it as its linked pull request.
+    fn own_pull_request_target(
+        &self,
+        item: &WorkItem,
+        hosts: &HashMap<(String, u64), String>,
+    ) -> Option<OwnPullRequestTarget<'_>> {
+        if item.is_pick_next || item.dismissed || item.snoozed_until.is_some() {
+            return None;
+        }
+        let source = self.source(&item.source_id)?;
+        let pull = source.pull_request_of(item)?;
+        if self.folded_into(item, hosts).is_some() {
+            return None;
+        }
+        Some((source, pull))
     }
 
     /// When a ticket lookup is due: the tickets named in item titles that are not in the
@@ -1677,14 +1763,80 @@ projects = [
         items.apply_event(
             WorkItemsEvent::PullRequestsFound {
                 results: vec![("fake:a".into(), Ok(None))],
+                own: Vec::new(),
             },
             now,
         );
 
-        let (_, candidates) = items
+        let lookup = items
             .take_due_pull_request_lookup(now)
             .expect("the asked-for lookup starts at once");
-        assert!(candidates.iter().any(|(key, _)| key == "fake:b"));
+        assert!(lookup.branches.iter().any(|(key, _)| key == "fake:b"));
+    }
+
+    #[test]
+    fn a_pull_request_item_shows_its_own_state_once_looked_up() {
+        let source = FakeSource::with_items(Vec::new());
+        *source.pull_request_prefix.lock().unwrap() = Some("pr:".into());
+        *source.pull_request_status.lock().unwrap() = Some("approved · CI failing".into());
+        let mut items = WorkItems::for_test(vec![source], Instant::now());
+        poll(&mut items, &["pr:5", "ticket"]);
+        let now = Instant::now();
+
+        let lookup = items
+            .take_due_pull_request_lookup(now)
+            .expect("a pull request item has a state to look up");
+        let [own] = lookup.own.as_slice() else {
+            panic!("one source hosts the pull request");
+        };
+        assert_eq!(own.keys, vec!["fake:pr:5".to_string()]);
+        assert_eq!(own.pulls, vec![("o/r".to_string(), 5)]);
+        let found = own.source.pull_request_statuses(&own.pulls).unwrap();
+        let own = own
+            .keys
+            .iter()
+            .cloned()
+            .zip(found)
+            .filter_map(|(key, status)| Some((key, status?)))
+            .collect();
+        items.apply_event(
+            WorkItemsEvent::PullRequestsFound {
+                results: Vec::new(),
+                own,
+            },
+            now,
+        );
+
+        let pull = items.item_info("fake:pr:5").expect("item");
+        assert_eq!(
+            pull.own_pull_request.map(|pull| pull.status).as_deref(),
+            Some("approved · CI failing")
+        );
+    }
+
+    #[test]
+    fn a_pull_request_item_without_a_state_to_show_keeps_the_lookup_on_its_interval() {
+        let source = FakeSource::with_items(Vec::new());
+        *source.pull_request_prefix.lock().unwrap() = Some("pr:".into());
+        // A ticket whose branch is looked up gives every round something to do.
+        *source.work_branch.lock().unwrap() = Some("ar/work".into());
+        let mut items = WorkItems::for_test(vec![source], Instant::now());
+        poll(&mut items, &["pr:5", "ticket"]);
+        items.hide("fake:pr:5", None).expect("item");
+        let now = Instant::now();
+        // The round due at start runs and finishes, scheduling the next a minute out.
+        assert!(items.take_due_pull_request_lookup(now).is_some());
+        items.apply_event(
+            WorkItemsEvent::PullRequestsFound {
+                results: Vec::new(),
+                own: Vec::new(),
+            },
+            now,
+        );
+
+        // Hidden, it is never looked up, so it must not pull the next round forward.
+        poll(&mut items, &["pr:5", "ticket"]);
+        assert!(items.take_due_pull_request_lookup(Instant::now()).is_none());
     }
 
     fn poll_source(items: &mut WorkItems, source_id: &str, result: Vec<SourceItem>) {

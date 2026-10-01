@@ -208,6 +208,10 @@ pub struct WorkItemInfo {
     /// are not pull requests themselves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_pull_request: Option<WorkItemPullRequestInfo>,
+    /// Where the pull request this item is stands, for items that are pull requests
+    /// themselves, e.g. a review request: draft, awaiting review, approved, merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_pull_request: Option<WorkItemPullRequestInfo>,
     /// The tracker ticket this item's title names, for items of another source, e.g. the
     /// Jira issue a pull request titled "[TECH-12] Fix login" is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,7 +287,8 @@ pub struct AgentAttentionInfo {
     pub attention: Option<AttentionInfo>,
 }
 
-/// A pull request found for the branch an item is worked on.
+/// A pull request's state: one found for the branch an item is worked on, or the one an
+/// item is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItemPullRequestInfo {
     /// Source hosting it, e.g. "github".

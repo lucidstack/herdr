@@ -267,11 +267,17 @@ impl App {
         (changed, notices)
     }
 
-    /// Looks up, on a background thread, the pull request of each item's workspace branch.
+    /// Looks up, on a background thread, the pull request of each item's workspace branch
+    /// and the state of each pull request item's own pull request.
     fn start_pull_request_lookup(&mut self, now: Instant) {
-        let Some((sources, candidates)) = self.work_items.take_due_pull_request_lookup(now) else {
+        let Some(lookup) = self.work_items.take_due_pull_request_lookup(now) else {
             return;
         };
+        let crate::work_items::PullRequestLookup {
+            sources,
+            branches,
+            own,
+        } = lookup;
         enum Where {
             Checkout {
                 checkout: std::path::PathBuf,
@@ -282,7 +288,7 @@ impl App {
                 branch: String,
             },
         }
-        let lookups: Vec<(String, Where)> = candidates
+        let lookups: Vec<(String, Where)> = branches
             .into_iter()
             .filter_map(|(key, target)| {
                 let place = match target {
@@ -318,7 +324,30 @@ impl App {
                     (key, found)
                 })
                 .collect();
-            send_event(&event_tx, WorkItemsEvent::PullRequestsFound { results });
+            let mut found_own = Vec::new();
+            for own in own {
+                match own.source.pull_request_statuses(&own.pulls) {
+                    Ok(statuses) => found_own.extend(
+                        own.keys
+                            .into_iter()
+                            .zip(statuses)
+                            .filter_map(|(key, status)| Some((key, status?))),
+                    ),
+                    // Keep what was found last; the next lookup tries again.
+                    Err(error) => tracing::warn!(
+                        source = own.source.id(),
+                        %error,
+                        "pull request status lookup failed"
+                    ),
+                }
+            }
+            send_event(
+                &event_tx,
+                WorkItemsEvent::PullRequestsFound {
+                    results,
+                    own: found_own,
+                },
+            );
         });
     }
 

@@ -245,6 +245,14 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn pull_request_of(&self, _item: &WorkItem) -> Option<(String, u64)> {
         None
     }
+    /// Blocking; background thread only. Where each of `pulls`, (repository, number) pairs
+    /// from `pull_request_of`, stands now, in order; `None` for one that could not be read.
+    fn pull_request_statuses(
+        &self,
+        pulls: &[(String, u64)],
+    ) -> Result<Vec<Option<crate::api::schema::WorkItemPullRequestInfo>>, String> {
+        Ok(vec![None; pulls.len()])
+    }
     /// Pure: the key of one of this source's tickets that `title`, the title of another
     /// source's item, starts with, e.g. `TECH-12` for "[TECH-12] Fix login".
     fn ticket_key_in_title(&self, _title: &str) -> Option<String> {

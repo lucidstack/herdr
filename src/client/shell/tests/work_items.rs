@@ -50,6 +50,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         running_choice_id: None,
         action_outcome: None,
         linked_pull_request: None,
+        own_pull_request: None,
         linked_ticket: None,
         folded_into: None,
         attention: None,
@@ -170,29 +171,84 @@ fn unseen_item_renders_in_the_inbox() {
 }
 
 #[test]
-fn owned_workspace_nests_under_its_item_only() {
+fn item_stands_for_its_workspace_with_the_agent_status_on_its_first_row() {
     let mut owned = item("7");
     owned.workspace_id = Some("ws_2".into());
     owned.phase = WorkItemPhase::Local;
-    let mut state = shell_with(vec![owned]);
-    let text = screen_text(&mut state);
-    assert_eq!(text.matches("review-space").count(), 1, "{text}");
-    let item_row = text
-        .lines()
-        .position(|line| line.contains("o/r #7"))
-        .expect("item row");
-    let workspace_row = text
-        .lines()
-        .position(|line| line.contains("review-space"))
-        .expect("workspace row");
-    let spaces_row = text
-        .lines()
-        .position(|line| line.contains(" spaces"))
-        .expect("spaces header");
-    assert!(
-        item_row < workspace_row && workspace_row < spaces_row,
-        "{text}"
+    let mut snapshot = two_workspace_snapshot();
+    snapshot.workspaces[1].agent_status = crate::api::schema::AgentStatus::Blocked;
+    let config = ClientShellConfig::from_config(&Config::default());
+    let expected = (
+        crate::client::shell::status_icon(
+            crate::api::schema::AgentStatus::Blocked,
+            config.status_indicators,
+        ),
+        crate::client::shell::status_color(
+            crate::api::schema::AgentStatus::Blocked,
+            &config.palette,
+        ),
     );
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot));
+    state.set_pane_surface(surface());
+    state.set_endpoint_work_items(&ClientEndpointId::Local, projection(1, vec![owned]));
+
+    let frame = state.compose(106, 30).expect("frame");
+    let text = frame_rows(&frame).join("\n");
+    // Neither nested under the item nor in the spaces list.
+    assert!(!text.contains("review-space"), "{text}");
+    let rect = state.hits.work_items[0].rect;
+    let buffer = frame.to_ratatui_buffer().expect("buffer");
+    let cell = buffer
+        .cell((rect.right().saturating_sub(2), rect.y))
+        .expect("status cell");
+    assert_eq!((cell.symbol(), cell.fg), expected, "{text}");
+}
+
+#[test]
+fn pull_request_item_shows_its_own_state_on_a_line_of_its_own() {
+    let mut pull = item("8");
+    pull.own_pull_request = Some(crate::api::schema::WorkItemPullRequestInfo {
+        source_id: "github".into(),
+        repo: "o/r".into(),
+        number: 8,
+        url: "https://github.com/o/r/pull/8".into(),
+        is_draft: false,
+        status: "approved · CI failing".into(),
+    });
+    let mut state = shell_with(vec![pull, item("9")]);
+    state.compose(106, 30).expect("frame");
+    assert_eq!(state.hits.work_items[0].rect.height, 3);
+    let text = screen_text(&mut state);
+    let lines: Vec<&str> = text.lines().collect();
+    let title_row = lines
+        .iter()
+        .position(|line| line.contains("Pull request 8"))
+        .expect("title drawn");
+    // The sidebar truncates the rest of the line.
+    assert!(lines[title_row + 1].contains("gh approved · CI"), "{text}");
+}
+
+#[test]
+fn pull_request_item_dialog_heading_says_where_it_stands() {
+    let mut pull = item("8");
+    pull.own_pull_request = Some(crate::api::schema::WorkItemPullRequestInfo {
+        source_id: "github".into(),
+        repo: "o/r".into(),
+        number: 8,
+        url: "https://github.com/o/r/pull/8".into(),
+        is_draft: true,
+        status: "draft".into(),
+    });
+    let mut state = shell_with(vec![pull]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::WorkItem(_))
+    ));
+    let text = screen_text(&mut state);
+    assert!(text.contains("o/r #8 · draft · @alice"), "{text}");
 }
 
 #[test]

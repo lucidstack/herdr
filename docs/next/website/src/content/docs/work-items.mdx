@@ -44,6 +44,10 @@ assigned = ""
 mentioned = "is:open mentions:@me"
 ```
 
+### Pull request state
+
+Every pull request in the inbox shows where it stands on a line of its own, looked up every minute: `gh draft`, `gh awaiting review`, `gh changes requested`, `gh approved`, `gh merged` or `gh closed`, followed by `· CI failing` or `· checks running` while checks fail or run. This includes items marked **✓** that no longer need you but still have a workspace. Without required reviews, GitHub records no review decision, so the latest reviews decide: any reviewer still asking for changes reads as changes requested, and at least one approval otherwise reads as approved. Pull requests shown with the ticket they were opened for use that ticket's line instead.
+
 ### Branches
 
 - **Review requests** get a local branch `review/pr-<number>` from the pull request head. A branch you kept from an earlier review is continued on `review/pr-<number>-2`.
@@ -140,7 +144,7 @@ When a pull request's title starts with a Jira issue key, bare or in brackets (`
 ## Using the inbox
 
 - **●** marks a new item, **·** one you have seen, and **✓** one that no longer needs you but still has a workspace. A spinner means Herdr is waiting: for you to finish on GitHub, or for a workspace to be prepared.
-- **Click** an item to choose what to do. The dialog highlights a sensible default; use the arrow keys and Enter, or click a choice. Once an item has a workspace, clicking the item goes to it, and the workspace is listed under its item rather than in the spaces list.
+- **Click** an item to choose what to do. The dialog highlights a sensible default; use the arrow keys and Enter, or click a choice. Once an item has a workspace, clicking the item goes to it. The item stands for its workspace: its agent's status shows at the right end of its first row, and the workspace is not listed again in the spaces list.
 - While a workspace is being prepared, the dialog shows each step: the worktree, then the agent brief. The brief counts as delivered only once the agent starts working. If the agent first asks you something, such as whether to trust the folder, the brief waits for your answer.
 - **Right-click** an item for what to do next. The menu leads with the item's likely next steps, its default first, such as **Squash and merge** or **Move APP-7 to Done**, with **More choices...** for the rest; the workspace an item already has is not listed, since a click goes there. Then the item opens in the browser, each link naming where it goes (**Open APP-7 in Jira**, **Open #12 on GitHub**). Then you can **link it to the current workspace** when you already started the work somewhere Herdr did not detect, snooze it for an hour or a day, dismiss it or show it again. Closing the workspace or removing its worktree comes last. Closing a linked workspace unlinks the item again.
 - A dismissed item stays hidden until it is requested again. A snoozed item comes back as new when the snooze ends, even across restarts.

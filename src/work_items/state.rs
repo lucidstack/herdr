@@ -27,6 +27,10 @@ pub(crate) struct WorkItem {
     /// The pull request opened from the branch of the item's workspace.
     #[serde(default)]
     pub linked_pull_request: Option<WorkItemPullRequestInfo>,
+    /// Where the pull request this item is stands, as last looked up, for items that are
+    /// pull requests themselves.
+    #[serde(default)]
+    pub own_pull_request: Option<WorkItemPullRequestInfo>,
     /// The tracker ticket the title names, for items of another source.
     #[serde(default)]
     pub linked_ticket: Option<WorkItemLinkedTicketInfo>,
@@ -109,6 +113,7 @@ impl WorkItem {
             updated_at: item.updated_at,
             tracker_state: item.tracker_state,
             linked_pull_request: None,
+            own_pull_request: None,
             linked_ticket: None,
             detail: None,
             summary: None,
@@ -148,6 +153,7 @@ impl WorkItem {
             updated_at: "0".to_string(),
             tracker_state: None,
             linked_pull_request: None,
+            own_pull_request: None,
             linked_ticket: None,
             detail: None,
             summary: None,
@@ -222,6 +228,7 @@ impl WorkItem {
             running_choice_id: self.action_running.clone(),
             action_outcome: self.action_outcome.clone(),
             linked_pull_request: self.linked_pull_request.clone(),
+            own_pull_request: self.own_pull_request.clone(),
             linked_ticket: self.linked_ticket.clone(),
             folded_into,
             attention,

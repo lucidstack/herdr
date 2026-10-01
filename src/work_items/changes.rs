@@ -112,6 +112,7 @@ mod tests {
             running_choice_id: None,
             action_outcome: None,
             linked_pull_request: None,
+            own_pull_request: None,
             linked_ticket: None,
             folded_into: None,
             attention: None,

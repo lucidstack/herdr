@@ -49,6 +49,9 @@ pub(crate) struct FakeSource {
     pub work_branch: Mutex<Option<String>>,
     /// Every branch `find_pull_request` was asked about, in call order.
     pub looked_up_branches: Mutex<Vec<String>>,
+    /// Status `pull_request_statuses` reports for every pull request asked about; `None`
+    /// means none could be read.
+    pub pull_request_status: Mutex<Option<String>>,
 }
 
 impl FakeSource {
@@ -83,6 +86,7 @@ impl FakeSource {
             closes_merged_tickets: std::sync::atomic::AtomicBool::new(false),
             work_branch: Mutex::new(None),
             looked_up_branches: Mutex::new(Vec::new()),
+            pull_request_status: Mutex::new(None),
         }
     }
 
@@ -327,5 +331,31 @@ impl WorkItemSource for FakeSource {
             .clone()?;
         let number = item.external_id.strip_prefix(&prefix)?.parse().ok()?;
         Some(("o/r".into(), number))
+    }
+
+    fn pull_request_statuses(
+        &self,
+        pulls: &[(String, u64)],
+    ) -> Result<Vec<Option<crate::api::schema::WorkItemPullRequestInfo>>, String> {
+        let status = self
+            .pull_request_status
+            .lock()
+            .expect("fake source lock")
+            .clone();
+        Ok(pulls
+            .iter()
+            .map(|(repo, number)| {
+                status
+                    .clone()
+                    .map(|status| crate::api::schema::WorkItemPullRequestInfo {
+                        source_id: self.id.to_string(),
+                        repo: repo.clone(),
+                        number: *number,
+                        url: format!("https://example.test/{repo}/pull/{number}"),
+                        is_draft: status == "draft",
+                        status,
+                    })
+            })
+            .collect())
     }
 }
