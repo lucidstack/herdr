@@ -249,6 +249,7 @@ mod tests {
             seq: None,
             agent_session_id: None,
             agent_session_path: None,
+            resume_argv: None,
         })));
         app.run_work_items_tasks(Instant::now());
     }

@@ -12,7 +12,7 @@ pub mod bindings;
 
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -25,7 +25,13 @@ use std::slice;
 use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use crate::pane_graphics_files::OwnedExport;
+#[cfg(target_os = "linux")]
+mod native_image_sources;
 mod native_source;
+pub mod pane_graphics_files;
+
+/// Terminfo entry the terminal emulates; child processes should see it as TERM.
+pub const TERM: &str = "xterm-256color";
 
 pub use bindings as ffi;
 
@@ -77,7 +83,7 @@ pub enum Dirty {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TerminalCompressionResult {
+pub enum TerminalCompressionResult {
     Unsupported,
     Pending,
     Complete,
@@ -199,7 +205,7 @@ const TERMINAL_DATA_COLOR_CURSOR: ffi::GhosttyTerminalData = 20;
 const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
 const APC_MAX_BYTES_KITTY: usize = 16 * 1024 * 1024;
-pub(crate) const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
+pub const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
 // The vendored C headers expose these placement fields, but the checked-in
 // generated bindings predate the names. Keep the explicit values aligned with
 // vendor/libghostty-vt/include/ghostty/vt/kitty_graphics.h.
@@ -230,7 +236,7 @@ pub struct KittyImagePlacement {
     pub data_len: usize,
     pub data_fingerprint: u64,
     pub data: Vec<u8>,
-    pub(crate) source_file: Option<Arc<OwnedExport>>,
+    pub source_file: Option<Arc<OwnedExport>>,
     pub render: KittyPlacementRenderInfo,
 }
 
@@ -463,13 +469,13 @@ pub enum CellWide {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScreenTextCell {
+pub struct ScreenTextCell {
     pub wide: CellWide,
     pub graphemes: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ScreenTextRow {
+pub struct ScreenTextRow {
     pub cells: Vec<ScreenTextCell>,
     pub soft_wrapped: bool,
     pub wrap_continuation: bool,
@@ -826,9 +832,17 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>, Error> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum LinkTarget {
+pub enum LinkTarget {
     Uri(String),
     Text { text: String, clicked_byte: usize },
+}
+
+/// Inclusive display-cell columns on the current viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkRegion {
+    pub row: u16,
+    pub start_col: u16,
+    pub end_col: u16,
 }
 
 pub struct Terminal {
@@ -870,8 +884,8 @@ impl Terminal {
         let userdata = (&mut *terminal.callback_state as *mut TerminalCallbackState).cast();
         let glyph_protocol = false;
         let terminfo_name = ffi::GhosttyString {
-            ptr: crate::pane::PANE_TERM.as_ptr().cast(),
-            len: crate::pane::PANE_TERM.len(),
+            ptr: TERM.as_ptr().cast(),
+            len: TERM.len(),
         };
         let grapheme_default = ffi::GhosttyTerminalModeConfig {
             mode: MODE_GRAPHEME_CLUSTER,
@@ -951,7 +965,7 @@ impl Terminal {
         }
     }
 
-    pub(crate) fn compression_activity(&self) -> Result<u64, Error> {
+    pub fn compression_activity(&self) -> Result<u64, Error> {
         let mut activity = 0;
         // SAFETY: self.raw is a live terminal handle and activity is a valid out pointer.
         unsafe {
@@ -960,7 +974,7 @@ impl Terminal {
         Ok(activity)
     }
 
-    pub(crate) fn compress_incremental(&mut self) -> Result<TerminalCompressionResult, Error> {
+    pub fn compress_incremental(&mut self) -> Result<TerminalCompressionResult, Error> {
         let mut result =
             ffi::GhosttyTerminalCompressionResult_GHOSTTY_TERMINAL_COMPRESSION_RESULT_UNSUPPORTED;
         // SAFETY: self.raw is a live terminal handle and result is a valid out pointer.
@@ -1240,7 +1254,7 @@ impl Terminal {
     }
 
     #[cfg(windows)]
-    pub(crate) fn track_row(&mut self, y: u32) -> Option<usize> {
+    pub fn track_row(&mut self, y: u32) -> Option<usize> {
         let mut point = ffi::GhosttyPointCoordinate::default();
         let tag = ffi::GhosttyPointTag_GHOSTTY_POINT_TAG_SCREEN;
         let result =
@@ -1262,11 +1276,11 @@ impl Terminal {
         Ok((wide, graphemes))
     }
 
-    pub(crate) fn screen_text_rows(&self) -> Result<Vec<ScreenTextRow>, Error> {
+    pub fn screen_text_rows(&self) -> Result<Vec<ScreenTextRow>, Error> {
         self.screen_text_rows_range(0, usize::MAX)
     }
 
-    pub(crate) fn screen_text_rows_range(
+    pub fn screen_text_rows_range(
         &self,
         start_row: usize,
         end_row_exclusive: usize,
@@ -1317,7 +1331,7 @@ impl Terminal {
         grid_ref_hyperlink_uri(&grid_ref)
     }
 
-    pub(crate) fn viewport_link_target(&self, x: u16, y: u32) -> Result<Option<LinkTarget>, Error> {
+    pub fn viewport_link_target(&self, x: u16, y: u32) -> Result<Option<LinkTarget>, Error> {
         Ok(self
             .viewport_link_selection(x, y)?
             .map(|(target, _)| target))
@@ -1390,12 +1404,12 @@ impl Terminal {
 
     /// Resolve only the bounded plain-text token. OSC 8 regions are resolved by
     /// clients from frame hyperlink IDs; their full URI activation path is unchanged.
-    pub(crate) fn viewport_link_regions(
+    pub fn viewport_link_regions(
         &self,
         x: u16,
         y: u32,
         resolve: fn(&str, usize) -> Option<std::ops::Range<usize>>,
-    ) -> Result<Vec<crate::api::schema::PaneLinkRegion>, Error> {
+    ) -> Result<Vec<LinkRegion>, Error> {
         let cols = self.cols()?;
         let rows = self.rows()?;
         if x >= cols || y >= u32::from(rows) {
@@ -1461,7 +1475,7 @@ impl Terminal {
             false,
         )?;
         let mut byte = prefix.len().saturating_sub(cell_len(&first)?);
-        let mut regions: Vec<crate::api::schema::PaneLinkRegion> = Vec::new();
+        let mut regions: Vec<LinkRegion> = Vec::new();
         for row in start_row..=end_row {
             let mut cell = self.grid_ref(ghostty_viewport_point(0, row))?;
             let left = if row == start_row { start_col } else { 0 };
@@ -1485,7 +1499,7 @@ impl Terminal {
                     {
                         last.end_col = end;
                     } else {
-                        regions.push(crate::api::schema::PaneLinkRegion {
+                        regions.push(LinkRegion {
                             row: row as u16,
                             start_col: col,
                             end_col: end,
@@ -1716,11 +1730,11 @@ impl Terminal {
         self.get_optional_rgb_color(TERMINAL_DATA_COLOR_CURSOR)
     }
 
-    pub(crate) fn width_px(&self) -> Result<u32, Error> {
+    pub fn width_px(&self) -> Result<u32, Error> {
         self.get_u32(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_WIDTH_PX)
     }
 
-    pub(crate) fn height_px(&self) -> Result<u32, Error> {
+    pub fn height_px(&self) -> Result<u32, Error> {
         self.get_u32(ffi::GhosttyTerminalData_GHOSTTY_TERMINAL_DATA_HEIGHT_PX)
     }
 
@@ -1805,9 +1819,40 @@ impl Terminal {
         )
     }
 
-    pub(crate) fn kitty_graphics_may_have_placements(&self) -> Result<bool, Error> {
+    pub fn kitty_graphics_may_have_placements(&self) -> Result<bool, Error> {
         let generation = self.kitty_graphics_generation()?;
         Ok(generation != 0 && self.kitty_empty_generation.get() != Some(generation))
+    }
+
+    /// Current fingerprint of each stored image, placed or not, when it is known
+    /// without hashing pixels. `None` means deleted or replaced since last seen.
+    pub fn kitty_image_fingerprints(&self, image_ids: &[u32]) -> Result<Vec<Option<u64>>, Error> {
+        let graphics = self.kitty_graphics()?;
+        if graphics.is_null() {
+            return Ok(vec![None; image_ids.len()]);
+        }
+        image_ids
+            .iter()
+            .map(|&image_id| {
+                let image = unsafe { ffi::ghostty_kitty_graphics_image(graphics, image_id) };
+                if image.is_null() {
+                    return Ok(None);
+                }
+                if let Some(source) = native_source::image_source(image)? {
+                    return Ok(Some(source.fingerprint()));
+                }
+                let generation = kitty_image_u64(
+                    image,
+                    ffi::GhosttyKittyGraphicsImageData_GHOSTTY_KITTY_IMAGE_DATA_GENERATION,
+                )?;
+                Ok(self.kitty_fingerprints.lock().ok().and_then(|cache| {
+                    cache
+                        .get(&image_id)
+                        .filter(|entry| entry.generation == generation)
+                        .map(|entry| entry.fingerprint)
+                }))
+            })
+            .collect()
     }
 
     pub fn kitty_image_placements(&self) -> Result<Vec<KittyImagePlacement>, Error> {
@@ -1858,13 +1903,13 @@ impl Terminal {
         }
         if !storage_has_placements {
             self.kitty_empty_generation.set(Some(generation));
-            self.prune_kitty_fingerprints(&[]);
+            self.prune_kitty_fingerprints(graphics);
             return Ok(Vec::new());
         }
 
         placements.extend(self.kitty_virtual_image_placements(graphics, &mut needs_data)?);
         placements.sort_by_key(|placement| placement.z);
-        self.prune_kitty_fingerprints(&placements);
+        self.prune_kitty_fingerprints(graphics);
         Ok(placements)
     }
 
@@ -1909,16 +1954,13 @@ impl Terminal {
         fingerprint
     }
 
-    fn prune_kitty_fingerprints(&self, placements: &[KittyImagePlacement]) {
+    /// Keeps fingerprints for hidden images so scrolling them back into view
+    /// does not re-hash their pixels; generation checks catch replacements.
+    fn prune_kitty_fingerprints(&self, graphics: ffi::GhosttyKittyGraphics) {
         if let Ok(mut cache) = self.kitty_fingerprints.lock() {
-            if cache.is_empty() {
-                return;
-            }
-            let live: HashSet<u32> = placements
-                .iter()
-                .map(|placement| placement.image_id)
-                .collect();
-            cache.retain(|image_id, _| live.contains(image_id));
+            cache.retain(|image_id, _| {
+                !unsafe { ffi::ghostty_kitty_graphics_image(graphics, *image_id) }.is_null()
+            });
         }
     }
 
@@ -2460,7 +2502,7 @@ fn kitty_placeholder_diacritic_index(codepoint: u32) -> Option<u32> {
         // Reuse Ghostty's vendored table so Herdr decodes the same placeholder
         // row/column diacritics that libghostty accepts.
         let source =
-            include_str!("../../vendor/libghostty-vt/src/terminal/kitty/graphics_unicode.zig");
+            include_str!("../../../vendor/libghostty-vt/src/terminal/kitty/graphics_unicode.zig");
         let mut map = HashMap::new();
         let mut in_table = false;
         for line in source.lines() {
@@ -3159,6 +3201,8 @@ pub struct RowIter<'a> {
 }
 
 impl<'a> RowIter<'a> {
+    // Advances a native cursor; rows are read in place, so this is not an Iterator.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         // SAFETY: iterator handle is valid while self is alive.
         unsafe { ffi::ghostty_render_state_row_iterator_next(self.iterator.raw) }
@@ -3327,6 +3371,7 @@ impl Default for CellBasicData {
 }
 
 impl<'a> RowCellIter<'a> {
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         // SAFETY: cells handle is valid while self is alive.
         unsafe { ffi::ghostty_render_state_row_cells_next(self.cells.raw) }
@@ -3334,6 +3379,17 @@ impl<'a> RowCellIter<'a> {
 
     pub fn select(&mut self, x: u16) -> Result<(), Error> {
         unsafe { ffi::ghostty_render_state_row_cells_select(self.cells.raw, x).into_result() }
+    }
+
+    /// Whether the current cell was never written: no text, default style,
+    /// narrow, and no hyperlink. One read replaces the style and text lookups
+    /// for the blank cells that fill most wide panes.
+    pub fn is_default_blank(&self) -> Result<bool, Error> {
+        // Packed cell bits 0..44 hold content, style id, and width; bit 45 is
+        // the hyperlink flag. Protection (44) and OSC 133 semantic marks
+        // (46..48) do not change how a cell renders.
+        const PRESENTATION_BITS: u64 = ((1 << 44) - 1) | (1 << 45);
+        Ok(self.raw_cell()? & PRESENTATION_BITS == 0)
     }
 
     fn raw_cell(&self) -> Result<ffi::GhosttyCell, Error> {
@@ -3834,6 +3890,33 @@ mod tests {
     }
 
     #[test]
+    fn kitty_image_fingerprint_survives_hidden_placements_until_the_image_is_deleted() {
+        let mut terminal = Terminal::new(10, 5, 0).unwrap();
+        let cached =
+            |terminal: &Terminal| terminal.kitty_fingerprints.lock().unwrap().contains_key(&7);
+        terminal.write(b"\x1b_Ga=T,f=32,t=d,i=7,p=3,s=1,v=1,c=10,r=5,q=2;/wAA/w==\x1b\\");
+        assert_eq!(
+            terminal
+                .kitty_image_placements_with_data_filter(|_| false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(cached(&terminal));
+
+        terminal.write(b"\x1b_Ga=d,d=a,q=2\x1b\\");
+        assert!(terminal
+            .kitty_image_placements_with_data_filter(|_| false)
+            .unwrap()
+            .is_empty());
+        assert!(cached(&terminal), "a hidden image must not be re-hashed");
+
+        terminal.write(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+        let _ = terminal.kitty_image_placements_with_data_filter(|_| false);
+        assert!(!cached(&terminal));
+    }
+
+    #[test]
     fn kitty_storage_generation_skips_only_proven_empty_storage() {
         let mut terminal = Terminal::new(10, 5, 1_000_000).unwrap();
         terminal.enable_kitty_graphics().unwrap();
@@ -3989,6 +4072,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn kitty_graphics_file_upload_can_be_placed_later() {
+        use base64::Engine as _;
+
         let dir = std::env::temp_dir().join(format!(
             "herdr-kitty-file-upload-test-{}",
             std::process::id()
@@ -4000,14 +4085,10 @@ mod tests {
         let mut terminal = Terminal::new(10, 5, 0).unwrap();
         terminal.enable_kitty_graphics().unwrap();
         terminal.resize(10, 5, 8, 16).unwrap();
-        let mut upload = Vec::new();
-        crate::kitty_graphics::encode_kitty_regular_file(
-            &mut upload,
-            &[],
-            "a=t,f=32,s=1,v=1,i=10,q=0",
-            path.to_str().unwrap(),
-        );
-        terminal.write(&upload);
+        let payload =
+            base64::engine::general_purpose::STANDARD.encode(path.to_str().unwrap().as_bytes());
+        let upload = format!("\x1b7\x1b_Ga=t,f=32,s=1,v=1,i=10,q=0,t=f;{payload}\x1b\\\x1b8");
+        terminal.write(upload.as_bytes());
         assert!(terminal.kitty_image_placements().unwrap().is_empty());
 
         terminal.write(b"\x1b_Ga=p,i=10,p=5,c=10,r=5,C=1,q=2\x1b\\");

@@ -1,6 +1,3 @@
-mod native_image_sources;
-pub(crate) use native_image_sources::clone_native_image_source;
-
 use std::{
     collections::{HashSet, VecDeque},
     io::{Read, Write},
@@ -795,6 +792,10 @@ pub fn read_clipboard_text() -> Option<String> {
             return Some(text);
         }
     }
+    None
+}
+
+pub fn clipboard_text_matches(_bytes: &[u8]) -> Option<bool> {
     None
 }
 

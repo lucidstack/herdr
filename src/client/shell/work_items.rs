@@ -1712,7 +1712,8 @@ impl ClientShellState {
                 .push_endpoint_method(Method::WorkItemUnhide(WorkItemTarget { item_id }), outcome),
             ClientContextMenuAction::RemoveWorktree | ClientContextMenuAction::Close => {
                 if let Some(workspace_id) = workspace_id {
-                    self.activate_workspace_context_action(workspace_id, action, outcome);
+                    // An item's workspace closes on its own, never as a group.
+                    self.activate_workspace_context_action(workspace_id, false, action, outcome);
                 }
             }
             _ => {}

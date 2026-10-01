@@ -1555,6 +1555,12 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        if let Err(message) = validate_optional_resume_argv(params.resume_argv.as_deref()) {
+            return encode_error(id, "invalid_resume_argv", message);
+        }
+        let report_is_newer = self
+            .pane_terminal(ws_idx, pane_id)
+            .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1568,15 +1574,24 @@ impl App {
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
             session_ref: session_ref.clone(),
-            source: params.source,
-            agent_label,
+            source: params.source.clone(),
+            agent_label: agent_label.clone(),
             state: detect_state_from_api(params.state),
             message: params.message,
             seq: params.seq,
         });
+        let applied =
+            report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.record_agent_transcript(ws_idx, pane_id, session_ref, transcript_path);
-
-        encode_success(id, ResponseResult::Ok {})
+        self.report_agent_resume(
+            id,
+            ws_idx,
+            pane_id,
+            params.source,
+            agent_label,
+            params.seq.filter(|_| applied),
+            applied.then_some(params.resume_argv).flatten(),
+        )
     }
 
     pub(super) fn handle_pane_report_agent_session(
@@ -1590,6 +1605,12 @@ impl App {
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
             return invalid_agent(id);
         };
+        if let Err(message) = validate_optional_resume_argv(params.resume_argv.as_deref()) {
+            return encode_error(id, "invalid_resume_argv", message);
+        }
+        let report_is_newer = self
+            .pane_terminal(ws_idx, pane_id)
+            .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1603,15 +1624,80 @@ impl App {
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref: session_ref.clone(),
-            source: params.source,
-            agent_label,
+            source: params.source.clone(),
+            agent_label: agent_label.clone(),
             seq: params.seq,
             session_start_source: crate::agent_resume::normalize_session_start_source(
                 params.session_start_source,
             ),
         });
+        let applied =
+            report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.record_agent_transcript(ws_idx, pane_id, session_ref, transcript_path);
+        self.report_agent_resume(
+            id,
+            ws_idx,
+            pane_id,
+            params.source,
+            agent_label,
+            params.seq.filter(|_| applied),
+            applied.then_some(params.resume_argv).flatten(),
+        )
+    }
 
+    /// A resume command belongs to the session it was reported with, so it is
+    /// kept only when Herdr accepted that session.
+    fn session_report_applied(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        session_ref: Option<&crate::agent_resume::AgentSessionRef>,
+    ) -> bool {
+        session_ref.is_none_or(|session_ref| {
+            self.pane_terminal(ws_idx, pane_id)
+                .is_some_and(|terminal| terminal.session_ref_is_current(session_ref))
+        })
+    }
+
+    fn pane_terminal(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<&crate::terminal::TerminalState> {
+        let pane = self.state.workspaces.get(ws_idx)?.pane_state(pane_id)?;
+        self.state.terminals.get(&pane.attached_terminal_id)
+    }
+
+    fn report_agent_resume(
+        &mut self,
+        id: String,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        source: String,
+        agent_label: String,
+        seq: Option<u64>,
+        resume_argv: Option<Vec<String>>,
+    ) -> String {
+        let Some(argv) = resume_argv else {
+            return encode_success(id, ResponseResult::Ok {});
+        };
+        let can_record = self
+            .pane_terminal(ws_idx, pane_id)
+            .is_some_and(|terminal| terminal.can_record_reported_resume(&source, &agent_label));
+        if !can_record {
+            return encode_error(
+                id,
+                "resume_not_accepted",
+                "resume_argv requires the reporter to hold the pane; report its state with pane.report_agent first",
+            );
+        }
+        self.handle_internal_event(crate::events::AppEvent::AgentResumeReported {
+            pane_id,
+            source,
+            agent_label,
+            seq,
+            argv,
+        });
         encode_success(id, ResponseResult::Ok {})
     }
 
@@ -2249,6 +2335,10 @@ fn split_path_id(idx: usize, path: &[bool]) -> String {
 
 fn invalid_agent(id: String) -> String {
     encode_error(id, "invalid_agent", "agent label must not be empty")
+}
+
+fn validate_optional_resume_argv(argv: Option<&[String]>) -> Result<(), String> {
+    argv.map_or(Ok(()), crate::agent_resume::validate_resume_argv)
 }
 
 #[cfg(test)]
@@ -4381,6 +4471,7 @@ mod tests {
                         agent_session_id: Some(session.into()),
                         agent_session_path: Some(transcript(session)),
                         session_start_source: Some(reason.into()),
+                        resume_argv: None,
                     },
                 ),
             });
