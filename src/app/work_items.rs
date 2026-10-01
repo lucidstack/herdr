@@ -47,6 +47,15 @@ fn send_event(event_tx: &tokio::sync::mpsc::Sender<AppEvent>, event: WorkItemsEv
     let _ = event_tx.blocking_send(AppEvent::WorkItems(Box::new(event)));
 }
 
+/// A choice a ticket carries for the pull request item folded into it, resolved to the item
+/// and source that carry it out.
+struct FoldedChoice {
+    source: std::sync::Arc<dyn crate::work_items::WorkItemSource>,
+    item: crate::work_items::state::WorkItem,
+    /// The pull request item's own id for the choice.
+    choice_id: String,
+}
+
 /// Whether `workspace` sits on the main checkout (not a linked worktree) of the Git
 /// repository `key`, judged from cached metadata only: no filesystem access.
 fn workspace_is_main_checkout_of(workspace: &crate::workspace::Workspace, key: &str) -> bool {
@@ -548,7 +557,35 @@ impl App {
         let _ = respond_to.send(response);
     }
 
-    /// Starts a `Perform` choice (e.g. a merge) on a background thread.
+    /// What carries out `choice_id` of `key` when it is one the ticket carries for the pull
+    /// request item folded into it; `None` for the item's own choices.
+    fn carried_choice(
+        &self,
+        key: &str,
+        choice_id: &str,
+    ) -> Result<Option<FoldedChoice>, (&'static str, String)> {
+        let Some(original_id) = crate::work_items::source::carried_original_id(choice_id) else {
+            return Ok(None);
+        };
+        self.work_items
+            .folded_choice(key, original_id)
+            .map(|(source, item)| {
+                Some(FoldedChoice {
+                    source: source.clone(),
+                    item: item.clone(),
+                    choice_id: original_id.to_string(),
+                })
+            })
+            .ok_or_else(|| {
+                (
+                    "work_item_choice_unavailable",
+                    format!("{key} no longer offers that choice for its pull request"),
+                )
+            })
+    }
+
+    /// Starts a `Perform` choice (e.g. a merge) on a background thread. A choice carried onto
+    /// a ticket runs on its pull request item, with that item's source.
     pub(super) fn start_work_item_action(
         &mut self,
         key: &str,
@@ -573,6 +610,7 @@ impl App {
         } else {
             None
         };
+        let carried = self.carried_choice(key, choice_id)?;
         self.work_items
             .begin_action(key, choice_id)
             .map_err(|code| (code, format!("{key} is already being handled")))?;
@@ -580,9 +618,10 @@ impl App {
         let key = key.to_string();
         let choice_id = choice_id.to_string();
         std::thread::spawn(move || {
-            let result = match pull_request {
-                Some((host, pull_request)) => host.mark_pull_request_ready(&pull_request),
-                None => source.perform(&item, &choice_id),
+            let result = match (carried, pull_request) {
+                (Some(carried), _) => carried.source.perform(&carried.item, &carried.choice_id),
+                (None, Some((host, pull_request))) => host.mark_pull_request_ready(&pull_request),
+                (None, None) => source.perform(&item, &choice_id),
             };
             send_event(&event_tx, WorkItemsEvent::Performed { key, result });
         });
@@ -591,7 +630,9 @@ impl App {
     }
 
     /// Sends a `BriefAgent` choice's follow-up brief to the agent in the item's workspace and
-    /// focuses that agent. The agent does the work; its own permission prompts gate it.
+    /// focuses that agent. A choice carried onto a ticket is briefed from its pull request
+    /// item, to the agent in the ticket's workspace. The agent does the work; its own
+    /// permission prompts gate it.
     pub(super) fn start_work_item_follow_up(
         &mut self,
         key: &str,
@@ -603,6 +644,7 @@ impl App {
         let Some(source) = self.work_items.source(&item.source_id).cloned() else {
             return Err(("work_item_not_found", format!("unknown work item {key}")));
         };
+        let carried = self.carried_choice(key, choice_id)?;
         let no_agent = || {
             (
                 "work_item_agent_not_found",
@@ -621,9 +663,13 @@ impl App {
         let target = self
             .first_agent_target_in_workspace(ws_idx)
             .ok_or_else(no_agent)?;
-        let text = source
-            .follow_up_brief(&item, choice_id)
-            .map_err(|message| ("work_item_choice_unavailable", message))?;
+        let text = match &carried {
+            Some(carried) => carried
+                .source
+                .follow_up_brief(&carried.item, &carried.choice_id),
+            None => source.follow_up_brief(&item, choice_id),
+        }
+        .map_err(|message| ("work_item_choice_unavailable", message))?;
         let pane = self
             .public_pane_id(ws_idx, target.pane_id)
             .ok_or_else(no_agent)?;
@@ -1906,6 +1952,122 @@ mod tests {
             workspace_id,
         })));
         assert_eq!(brief(&mut app), "work_item_agent_not_found");
+    }
+
+    /// A ticket of a `tracker` source with the pull request `o/r#5` found on its work branch,
+    /// and that pull request's own inbox item, `pr:5` of the `fake` source, folded into it.
+    fn ticket_with_pull_request_item() -> (App, Arc<FakeSource>, Arc<FakeSource>) {
+        use crate::api::schema::WorkItemPullRequestInfo;
+
+        let mut app = test_app();
+        let pulls = FakeSource::with_items(vec![source_item("pr:5")]);
+        *pulls.pull_request_prefix.lock().unwrap() = Some("pr:".into());
+        *pulls.default_choice.lock().unwrap() = Some("do".into());
+        let tracker = FakeSource::tracker("tracker", "T-");
+        tracker.set_items(vec![source_item("T-1")]);
+        *tracker.work_branch.lock().unwrap() = Some("ar/t-1".into());
+        *tracker.pull_request.lock().unwrap() = Some(WorkItemPullRequestInfo {
+            source_id: "fake".into(),
+            repo: "o/r".into(),
+            number: 5,
+            url: "https://example.test/o/r/pull/5".into(),
+            is_draft: false,
+            status: "approved".into(),
+        });
+        app.work_items = WorkItems::for_test(vec![pulls.clone(), tracker.clone()], Instant::now());
+        run_until(&mut app, |app| {
+            list(app)
+                .iter()
+                .any(|item| item.item_id == "tracker:T-1" && item.linked_pull_request.is_some())
+        });
+        (app, pulls, tracker)
+    }
+
+    #[test]
+    fn a_carried_choice_runs_on_the_pull_request_item_and_polls_its_source_at_once() {
+        let (mut app, pulls, tracker) = ticket_with_pull_request_item();
+        // Once the merge goes through, GitHub stops listing the pull request as ready.
+        pulls.set_items(Vec::new());
+
+        api(
+            &mut app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "tracker:T-1".into(),
+                choice_id: "pull_request:do".into(),
+            }),
+        )
+        .expect("carried choice accepted");
+        // Only a poll of the pull request item's source, not its minute interval, drops it.
+        run_until(&mut app, |app| list(app).len() == 1);
+
+        assert_eq!(
+            *pulls.performed.lock().unwrap(),
+            [("fake:pr:5".to_string(), "do".to_string())],
+            "the pull request item's source carries it out, on that item"
+        );
+        assert!(tracker.performed.lock().unwrap().is_empty());
+        let ticket = list(&mut app).remove(0);
+        assert_eq!(ticket.item_id, "tracker:T-1");
+        assert_eq!(ticket.running_choice_id, None);
+        let outcome = ticket
+            .action_outcome
+            .expect("the ticket reports the outcome");
+        assert!(outcome.succeeded);
+        assert_eq!(outcome.choice_id, "pull_request:do");
+        assert_eq!(ticket.phase, WorkItemPhase::Pending);
+    }
+
+    #[tokio::test]
+    async fn a_carried_brief_comes_from_the_pull_request_item_and_goes_to_the_tickets_agent() {
+        use crate::api::schema::WorkItemLinkParams;
+        use crate::detect::{Agent, AgentState};
+
+        let (mut app, _pulls, _tracker) = ticket_with_pull_request_item();
+        // The ticket's own workspace, with an idle agent whose terminal records what it is sent.
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("ticket")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let (runtime, mut pty_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+        app.lookup_runtime_sender(0, pane_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[?2004h");
+        let workspace_id = app.public_workspace_id(0);
+        api(
+            &mut app,
+            Method::WorkItemLink(WorkItemLinkParams {
+                item_id: "tracker:T-1".into(),
+                workspace_id,
+            }),
+        )
+        .expect("linked");
+
+        api(
+            &mut app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "tracker:T-1".into(),
+                choice_id: "pull_request:brief".into(),
+            }),
+        )
+        .expect("carried brief accepted");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let sent = loop {
+            if let Ok(bytes) = pty_rx.try_recv() {
+                break bytes;
+            }
+            assert!(Instant::now() < deadline, "brief not sent");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(&sent[..], b"\x1b[200~brief fake:pr:5 brief\x1b[201~");
     }
 
     #[test]

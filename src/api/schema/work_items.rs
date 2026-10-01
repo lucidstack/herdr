@@ -118,6 +118,13 @@ pub struct WorkItemChoiceInfo {
     pub confirm: Option<String>,
 }
 
+/// Starts the id of a choice a ticket offers on behalf of the pull request linked to it. The
+/// rest is the id the pull request's own inbox item gives that choice, so
+/// `pull_request:merge_squash` is that item's `merge_squash`. Clients treat choice ids as
+/// opaque; one that also lists the pull request item can use this to skip choices the ticket
+/// already offers.
+pub const WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX: &str = "pull_request:";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkItemStep {

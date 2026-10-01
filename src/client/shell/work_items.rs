@@ -8,7 +8,7 @@ use super::*;
 use crate::api::schema::{
     Method, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemInfo,
     WorkItemLinkParams, WorkItemPhase, WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget,
-    WorkspaceTarget,
+    WorkspaceTarget, WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX,
 };
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -238,11 +238,13 @@ fn display_key(item: &WorkItemInfo) -> &str {
 
 /// The next steps an item's menu offers: its default choice first, then the next ones,
 /// up to `MENU_CHOICES`. Opening in the browser has its own rows, and so has the
-/// workspace an item already has, which a left click opens.
+/// workspace an item already has, which a left click opens. Choices in `left_out` belong
+/// to another group of the menu and are not listed again.
 fn menu_group(
     item: &WorkItemInfo,
     header: Option<String>,
     more: [&'static str; 2],
+    left_out: &HashSet<&str>,
 ) -> Option<WorkItemMenuGroup> {
     let has_workspace = item.workspace_id.is_some();
     let offered = |choice: &&crate::api::schema::WorkItemChoiceInfo| {
@@ -250,7 +252,12 @@ fn menu_group(
             && !matches!(choice.action, WorkItemChoiceAction::OpenUrl { .. })
             && !(has_workspace && choice.action == WorkItemChoiceAction::ProvisionWorkspace)
     };
-    let mut ordered: Vec<_> = item.choices.iter().filter(offered).collect();
+    let listed: Vec<_> = item
+        .choices
+        .iter()
+        .filter(|choice| !left_out.contains(choice.choice_id.as_str()))
+        .collect();
+    let mut ordered: Vec<_> = listed.iter().copied().filter(offered).collect();
     if let Some(default) = ordered
         .iter()
         .position(|choice| Some(choice.choice_id.as_str()) == item.default_choice_id.as_deref())
@@ -263,7 +270,7 @@ fn menu_group(
         .take(MENU_CHOICES)
         .map(|choice| (choice.choice_id.clone(), choice.label.clone()))
         .collect();
-    let unlisted = item.choices.iter().any(|choice| {
+    let unlisted = listed.iter().any(|choice| {
         !matches!(choice.action, WorkItemChoiceAction::OpenUrl { .. })
             && !choices.iter().any(|(id, _)| *id == choice.choice_id)
     });
@@ -282,7 +289,8 @@ fn menu_group(
 }
 
 /// The item's next steps, then those of the pull request folded into it, each under a
-/// header when both are there.
+/// header when both are there. The pull request's group leaves out the choices the item
+/// carries for it.
 fn menu_groups(item: &WorkItemInfo, pull_request: Option<&WorkItemInfo>) -> Vec<WorkItemMenuGroup> {
     let own_header = pull_request.map(|_| match item.tracker_state.as_deref() {
         Some(state) => format!(
@@ -296,7 +304,19 @@ fn menu_groups(item: &WorkItemInfo, pull_request: Option<&WorkItemInfo>) -> Vec<
         item,
         own_header,
         ["More choices...", "Choose what to do..."],
+        &HashSet::new(),
     );
+    // The item offers some of its pull request's choices itself, under prefixed ids. Matching
+    // those ids rather than labels keeps two different choices alike in name apart.
+    let carried: HashSet<&str> = item
+        .choices
+        .iter()
+        .filter_map(|choice| {
+            choice
+                .choice_id
+                .strip_prefix(WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX)
+        })
+        .collect();
     // The pull request's own line, e.g. "#11938 ready to merge".
     let pull_request = pull_request.and_then(|pull_request| {
         let header = pull_request
@@ -309,6 +329,7 @@ fn menu_groups(item: &WorkItemInfo, pull_request: Option<&WorkItemInfo>) -> Vec<
             pull_request,
             Some(header),
             ["More pull request choices...", "Pull request choices..."],
+            &carried,
         )
     });
     let mut groups: Vec<_> = own.into_iter().chain(pull_request).collect();

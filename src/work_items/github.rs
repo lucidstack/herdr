@@ -1914,6 +1914,7 @@ impl WorkItemSource for GithubSource {
         let mut choices: Vec<WorkItemChoiceInfo> = event
             .modes()
             .iter()
+            .filter(|&&mode| !superseded_by_pull_request(item, mode))
             .map(|&mode| WorkItemChoiceInfo {
                 choice_id: mode.choice_id().into(),
                 label: mode.label().into(),
@@ -1977,18 +1978,24 @@ impl WorkItemSource for GithubSource {
             .is_pull_request_event()
             .then(|| item_detail::<GithubDetail>(item))
             .flatten();
+        let default = default_choice(
+            event,
+            pull_detail.as_ref(),
+            mapped,
+            workflow.config.small_diff_lines,
+            &workflow.docs,
+        );
+        // A start mode the pull request took away leaves opening the issue as the default.
+        let default = if ReviewMode::from_choice_id(default)
+            .is_some_and(|mode| superseded_by_pull_request(item, mode))
+        {
+            GITHUB_CHOICE_ID
+        } else {
+            default
+        };
         ItemChoices {
             choices,
-            default_choice_id: Some(
-                default_choice(
-                    event,
-                    pull_detail.as_ref(),
-                    mapped,
-                    workflow.config.small_diff_lines,
-                    &workflow.docs,
-                )
-                .into(),
-            ),
+            default_choice_id: Some(default.into()),
         }
     }
 
@@ -2594,6 +2601,13 @@ fn open_on_github(item: &WorkItem, label: &str) -> WorkItemChoiceInfo {
         disabled_reason: None,
         confirm: None,
     }
+}
+
+/// Whether `mode` starts work on an issue whose pull request is in flight. That work is under
+/// review, and a new issue branch would be a second attempt at it.
+fn superseded_by_pull_request(item: &WorkItem, mode: ReviewMode) -> bool {
+    matches!(mode, ReviewMode::StartIssue | ReviewMode::StartIssueAgent)
+        && item.open_pull_request().is_some()
 }
 
 /// The pull request's base as a ref reviewers can diff against, and the refspec that
@@ -3879,6 +3893,45 @@ mod tests {
         assert!(source
             .provision_plan(&unknown_base, "start_issue", Path::new("/w"))
             .is_err());
+    }
+
+    #[test]
+    fn an_assigned_issue_whose_pull_request_is_open_stops_offering_to_start_it_again() {
+        let source = mapped_source(repo_config());
+        let with_pull_request = |status: &str| WorkItem {
+            linked_pull_request: Some(crate::api::schema::WorkItemPullRequestInfo {
+                source_id: "github".into(),
+                repo: "o/r".into(),
+                number: 9,
+                url: "https://github.com/o/r/pull/9".into(),
+                is_draft: status == "draft",
+                status: status.into(),
+            }),
+            workspace_id: Some("w1".into()),
+            ..event_item(
+                ASSIGNED_PREFIX,
+                serde_json::to_value(issue_detail("main")).unwrap(),
+            )
+        };
+        let offered = |item: &WorkItem| {
+            let choices = source.choices(item);
+            let ids: Vec<String> = choices
+                .choices
+                .into_iter()
+                .map(|choice| choice.choice_id)
+                .collect();
+            (ids, choices.default_choice_id)
+        };
+
+        // A new issue branch would be a second attempt at work that is under review.
+        let (ids, default) = offered(&with_pull_request("approved"));
+        assert_eq!(ids, ["github"]);
+        assert_eq!(default.as_deref(), Some("github"));
+
+        // Once it is merged, the issue can be worked on again.
+        let (ids, default) = offered(&with_pull_request("merged"));
+        assert_eq!(ids, ["start_issue", "start_issue_agent", "github"]);
+        assert_eq!(default.as_deref(), Some("start_issue"));
     }
 
     #[test]

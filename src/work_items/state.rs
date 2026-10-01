@@ -235,6 +235,14 @@ impl WorkItem {
         }
     }
 
+    /// The linked pull request while it is in flight, neither merged nor closed. The ticket's
+    /// work is then under review, and what is left to do belongs to the pull request.
+    pub(crate) fn open_pull_request(&self) -> Option<&WorkItemPullRequestInfo> {
+        self.linked_pull_request
+            .as_ref()
+            .filter(|pull_request| !matches!(pull_request.status.as_str(), "merged" | "closed"))
+    }
+
     fn unlink_workspace(&mut self) {
         self.workspace_id = None;
         self.provisioning = None;

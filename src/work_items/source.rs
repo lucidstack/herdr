@@ -132,6 +132,20 @@ pub(crate) const PULL_REQUEST_OPEN_CHOICE_ID: &str = "pull_request_open";
 /// Moves an item's ticket to a done status once its linked pull request is merged. Its
 /// action is `Perform`, carried out by the item's source.
 pub(crate) const CLOSE_TICKET_CHOICE_ID: &str = "close_ticket";
+/// Starts the id of a choice carried onto a ticket from the pull request item folded into it:
+/// the rest is the folded item's own id for it. Shared with clients through the API schema.
+pub(crate) const PULL_REQUEST_CHOICE_PREFIX: &str =
+    crate::api::schema::WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX;
+
+/// The id a ticket offers for the folded pull request item's choice `original_id`.
+pub(crate) fn carried_choice_id(original_id: &str) -> String {
+    format!("{PULL_REQUEST_CHOICE_PREFIX}{original_id}")
+}
+
+/// The folded item's own id for a choice a ticket carries, `None` for the ticket's own.
+pub(crate) fn carried_original_id(choice_id: &str) -> Option<&str> {
+    choice_id.strip_prefix(PULL_REQUEST_CHOICE_PREFIX)
+}
 
 /// The work landed, but the tracker still has the ticket open.
 #[derive(Debug, Clone, PartialEq, Eq)]

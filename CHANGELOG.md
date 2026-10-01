@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- A ticket whose linked pull request is also in the inbox on its own now offers that pull request's choices itself: its merge methods, the default one first and still asking twice, and "Ask agent to push and reply", which briefs the agent in the ticket's own workspace. While that pull request is open the ticket no longer offers to start its work again: "Ask agent to implement it" is gone, and so is "Continue on…" once the ticket has a workspace. Without a workspace "Continue on…" stays and tells the agent that the pull request is open instead of asking for a plan. API clients see the carried choices with ids that start with `pull_request:`, and the right-click menu no longer lists a choice twice for a ticket and its pull request.
+
 ## [0.9.1] - 2026-09-16
 
 ### Added

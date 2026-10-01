@@ -1046,17 +1046,25 @@ fn briefing_the_agent_closes_the_dialog_and_asks_the_server() {
     assert!(state.overlay.is_none());
 }
 
-#[test]
-fn ticket_menu_leads_with_its_pull_requests_next_step_and_names_where_links_go() {
-    let choice = |id: &str, label: &str, action: WorkItemChoiceAction| WorkItemChoiceInfo {
+fn choice(id: &str, label: &str, action: WorkItemChoiceAction) -> WorkItemChoiceInfo {
+    WorkItemChoiceInfo {
         choice_id: id.into(),
         label: label.into(),
         description: None,
         action,
         disabled_reason: None,
         confirm: None,
-    };
-    let open = |url: &str| WorkItemChoiceAction::OpenUrl { url: url.into() };
+    }
+}
+
+fn open_url(url: &str) -> WorkItemChoiceAction {
+    WorkItemChoiceAction::OpenUrl { url: url.into() }
+}
+
+/// A Jira ticket with a workspace and the pull request ready to merge that is folded into it,
+/// as the server projects them: the ticket offers the pull request's merges and its brief
+/// under `pull_request:` ids, and the pull request's own item keeps every choice of its own.
+fn ticket_with_folded_pull_request() -> (WorkItemInfo, WorkItemInfo) {
     let mut ticket = item("7");
     ticket.item_id = "jira:TECH-2073".into();
     ticket.source_id = "jira".into();
@@ -1067,27 +1075,32 @@ fn ticket_menu_leads_with_its_pull_requests_next_step_and_names_where_links_go()
     ticket.workspace_id = Some("ws_2".into());
     ticket.choices = vec![
         choice(
+            "pull_request:merge_squash",
+            "Squash and merge",
+            WorkItemChoiceAction::Perform,
+        ),
+        choice(
+            "pull_request:push_reply",
+            "Ask agent to push and reply",
+            WorkItemChoiceAction::BriefAgent,
+        ),
+        choice(
+            "pull_request:merge_commit",
+            "Create a merge commit",
+            WorkItemChoiceAction::Perform,
+        ),
+        choice(
             "pull_request_open",
             "Open pull request",
-            open("https://github.com/o/r/pull/11938"),
-        ),
-        choice(
-            "local",
-            "Continue on ar/tech-2073",
-            WorkItemChoiceAction::ProvisionWorkspace,
-        ),
-        choice(
-            "local_agent",
-            "Ask agent to implement it",
-            WorkItemChoiceAction::ProvisionWorkspace,
+            open_url("https://github.com/o/r/pull/11938"),
         ),
         choice(
             "jira",
             "Open in Jira",
-            open("https://x.atlassian.net/browse/TECH-2073"),
+            open_url("https://x.atlassian.net/browse/TECH-2073"),
         ),
     ];
-    ticket.default_choice_id = Some("local".into());
+    ticket.default_choice_id = Some("pull_request:merge_squash".into());
     let mut pull = item("11938");
     pull.item_id = "github:merge:o/r#11938".into();
     pull.context = "#11938 ready to merge · o/r".into();
@@ -1123,14 +1136,19 @@ fn ticket_menu_leads_with_its_pull_requests_next_step_and_names_where_links_go()
         choice(
             "github",
             "Open on GitHub",
-            open("https://github.com/o/r/pull/11938"),
+            open_url("https://github.com/o/r/pull/11938"),
         ),
     ];
     pull.default_choice_id = Some("merge_squash".into());
+    (ticket, pull)
+}
+
+/// The shell with the right-click menu of the first listed item open.
+fn state_with_item_menu(items: Vec<WorkItemInfo>) -> ClientShellState {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(two_workspace_snapshot()));
     state.set_pane_surface(surface());
-    let mut projected = projection(1, vec![ticket, pull, item("9")]);
+    let mut projected = projection(1, items);
     projected.sources.push(WorkItemSourceInfo {
         source_id: "jira".into(),
         label: "Jira".into(),
@@ -1145,29 +1163,98 @@ fn ticket_menu_leads_with_its_pull_requests_next_step_and_names_where_links_go()
         rect.x + 2,
         rect.y,
     );
-    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
-        panic!("item menu opens");
-    };
-    let items = menu.items();
-    let labels: Vec<&str> = items.iter().map(|entry| entry.label.as_ref()).collect();
-    // The merge is what can be done straight away, so it leads and is highlighted.
-    assert_eq!(labels[0], "#11938 ready to merge");
-    assert_eq!(labels[menu.highlighted], "Squash and merge");
-    // A disabled follow-up is left to the dialog, which says why.
     assert!(
-        !labels.contains(&"Ask agent to push and reply"),
+        matches!(state.overlay, Some(ClientShellOverlay::ContextMenu(_))),
+        "item menu opens"
+    );
+    state
+}
+
+/// The labels of the open menu's rows, and the row that is highlighted.
+fn menu_labels(state: &ClientShellState) -> (Vec<String>, usize) {
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("a menu is open");
+    };
+    (
+        menu.items()
+            .iter()
+            .map(|entry| entry.label.to_string())
+            .collect(),
+        menu.highlighted,
+    )
+}
+
+#[test]
+fn ticket_menu_leads_with_its_pull_requests_next_step_and_names_where_links_go() {
+    let (ticket, pull) = ticket_with_folded_pull_request();
+    let mut state = state_with_item_menu(vec![ticket, pull, item("9")]);
+
+    let (labels, highlighted) = menu_labels(&state);
+    // The ticket offers the merge itself, so its group leads and the merge is highlighted.
+    assert_eq!(labels[0], "TECH-2073 · In Progress");
+    assert_eq!(labels[highlighted], "Squash and merge");
+    assert!(
+        labels.contains(&"Open TECH-2073 in Jira".to_string()),
         "{labels:?}"
     );
-    assert!(labels.contains(&"Open TECH-2073 in Jira"), "{labels:?}");
-    assert!(labels.contains(&"Open #11938 on GitHub"), "{labels:?}");
-    // Its workspace opens on a left click and is not offered again.
-    assert!(!labels.contains(&"Continue on ar/tech-2073"), "{labels:?}");
-    assert_eq!(labels.last(), Some(&"Close workspace"));
+    assert!(
+        labels.contains(&"Open #11938 on GitHub".to_string()),
+        "{labels:?}"
+    );
+    assert_eq!(labels.last().map(String::as_str), Some("Close workspace"));
 
     // Down skips the header and divider between the two groups.
     state.move_context_menu_selection(3);
-    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
-        panic!("menu stays open");
-    };
-    assert_eq!(menu.items()[menu.highlighted].label, "Choose what to do...");
+    let (labels, highlighted) = menu_labels(&state);
+    assert_eq!(labels[highlighted], "Ask agent to address the feedback");
+}
+
+#[test]
+fn the_pull_request_group_leaves_out_what_the_ticket_carries_and_keeps_what_only_it_can_do() {
+    let (ticket, pull) = ticket_with_folded_pull_request();
+    let state = state_with_item_menu(vec![ticket, pull, item("9")]);
+
+    let (labels, _) = menu_labels(&state);
+    let count = |label: &str| labels.iter().filter(|row| *row == label).count();
+    // The merge is the ticket's, listed once rather than again for the pull request.
+    assert_eq!(count("Squash and merge"), 1, "{labels:?}");
+    // Starting a workspace for the pull request item stays under its own header.
+    assert!(
+        labels.contains(&"#11938 ready to merge".to_string()),
+        "{labels:?}"
+    );
+    assert_eq!(count("Work on it locally"), 1, "{labels:?}");
+}
+
+#[test]
+fn a_pull_request_choice_that_only_reads_like_a_carried_one_is_still_listed() {
+    let (ticket, mut pull) = ticket_with_folded_pull_request();
+    // Another choice of the pull request item that happens to share a label with one the
+    // ticket carries.
+    pull.choices.insert(
+        0,
+        choice(
+            "squash_elsewhere",
+            "Squash and merge",
+            WorkItemChoiceAction::Perform,
+        ),
+    );
+    let state = state_with_item_menu(vec![ticket, pull, item("9")]);
+
+    let (labels, _) = menu_labels(&state);
+    let squashes = labels.iter().filter(|row| *row == "Squash and merge");
+    assert_eq!(squashes.count(), 2, "{labels:?}");
+}
+
+#[test]
+fn an_items_menu_leaves_out_the_choice_that_would_start_the_workspace_it_already_has() {
+    let mut worked = item("7");
+    worked.workspace_id = Some("ws_2".into());
+    let state = state_with_item_menu(vec![worked]);
+
+    let (labels, _) = menu_labels(&state);
+    assert!(
+        !labels.contains(&"Review locally".to_string()),
+        "{labels:?}"
+    );
 }

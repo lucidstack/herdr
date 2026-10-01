@@ -52,6 +52,12 @@ pub(crate) struct FakeSource {
     /// Status `pull_request_statuses` reports for every pull request asked about; `None`
     /// means none could be read.
     pub pull_request_status: Mutex<Option<String>>,
+    /// Default choice `choices` offers; `None` keeps "web".
+    pub default_choice: Mutex<Option<String>>,
+    /// Why the "brief" choice is disabled; `None` leaves it available.
+    pub brief_disabled: Mutex<Option<String>>,
+    /// Every (item key, choice id) `perform` was asked to carry out, in call order.
+    pub performed: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeSource {
@@ -87,6 +93,9 @@ impl FakeSource {
             work_branch: Mutex::new(None),
             looked_up_branches: Mutex::new(Vec::new()),
             pull_request_status: Mutex::new(None),
+            default_choice: Mutex::new(None),
+            brief_disabled: Mutex::new(None),
+            performed: Mutex::new(Vec::new()),
         }
     }
 
@@ -221,11 +230,21 @@ impl WorkItemSource for FakeSource {
                     label: "Brief the agent".into(),
                     description: None,
                     action: WorkItemChoiceAction::BriefAgent,
-                    disabled_reason: None,
+                    disabled_reason: self
+                        .brief_disabled
+                        .lock()
+                        .expect("fake source lock")
+                        .clone(),
                     confirm: None,
                 },
             ],
-            default_choice_id: Some("web".into()),
+            default_choice_id: Some(
+                self.default_choice
+                    .lock()
+                    .expect("fake source lock")
+                    .clone()
+                    .unwrap_or_else(|| "web".into()),
+            ),
         }
     }
 
@@ -246,15 +265,19 @@ impl WorkItemSource for FakeSource {
         self.remove_on_resolved.load(Ordering::SeqCst)
     }
 
-    fn perform(&self, _item: &WorkItem, _choice_id: &str) -> Result<String, String> {
+    fn perform(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        self.performed
+            .lock()
+            .expect("fake source lock")
+            .push((item.key.clone(), choice_id.to_string()));
         match self.perform_error.lock().expect("fake source lock").clone() {
             Some(error) => Err(error),
             None => Ok("Done".into()),
         }
     }
 
-    fn follow_up_brief(&self, _item: &WorkItem, _choice_id: &str) -> Result<String, String> {
-        Ok("hello".into())
+    fn follow_up_brief(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
+        Ok(format!("brief {} {choice_id}", item.key))
     }
 
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>) {

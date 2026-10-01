@@ -847,7 +847,13 @@ fn parse_ticket_search(
         .collect())
 }
 
-fn brief(item: &WorkItem, detail: &JiraDetail, agent_starts: bool, branch: &str) -> String {
+fn brief(
+    item: &WorkItem,
+    detail: &JiraDetail,
+    agent_starts: bool,
+    branch: &str,
+    pull_request: Option<&crate::api::schema::WorkItemPullRequestInfo>,
+) -> String {
     let description = if detail.description.is_empty() {
         "(no description)".to_string()
     } else {
@@ -873,12 +879,24 @@ fn brief(item: &WorkItem, detail: &JiraDetail, agent_starts: bool, branch: &str)
     } else {
         format!(" · labels {}", detail.labels.join(", "))
     };
-    let instructions = if agent_starts {
-        "Implement it now, with tests. Do not commit, push or change the Jira issue. Report \
-         what you changed and any open question."
-    } else {
-        "Investigate the code, propose an implementation plan and wait for my instructions \
-         before changing anything."
+    let instructions = match (pull_request, agent_starts) {
+        // Under review: the work is not started again, only picked up when asked.
+        (Some(pull_request), _) => format!(
+            "A pull request is already open for this issue: {repo}#{number} ({status}), {url}. \
+             The work is under review, so do not start it again. Look at the branch and the pull \
+             request if you need context, then wait for my instructions before changing \
+             anything.",
+            repo = pull_request.repo,
+            number = pull_request.number,
+            status = pull_request.status,
+            url = pull_request.url,
+        ),
+        (None, true) => "Implement it now, with tests. Do not commit, push or change the Jira \
+                         issue. Report what you changed and any open question."
+            .to_string(),
+        (None, false) => "Investigate the code, propose an implementation plan and wait for my \
+                          instructions before changing anything."
+            .to_string(),
     };
     format!(
         "You are working on Jira issue {key}: {title}\n\
@@ -1179,16 +1197,30 @@ impl WorkItemSource for JiraSource {
                 "Worktree on a new branch".to_string(),
             ),
         };
-        let choices = vec![
-            WorkItemChoiceInfo {
+        // A pull request in flight carries the work on: it is not started again or handed to an
+        // agent. While no workspace is open, Continue stays so the worktree can be reopened.
+        let pull_request = item.open_pull_request();
+        let continues = pull_request.is_none() || item.workspace_id.is_none();
+        let local_plan = match pull_request {
+            Some(pull_request) => format!(
+                "the agent is told {}#{} is open and waits",
+                pull_request.repo, pull_request.number
+            ),
+            None => "the agent proposes a plan and waits".to_string(),
+        };
+        let mut choices = Vec::new();
+        if continues {
+            choices.push(WorkItemChoiceInfo {
                 choice_id: LOCAL_CHOICE_ID.into(),
                 label: local_label,
-                description: Some(format!("{where_}; the agent proposes a plan and waits")),
+                description: Some(format!("{where_}; {local_plan}")),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone(),
                 confirm: None,
-            },
-            WorkItemChoiceInfo {
+            });
+        }
+        if pull_request.is_none() {
+            choices.push(WorkItemChoiceInfo {
                 choice_id: AGENT_CHOICE_ID.into(),
                 label: "Ask agent to implement it".into(),
                 description: Some(format!(
@@ -1197,22 +1229,22 @@ impl WorkItemSource for JiraSource {
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone().or(no_agent),
                 confirm: None,
+            });
+        }
+        choices.push(WorkItemChoiceInfo {
+            choice_id: JIRA_CHOICE_ID.into(),
+            label: "Open in Jira".into(),
+            description: Some("Open the issue in the browser".into()),
+            action: WorkItemChoiceAction::OpenUrl {
+                url: item.url.clone(),
             },
-            WorkItemChoiceInfo {
-                choice_id: JIRA_CHOICE_ID.into(),
-                label: "Open in Jira".into(),
-                description: Some("Open the issue in the browser".into()),
-                action: WorkItemChoiceAction::OpenUrl {
-                    url: item.url.clone(),
-                },
-                disabled_reason: None,
-                confirm: None,
-            },
-        ];
+            disabled_reason: None,
+            confirm: None,
+        });
         ItemChoices {
             choices,
             default_choice_id: Some(
-                if unmapped.is_some() {
+                if unmapped.is_some() || !continues {
                     JIRA_CHOICE_ID
                 } else {
                     LOCAL_CHOICE_ID
@@ -1266,7 +1298,13 @@ impl WorkItemSource for JiraSource {
             }),
             workspace_label: truncate_chars(&format!("{key} {}", item.title), MAX_LABEL_CHARS),
             agent_name_hint: key.to_ascii_lowercase(),
-            brief: brief(item, &detail, agent_starts, &branch),
+            brief: brief(
+                item,
+                &detail,
+                agent_starts,
+                &branch,
+                item.open_pull_request(),
+            ),
             layout: WorkspaceLayout {
                 agent: workflow.agent.clone(),
                 agent_args: workflow.agent_args.clone(),
@@ -1866,6 +1904,111 @@ mod tests {
         };
         assert_eq!(spec.branch, "ar/tech-2031-started");
         assert!(plan.brief.contains("on the branch ar/tech-2031-started"));
+    }
+
+    fn pull_request(status: &str) -> crate::api::schema::WorkItemPullRequestInfo {
+        crate::api::schema::WorkItemPullRequestInfo {
+            source_id: "github".into(),
+            repo: "o/r".into(),
+            number: 12,
+            url: "https://example.test/o/r/pull/12".into(),
+            is_draft: status == "draft",
+            status: status.into(),
+        }
+    }
+
+    /// A ticket on a branch of its own whose pull request is at `status`, with a workspace when
+    /// one is given.
+    fn ticket_with_pull_request(status: &str, workspace: Option<&str>) -> WorkItem {
+        let on_branch = JiraDetail {
+            existing_branch: Some("ar/TECH-7-form".into()),
+            ..detail()
+        };
+        WorkItem {
+            linked_pull_request: Some(pull_request(status)),
+            workspace_id: workspace.map(str::to_string),
+            ..item("TECH-7", Some(&on_branch))
+        }
+    }
+
+    fn choice_ids(choices: &ItemChoices) -> Vec<&str> {
+        choices
+            .choices
+            .iter()
+            .map(|choice| choice.choice_id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn an_open_pull_request_ends_both_ways_to_start_the_work_once_the_ticket_has_a_workspace() {
+        for status in [
+            "draft",
+            "awaiting review · checks running",
+            "approved",
+            "changes requested · CI failing",
+        ] {
+            let choices = source().choices(&ticket_with_pull_request(status, Some("w1")));
+
+            assert_eq!(choice_ids(&choices), ["jira"], "{status}");
+            assert_eq!(
+                choices.default_choice_id.as_deref(),
+                Some("jira"),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn continuing_a_ticket_whose_pull_request_is_open_does_not_ask_for_a_plan_to_start_it() {
+        let source = source();
+        let item = ticket_with_pull_request("approved", None);
+
+        let choices = source.choices(&item);
+        // Only reopening the worktree stays: nothing starts the work again.
+        assert_eq!(choice_ids(&choices), ["local", "jira"]);
+        assert_eq!(choices.choices[0].label, "Continue on ar/TECH-7-form");
+        let description = choices.choices[0]
+            .description
+            .as_deref()
+            .expect("description");
+        assert!(description.contains("o/r#12 is open"), "{description}");
+        assert!(!description.contains("proposes a plan"), "{description}");
+
+        let plan = source
+            .provision_plan(&item, "local", Path::new("/w"))
+            .expect("plan");
+        assert!(plan.brief.contains("o/r#12 (approved)"), "{}", plan.brief);
+        assert!(
+            plan.brief.contains("do not start it again"),
+            "{}",
+            plan.brief
+        );
+        assert!(
+            !plan.brief.contains("propose an implementation plan"),
+            "{}",
+            plan.brief
+        );
+        // The agent still waits to be told what to do.
+        assert!(
+            plan.brief.contains("wait for my instructions"),
+            "{}",
+            plan.brief
+        );
+    }
+
+    #[test]
+    fn a_merged_or_closed_pull_request_leaves_the_start_work_choices_alone() {
+        for status in ["merged", "closed"] {
+            for workspace in [None, Some("w1")] {
+                let choices = source().choices(&ticket_with_pull_request(status, workspace));
+
+                assert_eq!(
+                    choice_ids(&choices),
+                    ["local", "local_agent", "jira"],
+                    "{status} {workspace:?}"
+                );
+            }
+        }
     }
 
     #[test]

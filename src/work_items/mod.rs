@@ -945,10 +945,13 @@ impl WorkItems {
         let source_id = item.source_id.clone();
         let notice = match result {
             Ok(message) => {
-                // Work in its own workspace carries on (e.g. after updating the tracker);
-                // anything else waits for the source to drop the item (e.g. a merge).
-                if before == Some(WorkItemPhase::Local) {
-                    item.phase = WorkItemPhase::Local;
+                // Work in its own workspace carries on (e.g. after updating the tracker), and
+                // so does a ticket whose pull request item took the choice: that item leaves
+                // once its source agrees (e.g. a merge), the ticket does not. Anything else
+                // waits for the source to drop the item.
+                let carried = source::carried_original_id(&choice_id).map(str::to_string);
+                if before == Some(WorkItemPhase::Local) || carried.is_some() {
+                    item.phase = before.unwrap_or(WorkItemPhase::Pending);
                 }
                 item.action_outcome = Some(WorkItemActionOutcome {
                     choice_id,
@@ -956,6 +959,15 @@ impl WorkItems {
                     message: message.clone(),
                 });
                 self.next_poll.insert(source_id, now);
+                // The pull request item that took the choice is polled at once too, so it
+                // leaves the inbox as soon as its source agrees.
+                let folded_source = carried.and_then(|original_id| {
+                    self.folded_choice(key, &original_id)
+                        .map(|(source, _)| source.id().to_string())
+                });
+                if let Some(folded_source) = folded_source {
+                    self.next_poll.insert(folded_source, now);
+                }
                 // A change may be visible on the linked pull request too, e.g. ready for review.
                 self.request_pull_request_lookup(now);
                 WorkItemNotice {
@@ -1051,7 +1063,7 @@ impl WorkItems {
     }
 
     fn project(&self, item: &WorkItem, hosts: &HashMap<(String, u64), String>) -> WorkItemInfo {
-        let (choices, reminder) = self.choices_and_reminder(item);
+        let (choices, reminder) = self.choices_and_reminder(item, hosts);
         item.info(
             choices,
             reminder.map(|reminder| reminder.message),
@@ -1092,16 +1104,21 @@ impl WorkItems {
             .collect()
     }
 
-    /// The choices offered for `item`, including the start reminder's.
+    /// The choices offered for `item`, including the start reminder's and those carried from
+    /// the pull request item folded into it.
     pub(crate) fn item_choices(&self, item: &WorkItem) -> source::ItemChoices {
-        self.choices_and_reminder(item).0
+        self.choices_and_reminder(item, &self.pull_request_hosts())
+            .0
     }
 
     /// The source's choices, plus, while the item has a workspace and its tracker lags
-    /// behind, the reminder's fix (the default when available) and a way to mute it.
+    /// behind, the reminder's fix (the default when available) and a way to mute it. A linked
+    /// pull request adds what its own inbox item offers that the item can carry out for it,
+    /// then a way to open it.
     fn choices_and_reminder(
         &self,
         item: &WorkItem,
+        hosts: &HashMap<(String, u64), String>,
     ) -> (source::ItemChoices, Option<source::StartReminder>) {
         let Some(source) = self.source(&item.source_id) else {
             return (
@@ -1137,21 +1154,25 @@ impl WorkItems {
             );
         }
         if let Some(pull_request) = &item.linked_pull_request {
+            let carried = self.carried_choices(item, hosts);
             // After the tracker fix and its mute, when the reminder shows.
-            let open = choices
+            let mut at = choices
                 .choices
                 .len()
                 .min(usize::from(reminder.is_some()) * 2);
+            // What asks for the default, strongest first: the pull request item's own default,
+            // the tracker fix, a draft waiting on you. Without any, it is the pull request.
+            let mut default_chosen = reminder.as_ref().is_some_and(|reminder| {
+                choices.default_choice_id.as_deref() == Some(reminder.choice.choice_id.as_str())
+            });
             if pull_request.is_draft {
                 // Waiting on you: the default, unless the tracker fix already is.
-                let reminder_is_default = reminder.as_ref().is_some_and(|reminder| {
-                    choices.default_choice_id.as_deref() == Some(reminder.choice.choice_id.as_str())
-                });
-                if !reminder_is_default {
+                if !default_chosen {
                     choices.default_choice_id = Some(source::PULL_REQUEST_READY_CHOICE_ID.into());
                 }
+                default_chosen = true;
                 choices.choices.insert(
-                    open,
+                    at,
                     crate::api::schema::WorkItemChoiceInfo {
                         choice_id: source::PULL_REQUEST_READY_CHOICE_ID.into(),
                         label: "Mark pull request ready for review".into(),
@@ -1164,9 +1185,21 @@ impl WorkItems {
                         confirm: None,
                     },
                 );
+                at += 1;
+            }
+            if let Some(default) = carried
+                .iter()
+                .find(|carried| carried.is_default && carried.choice.disabled_reason.is_none())
+            {
+                choices.default_choice_id = Some(default.choice.choice_id.clone());
+                default_chosen = true;
+            }
+            for carried in carried {
+                choices.choices.insert(at, carried.choice);
+                at += 1;
             }
             choices.choices.insert(
-                open + usize::from(pull_request.is_draft),
+                at,
                 crate::api::schema::WorkItemChoiceInfo {
                     choice_id: source::PULL_REQUEST_OPEN_CHOICE_ID.into(),
                     label: "Open pull request".into(),
@@ -1181,6 +1214,10 @@ impl WorkItems {
                     confirm: None,
                 },
             );
+            if !default_chosen && item.open_pull_request().is_some() {
+                // The work is under review, which takes the start-work default away.
+                choices.default_choice_id = Some(source::PULL_REQUEST_OPEN_CHOICE_ID.into());
+            }
         }
         if let Some(close) = close {
             // Closing the ticket is what is left to do, ahead of starting more work.
@@ -1190,6 +1227,85 @@ impl WorkItems {
             choices.choices.insert(0, close.choice);
         }
         (choices, reminder)
+    }
+
+    /// The choices of the pull request items folded into `host` that it can offer in their
+    /// place: those their source carries out and those that brief an agent. Starting a
+    /// workspace for a pull request item, or opening it, stays with that item. Only while the
+    /// pull request is in flight, the most urgent item's choices first and each choice once.
+    fn carried_choices(
+        &self,
+        host: &WorkItem,
+        hosts: &HashMap<(String, u64), String>,
+    ) -> Vec<CarriedChoice<'_>> {
+        use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
+
+        if host.open_pull_request().is_none() {
+            return Vec::new();
+        }
+        let mut folded: Vec<(&WorkItem, &Arc<dyn WorkItemSource>)> = self
+            .state
+            .items()
+            .iter()
+            .filter(|item| !item.dismissed && item.snoozed_until.is_none() && !item.resolved)
+            .filter(|item| self.folded_into(item, hosts).as_deref() == Some(host.key.as_str()))
+            .filter_map(|item| Some((item, self.source(&item.source_id)?)))
+            .collect();
+        // Stable: items that ask equally much stay in the order the inbox lists them.
+        folded.sort_by_cached_key(|(item, _)| {
+            self.tracker_need(item)
+                .map_or((true, AttentionKind::Unknown), |need| (false, need.kind))
+        });
+        let mut seen = HashSet::new();
+        let mut carried = Vec::new();
+        for (item, source) in folded {
+            let offered = source.choices(item);
+            for choice in offered.choices {
+                let carries_out = matches!(
+                    choice.action,
+                    WorkItemChoiceAction::Perform | WorkItemChoiceAction::BriefAgent
+                );
+                if !carries_out || !seen.insert(choice.choice_id.clone()) {
+                    continue;
+                }
+                let disabled_reason = if choice.action == WorkItemChoiceAction::BriefAgent {
+                    // The agent that gets the brief is the ticket's, not the pull request item's.
+                    host.workspace_id
+                        .is_none()
+                        .then(|| "Work on it locally first".to_string())
+                } else {
+                    choice.disabled_reason.clone()
+                };
+                carried.push(CarriedChoice {
+                    item,
+                    source,
+                    original_id: choice.choice_id.clone(),
+                    is_default: offered.default_choice_id.as_deref()
+                        == Some(choice.choice_id.as_str()),
+                    choice: WorkItemChoiceInfo {
+                        choice_id: source::carried_choice_id(&choice.choice_id),
+                        disabled_reason,
+                        ..choice
+                    },
+                });
+            }
+        }
+        carried
+    }
+
+    /// The pull request item folded into `host_key` that offers `original_id`, the choice the
+    /// ticket carries as `pull_request:` and that id, with its source. `None` once the item no
+    /// longer offers it, or the pull request is no longer in flight.
+    pub(crate) fn folded_choice(
+        &self,
+        host_key: &str,
+        original_id: &str,
+    ) -> Option<(&Arc<dyn WorkItemSource>, &WorkItem)> {
+        let host = self.state.get(host_key)?;
+        self.carried_choices(host, &self.pull_request_hosts())
+            .into_iter()
+            .find(|carried| carried.original_id == original_id)
+            .map(|carried| (carried.source, carried.item))
     }
 
     /// How to close `item`'s ticket, while its linked pull request is merged and the
@@ -1622,6 +1738,20 @@ impl WorkItems {
     }
 }
 
+/// A choice of a pull request item folded into a ticket, as the ticket offers it.
+struct CarriedChoice<'a> {
+    /// The folded item that offers it.
+    item: &'a WorkItem,
+    source: &'a Arc<dyn WorkItemSource>,
+    /// The folded item's own id for it.
+    original_id: String,
+    /// As the ticket offers it: under a prefixed id, and a brief waits on the ticket's own
+    /// workspace rather than the pull request item's.
+    choice: crate::api::schema::WorkItemChoiceInfo,
+    /// Whether the folded item's source makes it that item's default.
+    is_default: bool,
+}
+
 /// A failed choice, a failed provisioning step, or a workspace that could not be removed.
 fn failure_need(item: &WorkItem) -> Option<attention::Need> {
     let failed = |reason: String| Some(attention::Need::new(AttentionKind::Failed, reason));
@@ -1957,5 +2087,429 @@ projects = [
         let later = now + TICKET_LOOKUP_INTERVAL;
         assert!(items.take_due_ticket_lookup(later).is_none());
         assert_eq!(linked_ticket(&items, "fake:pr"), None);
+    }
+
+    const TICKET: &str = "tracker:T-1";
+
+    fn pull_request(status: &str) -> crate::api::schema::WorkItemPullRequestInfo {
+        crate::api::schema::WorkItemPullRequestInfo {
+            source_id: "fake".into(),
+            repo: "o/r".into(),
+            number: 5,
+            url: "https://example.test/o/r/pull/5".into(),
+            is_draft: status == "draft",
+            status: status.into(),
+        }
+    }
+
+    /// A ticket of the `tracker` source with the pull request `o/r#5` linked, and that pull
+    /// request's own inbox item, `pr:5` of the `fake` source, folded into it. The item offers
+    /// `do` by default, and its `brief` is disabled the way it is while the item has no
+    /// workspace of its own.
+    fn ticket_with_pull_request(status: &str) -> (WorkItems, Arc<FakeSource>, Arc<FakeSource>) {
+        let pulls = FakeSource::with_items(Vec::new());
+        *pulls.pull_request_prefix.lock().unwrap() = Some("pr:".into());
+        *pulls.default_choice.lock().unwrap() = Some("do".into());
+        *pulls.brief_disabled.lock().unwrap() = Some("Work on it locally first".into());
+        let tracker = FakeSource::tracker("tracker", "T-");
+        *tracker.work_branch.lock().unwrap() = Some("ar/t-1".into());
+        let mut items = WorkItems::for_test(vec![pulls.clone(), tracker.clone()], Instant::now());
+        poll_source(&mut items, "fake", vec![source_item("pr:5")]);
+        poll_source(&mut items, "tracker", vec![source_item("T-1")]);
+        items.apply_event(
+            WorkItemsEvent::PullRequestsFound {
+                results: vec![(TICKET.into(), Ok(Some(pull_request(status))))],
+                own: Vec::new(),
+            },
+            Instant::now(),
+        );
+        (items, pulls, tracker)
+    }
+
+    fn choice_ids(items: &WorkItems, key: &str) -> Vec<String> {
+        items
+            .item_info(key)
+            .expect("item")
+            .choices
+            .into_iter()
+            .map(|choice| choice.choice_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_ticket_offers_what_its_pull_request_item_can_carry_out_and_defaults_to_its_default() {
+        let (items, _, _) = ticket_with_pull_request("approved");
+
+        // The pull request item's workspace and browser choices stay with it; what the source
+        // carries out or hands to an agent comes first, then opening the pull request, then
+        // the ticket's own.
+        assert_eq!(
+            choice_ids(&items, TICKET),
+            [
+                "pull_request:do",
+                "pull_request:brief",
+                "pull_request_open",
+                "local",
+                "web",
+                "do",
+                "brief"
+            ]
+        );
+        let ticket = items.item_info(TICKET).expect("ticket");
+        assert_eq!(ticket.default_choice_id.as_deref(), Some("pull_request:do"));
+        // A merge still asks twice.
+        assert_eq!(ticket.choices[0].confirm.as_deref(), Some("Sure?"));
+    }
+
+    #[test]
+    fn a_carried_brief_waits_for_the_tickets_own_workspace_not_the_pull_request_items() {
+        let (mut items, pulls, _) = ticket_with_pull_request("approved");
+        let carried = |items: &WorkItems| {
+            items
+                .item_info(TICKET)
+                .expect("ticket")
+                .choices
+                .into_iter()
+                .find(|choice| choice.choice_id == "pull_request:brief")
+                .expect("carried brief")
+                .disabled_reason
+        };
+
+        // The pull request item would brief its agent, but the agent is the ticket's.
+        *pulls.brief_disabled.lock().unwrap() = None;
+        assert_eq!(carried(&items).as_deref(), Some("Work on it locally first"));
+
+        // The pull request item has no workspace to brief, the ticket has.
+        *pulls.brief_disabled.lock().unwrap() = Some("Work on it locally first".into());
+        items.link(TICKET, "w1").expect("ticket");
+        assert_eq!(carried(&items), None);
+    }
+
+    #[test]
+    fn choices_come_from_the_pull_request_item_that_asks_most_and_each_only_once() {
+        let (mut items, _, _) = ticket_with_pull_request("approved");
+        // A second inbox item for the same pull request, listed after the first, which waits
+        // on others and so asks nothing of you.
+        poll_source(
+            &mut items,
+            "fake",
+            vec![source_item("pr:5"), source_item("pr:05")],
+        );
+        items.state.get_mut("fake:pr:5").expect("item").waiting = true;
+
+        let ids = choice_ids(&items, TICKET);
+        assert_eq!(
+            ids.iter().filter(|id| *id == "pull_request:do").count(),
+            1,
+            "{ids:?}"
+        );
+        let (source, item) = items.folded_choice(TICKET, "do").expect("carried");
+        assert_eq!((source.id(), item.key.as_str()), ("fake", "fake:pr:05"));
+    }
+
+    #[test]
+    fn a_carried_default_takes_precedence_over_the_start_reminder() {
+        let (mut items, _, tracker) = ticket_with_pull_request("approved");
+        items.link(TICKET, "w1").expect("ticket");
+        *tracker.start_reminder.lock().unwrap() = Some("Not assigned to you".into());
+
+        let ticket = items.item_info(TICKET).expect("ticket");
+        let ids: Vec<&str> = ticket
+            .choices
+            .iter()
+            .map(|choice| choice.choice_id.as_str())
+            .collect();
+        assert_eq!(
+            ids[..5],
+            [
+                "start_work",
+                "mute_start_reminder",
+                "pull_request:do",
+                "pull_request:brief",
+                "pull_request_open"
+            ]
+        );
+        assert_eq!(ticket.default_choice_id.as_deref(), Some("pull_request:do"));
+    }
+
+    #[test]
+    fn opening_the_pull_request_is_the_default_when_its_item_offers_no_default_to_carry() {
+        let (items, pulls, _) = ticket_with_pull_request("approved");
+        // E.g. every merge method is blocked: the item's default is opening it on GitHub.
+        *pulls.default_choice.lock().unwrap() = Some("web".into());
+
+        assert_eq!(
+            items
+                .item_info(TICKET)
+                .expect("ticket")
+                .default_choice_id
+                .as_deref(),
+            Some("pull_request_open")
+        );
+    }
+
+    #[test]
+    fn a_merged_or_closed_pull_request_carries_nothing_and_leaves_the_default_alone() {
+        for status in ["merged", "closed"] {
+            let (items, _, _) = ticket_with_pull_request(status);
+
+            assert_eq!(
+                choice_ids(&items, TICKET),
+                ["pull_request_open", "local", "web", "do", "brief"],
+                "{status}"
+            );
+            assert_eq!(
+                items
+                    .item_info(TICKET)
+                    .expect("ticket")
+                    .default_choice_id
+                    .as_deref(),
+                Some("web"),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dismissed_pull_request_item_offers_nothing_on_its_ticket() {
+        let (mut items, _, _) = ticket_with_pull_request("approved");
+        items.hide("fake:pr:5", None).expect("item");
+
+        assert_eq!(
+            choice_ids(&items, TICKET),
+            ["pull_request_open", "local", "web", "do", "brief"]
+        );
+        assert!(items.folded_choice(TICKET, "do").is_none());
+    }
+
+    #[test]
+    fn a_carried_choice_that_finishes_does_not_leave_its_ticket_waiting_to_be_dropped() {
+        let phase_after = |choice_id: &str| {
+            let (mut items, _, _) = ticket_with_pull_request("approved");
+            items.begin_action(TICKET, choice_id).expect("idle");
+            items
+                .finish_action(TICKET, Ok("Done".into()), Instant::now())
+                .expect("running");
+            items.get(TICKET).expect("ticket").phase
+        };
+
+        // The pull request item leaves once its source agrees, the ticket stays.
+        assert_eq!(phase_after("pull_request:do"), WorkItemPhase::Pending);
+        // The ticket's own choices still wait for the source to drop it.
+        assert_eq!(phase_after("do"), WorkItemPhase::AwaitingExternal);
+    }
+
+    #[test]
+    fn a_carried_choice_that_finishes_polls_the_pull_request_items_source_at_once() {
+        let due_after = |choice_id: &str| {
+            let (mut items, _, _) = ticket_with_pull_request("approved");
+            let now = Instant::now();
+            items.begin_action(TICKET, choice_id).expect("idle");
+            items
+                .finish_action(TICKET, Ok("Done".into()), now)
+                .expect("running");
+            let mut due: Vec<String> = items
+                .take_due_polls(now)
+                .iter()
+                .map(|source| source.id().to_string())
+                .collect();
+            due.sort();
+            due
+        };
+
+        assert_eq!(due_after("pull_request:do"), ["fake", "tracker"]);
+        assert_eq!(due_after("do"), ["tracker"]);
+    }
+
+    /// The Jira ticket `TECH-7`, on a branch of its own, with the GitHub pull request `o/r#5`
+    /// linked to it as `approved`. With `pull_request_item`, that pull request is also in the
+    /// inbox on its own, ready to merge, and so folded into the ticket.
+    fn jira_ticket_with_github_pull_request(pull_request_item: bool, workspace: bool) -> WorkItems {
+        use crate::config::{
+            GithubRepoConfig, GithubWorkItemsConfig, JiraProjectConfig, JiraWorkItemsConfig,
+        };
+
+        let github = Arc::new(github::GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![GithubRepoConfig {
+                name: "o/r".into(),
+                path: "/src/r".into(),
+                remote: "origin".into(),
+            }],
+            ..GithubWorkItemsConfig::default()
+        }));
+        let jira = Arc::new(jira::JiraSource::new(JiraWorkItemsConfig {
+            site: "example.atlassian.net".into(),
+            email: "me@example.test".into(),
+            projects: vec![JiraProjectConfig {
+                key: "TECH".into(),
+                path: "/src/app".into(),
+                remote: "origin".into(),
+                base_branch: None,
+                branch_template: "ar/{key}-{slug}".into(),
+            }],
+            ..JiraWorkItemsConfig::default()
+        }));
+        let mut items = WorkItems::for_test(vec![github, jira], Instant::now());
+        let now = Instant::now();
+        let listed = |id: &str, title: &str| SourceItem {
+            external_id: id.into(),
+            title: title.into(),
+            context: id.into(),
+            author: None,
+            url: format!("https://example.test/{id}"),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            tracker_state: None,
+        };
+        let prepare = |items: &mut WorkItems, key: &str, detail: serde_json::Value| {
+            items.apply_event(
+                WorkItemsEvent::Prepared {
+                    key: key.into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    prepared: PreparedItem {
+                        waiting: false,
+                        detail: Some(detail),
+                        summary: None,
+                        error: None,
+                        done: false,
+                    },
+                },
+                now,
+            );
+        };
+        poll_source(&mut items, "jira", vec![listed("TECH-7", "Add the thing")]);
+        prepare(
+            &mut items,
+            "jira:TECH-7",
+            serde_json::json!({
+                "status": "In Progress",
+                "status_category": "indeterminate",
+                "assigned_to_me": true,
+                "base_branch": "master",
+                "existing_branch": "ar/TECH-7-thing",
+            }),
+        );
+        if pull_request_item {
+            poll_source(
+                &mut items,
+                "github",
+                vec![listed("merge:o/r#5", "TECH-7 Add the thing")],
+            );
+            prepare(
+                &mut items,
+                "github:merge:o/r#5",
+                serde_json::json!({
+                    "number": 5,
+                    "baseRefName": "main",
+                    "headRefOid": "abc123",
+                    "mergeStateStatus": "CLEAN",
+                    "latestReviews": [
+                        {"author": {"login": "tony"}, "state": "APPROVED", "body": ""}
+                    ],
+                    "mergeMethods": ["SQUASH", "MERGE", "REBASE"],
+                }),
+            );
+        }
+        if workspace {
+            items.link("jira:TECH-7", "w1").expect("ticket");
+        }
+        items.apply_event(
+            WorkItemsEvent::PullRequestsFound {
+                results: vec![(
+                    "jira:TECH-7".into(),
+                    Ok(Some(crate::api::schema::WorkItemPullRequestInfo {
+                        source_id: "github".into(),
+                        repo: "o/r".into(),
+                        number: 5,
+                        url: "https://github.com/o/r/pull/5".into(),
+                        is_draft: false,
+                        status: "approved".into(),
+                    })),
+                )],
+                own: Vec::new(),
+            },
+            now,
+        );
+        items
+    }
+
+    fn labels(items: &WorkItems, key: &str) -> Vec<String> {
+        items
+            .item_info(key)
+            .expect("item")
+            .choices
+            .into_iter()
+            .map(|choice| choice.label)
+            .collect()
+    }
+
+    #[test]
+    fn a_jira_ticket_with_a_ready_to_merge_pull_request_offers_its_merges_not_the_start_of_the_work(
+    ) {
+        let items = jira_ticket_with_github_pull_request(true, true);
+
+        assert_eq!(
+            labels(&items, "jira:TECH-7"),
+            [
+                "Squash and merge",
+                "Ask agent to push and reply",
+                "Create a merge commit",
+                "Rebase and merge",
+                "Open pull request",
+                "Open in Jira"
+            ]
+        );
+        let ticket = items.item_info("jira:TECH-7").expect("ticket");
+        assert_eq!(
+            ticket.default_choice_id.as_deref(),
+            Some("pull_request:merge_squash")
+        );
+        // The merge asks twice, and the brief is free to go to the ticket's own agent.
+        assert!(ticket.choices[0].confirm.is_some());
+        assert_eq!(ticket.choices[1].disabled_reason, None);
+    }
+
+    #[test]
+    fn without_a_workspace_the_ticket_keeps_continue_and_its_carried_brief_waits_for_one() {
+        let items = jira_ticket_with_github_pull_request(true, false);
+
+        assert_eq!(
+            labels(&items, "jira:TECH-7"),
+            [
+                "Squash and merge",
+                "Ask agent to push and reply",
+                "Create a merge commit",
+                "Rebase and merge",
+                "Open pull request",
+                "Continue on ar/TECH-7-thing",
+                "Open in Jira"
+            ]
+        );
+        let ticket = items.item_info("jira:TECH-7").expect("ticket");
+        assert_eq!(
+            ticket.choices[1].disabled_reason.as_deref(),
+            Some("Work on it locally first")
+        );
+    }
+
+    #[test]
+    fn an_open_pull_request_without_its_own_item_or_a_workspace_is_opened_by_default() {
+        let items = jira_ticket_with_github_pull_request(false, false);
+
+        assert_eq!(
+            labels(&items, "jira:TECH-7"),
+            [
+                "Open pull request",
+                "Continue on ar/TECH-7-thing",
+                "Open in Jira"
+            ]
+        );
+        assert_eq!(
+            items
+                .item_info("jira:TECH-7")
+                .expect("ticket")
+                .default_choice_id
+                .as_deref(),
+            Some("pull_request_open")
+        );
     }
 }
