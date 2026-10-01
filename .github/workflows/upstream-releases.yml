@@ -1,7 +1,7 @@
 name: Upstream herdr releases
 
-# Vetch forked from herdr and no longer merges it. Each new stable herdr release becomes an
-# issue labelled `upstream`, to read and port from by hand.
+# This fork merges herdr regularly. Each new stable herdr release becomes an issue
+# labelled `upstream`, a reminder to merge it and to check the fork against its notes.
 on:
   schedule:
     - cron: "17 7 * * *"

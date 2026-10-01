@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Opens one issue per stable herdr release published since Vetch forked from it, so its
-# changes can be read and ported by hand. Runs daily from
-# .github/workflows/upstream-releases.yml; DRY_RUN=1 only prints what it would open.
+# Opens one issue per stable herdr release published since this fork's merge base, as a
+# reminder to merge it. Runs daily from .github/workflows/upstream-releases.yml;
+# DRY_RUN=1 only prints what it would open.
 #
 # REPO      repository to open issues in (default: the current one)
 # UPSTREAM  repository to watch (default: herdrdev/herdr)
@@ -35,7 +35,7 @@ while IFS= read -r tag; do
         gh release view "$tag" --repo "$upstream" --json url,publishedAt \
             --jq '"herdr \(.url | split("/") | last) was released on \(.publishedAt[:10]): \(.url)"'
         echo
-        echo "Read the notes below and port what Vetch wants by hand; close this issue once reviewed."
+        echo "Merge \`upstream/master\` into the fork, check its notes below against the fork's changes, and close this issue once it is merged."
         echo
         echo "---"
         echo
