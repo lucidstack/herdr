@@ -34,6 +34,7 @@ fn append_codex_paste_boundary(runtime: &crate::terminal::TerminalRuntime, text:
 
 impl App {
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
+        self.look_up_missing_agent_transcripts();
         encode_success(
             id,
             ResponseResult::AgentList {
@@ -44,6 +45,9 @@ impl App {
 
     pub(super) fn handle_agent_get(&mut self, id: String, target: AgentTarget) -> String {
         self.reconcile_managed_agent_target(&target.target);
+        if let Ok(resolved) = self.resolve_agent_target(&target.target) {
+            self.look_up_agent_transcript(resolved.ws_idx, resolved.pane_id);
+        }
         let agent = match self.agent_info_for_target(&target.target) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),

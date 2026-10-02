@@ -213,4 +213,15 @@ pub enum AppEvent {
     WorktreeReadFinished(Box<WorktreeReadResult>),
     /// Background work-item poll, preparation or provisioning step completed.
     WorkItems(Box<crate::work_items::WorkItemsEvent>),
+    /// Background searches for agent transcripts no integration reported completed.
+    AgentTranscriptsLookedUp(Vec<AgentTranscriptLookup>),
+}
+
+/// The outcome of searching for the transcript of the session in one pane's terminal.
+#[derive(Debug)]
+pub struct AgentTranscriptLookup {
+    pub pane_id: PaneId,
+    pub terminal_id: crate::terminal::TerminalId,
+    pub session_ref: crate::agent_resume::AgentSessionRef,
+    pub path: Option<String>,
 }

@@ -48,6 +48,10 @@ impl App {
                 changes_workspace
             }
             AppEvent::WorkItems(event) => self.handle_work_items_event(*event).0,
+            AppEvent::AgentTranscriptsLookedUp(lookups) => {
+                self.finish_agent_transcript_lookups(lookups);
+                false
+            }
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -177,6 +181,10 @@ impl App {
         }
         if let AppEvent::WorkItems(event) = ev {
             let _ = self.handle_work_items_event(*event);
+            return Vec::new();
+        }
+        if let AppEvent::AgentTranscriptsLookedUp(lookups) = ev {
+            self.finish_agent_transcript_lookups(lookups);
             return Vec::new();
         }
 

@@ -234,7 +234,8 @@ pub struct AgentSessionInfo {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
-    /// The session's transcript file, when the agent's integration reports one.
+    /// The session's transcript file, when the agent's integration reports one or, for a
+    /// Claude Code session known by its id, Herdr finds it in Claude Code's project folders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
 }

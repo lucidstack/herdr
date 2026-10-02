@@ -51,7 +51,7 @@
               "type": "string"
             },
             "transcript_path": {
-              "description": "The session's transcript file, when the agent's integration reports one.",
+              "description": "The session's transcript file, when the agent's integration reports one or, for a\nClaude Code session known by its id, Herdr finds it in Claude Code's project folders.",
               "type": [
                 "string",
                 "null"
@@ -8469,7 +8469,7 @@
               "type": "string"
             },
             "transcript_path": {
-              "description": "The session's transcript file, when the agent's integration reports one.",
+              "description": "The session's transcript file, when the agent's integration reports one or, for a\nClaude Code session known by its id, Herdr finds it in Claude Code's project folders.",
               "type": [
                 "string",
                 "null"
