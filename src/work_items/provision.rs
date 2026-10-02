@@ -555,6 +555,7 @@ mod tests {
             workspace_label: "#1 Title".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
                 agent: agent.into(),
                 agent_args: Vec::new(),

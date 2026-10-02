@@ -309,10 +309,16 @@ fn with_linked_clones(config: &WorkItemsConfig, linked: &[LinkedClone]) -> WorkI
 fn build_sources(config: &WorkItemsConfig) -> Vec<Arc<dyn WorkItemSource>> {
     let mut sources: Vec<Arc<dyn WorkItemSource>> = Vec::new();
     if let Some(github) = config.github.as_ref().filter(|github| github.enabled) {
-        sources.push(Arc::new(github::GithubSource::new(github.clone())));
+        sources.push(Arc::new(github::GithubSource::new(
+            github.clone(),
+            config.default_agent(),
+        )));
     }
     if let Some(jira) = config.jira.as_ref().filter(|jira| jira.enabled) {
-        sources.push(Arc::new(jira::JiraSource::new(jira.clone())));
+        sources.push(Arc::new(jira::JiraSource::new(
+            jira.clone(),
+            config.default_agent(),
+        )));
     }
     sources
 }
@@ -482,6 +488,15 @@ impl WorkItems {
 
     pub(crate) fn is_enabled(&self) -> bool {
         !self.sources.is_empty()
+    }
+
+    /// Agent of the "Pick next" workspace and the prompt that puts it in plan mode (empty
+    /// for none).
+    pub(crate) fn pick_next_agent(&self) -> (crate::config::AgentLaunch, &str) {
+        (
+            self.config.pick_next_agent(),
+            self.config.pick_next_plan_command(),
+        )
     }
 
     /// Bumped on every visible change; 0 while no source was ever enabled.
@@ -2442,26 +2457,32 @@ projects = [
             GithubRepoConfig, GithubWorkItemsConfig, JiraProjectConfig, JiraWorkItemsConfig,
         };
 
-        let github = Arc::new(github::GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![GithubRepoConfig {
-                name: "o/r".into(),
-                path: "/src/r".into(),
-                remote: "origin".into(),
-            }],
-            ..GithubWorkItemsConfig::default()
-        }));
-        let jira = Arc::new(jira::JiraSource::new(JiraWorkItemsConfig {
-            site: "example.atlassian.net".into(),
-            email: "me@example.test".into(),
-            projects: vec![JiraProjectConfig {
-                key: "TECH".into(),
-                path: "/src/app".into(),
-                remote: "origin".into(),
-                base_branch: None,
-                branch_template: "ar/{key}-{slug}".into(),
-            }],
-            ..JiraWorkItemsConfig::default()
-        }));
+        let github = Arc::new(github::GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![GithubRepoConfig {
+                    name: "o/r".into(),
+                    path: "/src/r".into(),
+                    remote: "origin".into(),
+                }],
+                ..GithubWorkItemsConfig::default()
+            },
+            crate::config::AgentLaunch::default(),
+        ));
+        let jira = Arc::new(jira::JiraSource::new(
+            JiraWorkItemsConfig {
+                site: "example.atlassian.net".into(),
+                email: "me@example.test".into(),
+                projects: vec![JiraProjectConfig {
+                    key: "TECH".into(),
+                    path: "/src/app".into(),
+                    remote: "origin".into(),
+                    base_branch: None,
+                    branch_template: "ar/{key}-{slug}".into(),
+                }],
+                ..JiraWorkItemsConfig::default()
+            },
+            crate::config::AgentLaunch::default(),
+        ));
         let mut items = WorkItems::for_test(vec![github, jira], Instant::now());
         let now = Instant::now();
         let listed = |id: &str, title: &str| SourceItem {
@@ -2632,7 +2653,7 @@ projects = [
                 clone_root: "/projects".into(),
                 ..crate::config::GithubWorkItemsConfig::default()
             }),
-            jira: None,
+            ..WorkItemsConfig::default()
         }
     }
 
@@ -2887,6 +2908,7 @@ projects = [
             workspace_label: "#1 Title".into(),
             agent_name_hint: "agent-1".into(),
             brief: "brief".into(),
+            plan_command: String::new(),
             layout: source::WorkspaceLayout {
                 agent: "claude".into(),
                 agent_args: Vec::new(),

@@ -11,7 +11,7 @@ use tracing::warn;
 
 use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo};
 use crate::config::{
-    BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
+    AgentLaunch, BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
     ReviewRequestedConfig,
 };
 
@@ -157,6 +157,8 @@ pub(crate) struct GithubSource {
     /// Defaults used when no block matches a repository.
     fallback: ReviewRequestedConfig,
     branch_fallback: BranchWorkflowConfig,
+    /// `work_items.agent`, for blocks that do not set their own.
+    default_agent: AgentLaunch,
     /// Your GitHub login, to tell whether an issue is assigned to you.
     viewer: std::sync::Mutex<Option<String>>,
 }
@@ -477,11 +479,12 @@ fn find_clone(root: &Path, repo: &str) -> Result<Option<(std::path::PathBuf, Str
 }
 
 impl GithubSource {
-    pub(crate) fn new(config: GithubWorkItemsConfig) -> Self {
+    pub(crate) fn new(config: GithubWorkItemsConfig, default_agent: AgentLaunch) -> Self {
         Self {
             review_requested: config.review_requested.clone(),
             fallback: ReviewRequestedConfig::default(),
             branch_fallback: BranchWorkflowConfig::default(),
+            default_agent,
             config,
             viewer: std::sync::Mutex::new(None),
         }
@@ -514,8 +517,8 @@ impl GithubSource {
         if event == Event::ReviewRequested {
             let config = self.workflow(repo);
             return Settings {
-                agent: &config.agent,
-                agent_args: &config.agent_args,
+                agent: config.agent(&self.default_agent),
+                agent_args: config.agent_args(&self.default_agent),
                 tabs: &config.tabs,
                 diff_command: &config.diff_command,
                 delete_branch: config.delete_branch,
@@ -524,8 +527,8 @@ impl GithubSource {
         }
         let config = self.branch_workflow(event, repo);
         Settings {
-            agent: &config.agent,
-            agent_args: &config.agent_args,
+            agent: config.agent(&self.default_agent),
+            agent_args: config.agent_args(&self.default_agent),
             tabs: &config.tabs,
             diff_command: &config.viewer_command,
             delete_branch: config.delete_branch,
@@ -2388,6 +2391,7 @@ impl WorkItemSource for GithubSource {
             workspace_label,
             agent_name_hint,
             brief,
+            plan_command: String::new(),
             layout,
             delete_branch: settings.delete_branch,
         })
@@ -2733,19 +2737,15 @@ impl WorkItemSource for GithubSource {
         &self,
         context: &str,
         worktree_directory: &Path,
+        agent: &AgentLaunch,
     ) -> Result<ProvisionPlan, String> {
-        // The agent you work issues with; the first mapped repo picks the block.
+        // The tabs you work issues with; the first mapped repo picks the block.
         let first_repo = self
             .config
             .repos
             .first()
             .map_or("", |repo| repo.name.as_str());
         let config = self.branch_workflow(Event::Assigned, first_repo);
-        if config.agent.is_empty() {
-            return Err(
-                "No agent configured for GitHub; set work_items.github.<block>.agent".into(),
-            );
-        }
         let directory =
             crate::worktree::default_checkout_path(worktree_directory, "pick-next", "github");
         Ok(ProvisionPlan {
@@ -2753,9 +2753,10 @@ impl WorkItemSource for GithubSource {
             workspace_label: format!("Pick next \u{b7} {}", self.label()),
             agent_name_hint: "pick-next-github".into(),
             brief: pick_next_brief(&self.config.repos, context),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
-                agent: config.agent.clone(),
-                agent_args: config.agent_args.clone(),
+                agent: agent.agent.clone(),
+                agent_args: agent.args.clone(),
                 tabs: config.tabs.clone(),
                 diff_command: String::new(),
             },
@@ -3590,10 +3591,13 @@ mod tests {
     }
 
     fn mapped_source(repo: GithubRepoConfig) -> GithubSource {
-        GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![repo],
-            ..GithubWorkItemsConfig::default()
-        })
+        GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo],
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        )
     }
 
     fn repo_config() -> GithubRepoConfig {
@@ -3651,10 +3655,13 @@ mod tests {
     #[test]
     fn an_unmapped_review_request_defaults_to_review_rather_than_linking() {
         // Linking is listed first, but a review of the diff can start straight away.
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            clone_root: "~/projects".into(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                clone_root: "~/projects".into(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)])));
         assert_eq!(
             source.choices(&item).default_choice_id.as_deref(),
@@ -3665,7 +3672,7 @@ mod tests {
     #[test]
     fn an_unmapped_repository_offers_no_worktree_switch() {
         // Without a local clone there is nothing to check out, so only posting is a switch.
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), AgentLaunch::default());
         let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
         let review = choices
             .choices
@@ -3682,10 +3689,13 @@ mod tests {
 
     #[test]
     fn clone_root_offers_linking_an_unmapped_repository_first() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            clone_root: "~/projects".into(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                clone_root: "~/projects".into(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
         let link = &choices.choices[0];
         assert_eq!(link.choice_id, LINK_CLONE_CHOICE_ID);
@@ -3695,11 +3705,14 @@ mod tests {
 
     #[test]
     fn mapped_repository_offers_no_linking() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            clone_root: "~/projects".into(),
-            repos: vec![repo_config()],
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                clone_root: "~/projects".into(),
+                repos: vec![repo_config()],
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let choices = source.choices(&work_item("O/R", Some(&detail(&[("src/a.rs", 500, 0)]))));
         assert!(choices
             .choices
@@ -3770,10 +3783,13 @@ mod tests {
         let worktree = root.join("a-worktree");
         std::fs::create_dir_all(&worktree).expect("creates");
         std::fs::write(worktree.join(".git"), "gitdir: elsewhere\n").expect("writes");
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            clone_root: root.display().to_string(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                clone_root: root.display().to_string(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let linked = source.link_clone(&work_item("o/r", None));
         let _ = std::fs::remove_dir_all(&root);
         let (clone, message) = linked.expect("links");
@@ -3826,29 +3842,35 @@ mod tests {
 
     #[test]
     fn matching_review_requested_block_sets_layout_and_branch_policy() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![repo_config()],
-            review_requested: vec![
-                ReviewRequestedConfig {
-                    repos: vec!["other/repo".into()],
-                    agent: "codex".into(),
-                    ..ReviewRequestedConfig::default()
-                },
-                ReviewRequestedConfig {
-                    repos: vec!["o/r".into()],
-                    delete_branch: false,
-                    on_resolved: OnResolvedConfig::Remove,
-                    tabs: vec![crate::config::WorkspaceTabConfig {
-                        label: "editor".into(),
-                        command: "hx .".into(),
-                        fallback: String::new(),
-                    }],
-                    agent_args: vec!["--model".into(), "opus".into()],
-                    ..ReviewRequestedConfig::default()
-                },
-            ],
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo_config()],
+                review_requested: vec![
+                    ReviewRequestedConfig {
+                        repos: vec!["other/repo".into()],
+                        agent: Some("codex".into()),
+                        ..ReviewRequestedConfig::default()
+                    },
+                    ReviewRequestedConfig {
+                        repos: vec!["o/r".into()],
+                        delete_branch: false,
+                        on_resolved: OnResolvedConfig::Remove,
+                        tabs: vec![crate::config::WorkspaceTabConfig {
+                            label: "editor".into(),
+                            command: "hx .".into(),
+                            fallback: String::new(),
+                        }],
+                        agent_args: Some(vec!["--model".into(), "opus".into()]),
+                        ..ReviewRequestedConfig::default()
+                    },
+                ],
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch {
+                agent: "omp".into(),
+                args: vec!["--plan=x".into()],
+            },
+        );
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
         let plan = source
             .provision_plan(
@@ -3860,7 +3882,8 @@ mod tests {
             .expect("plan");
         assert!(!plan.delete_branch);
         assert_eq!(plan.layout.tabs[0].command, "hx .");
-        assert_eq!(plan.layout.agent, "claude");
+        // The block sets only its arguments: the agent still comes from work_items.agent.
+        assert_eq!(plan.layout.agent, "omp");
         assert_eq!(plan.layout.agent_args, ["--model", "opus"]);
         assert!(source.remove_on_resolved(&item));
         assert!(!source.remove_on_resolved(&work_item("x/y", None)));
@@ -3872,7 +3895,7 @@ mod tests {
 
     #[test]
     fn reviewing_without_a_worktree_downloads_the_diff_with_gh() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), AgentLaunch::default());
         let change = detail(&[("src/a.rs", 40, 2)]);
         let item = work_item("o/r", Some(&change));
         let choices = source.choices(&item);
@@ -3947,14 +3970,17 @@ mod tests {
 
     #[test]
     fn agent_led_choices_are_disabled_without_an_agent() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![repo_config()],
-            review_requested: vec![ReviewRequestedConfig {
-                agent: String::new(),
-                ..ReviewRequestedConfig::default()
-            }],
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo_config()],
+                review_requested: vec![ReviewRequestedConfig {
+                    agent: Some(String::new()),
+                    ..ReviewRequestedConfig::default()
+                }],
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
         let choices = source.choices(&item);
         let disabled: Vec<&str> = choices
@@ -3972,14 +3998,17 @@ mod tests {
 
     #[test]
     fn a_review_that_cannot_run_leaves_no_default() {
-        let without_agent = GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![repo_config()],
-            review_requested: vec![ReviewRequestedConfig {
-                agent: String::new(),
-                ..ReviewRequestedConfig::default()
-            }],
-            ..GithubWorkItemsConfig::default()
-        });
+        let without_agent = GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo_config()],
+                review_requested: vec![ReviewRequestedConfig {
+                    agent: Some(String::new()),
+                    ..ReviewRequestedConfig::default()
+                }],
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let large = detail(&[("src/a.rs", 40, 2)]);
         // Reviewing is the default while it can run, and nothing is once it cannot.
         assert_eq!(
@@ -4276,15 +4305,18 @@ mod tests {
 
     #[test]
     fn changes_requested_workflow_is_configured_separately() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            repos: vec![repo_config()],
-            changes_requested: vec![BranchWorkflowConfig {
-                agent: String::new(),
-                on_resolved: OnResolvedConfig::Remove,
-                ..BranchWorkflowConfig::default()
-            }],
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                repos: vec![repo_config()],
+                changes_requested: vec![BranchWorkflowConfig {
+                    agent: Some(String::new()),
+                    on_resolved: OnResolvedConfig::Remove,
+                    ..BranchWorkflowConfig::default()
+                }],
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let item = changes_item(Some(&feedback_detail()));
         let agent_choice = source
             .choices(&item)
@@ -4460,7 +4492,7 @@ mod tests {
 
     #[test]
     fn mention_downloads_the_thread_without_a_checkout() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), AgentLaunch::default());
         let item = event_item(
             MENTION_PREFIX,
             serde_json::to_value(GithubIssueDetail {
@@ -4528,22 +4560,28 @@ printf ']}}'
         only_reviews.assigned.clear();
         only_reviews.ready_to_merge.clear();
         let gh = fake_gh("paging", 250);
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            gh_path: gh.display().to_string(),
-            max_results: 1000,
-            queries: only_reviews.clone(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                max_results: 1000,
+                queries: only_reviews.clone(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         assert_eq!(source.poll().expect("poll").len(), 250);
         let pages = std::fs::read_to_string(gh.with_file_name("pages")).unwrap();
         assert_eq!(pages.lines().collect::<Vec<_>>(), vec!["1", "2", "3"]);
 
-        let limited = GithubSource::new(GithubWorkItemsConfig {
-            gh_path: gh.display().to_string(),
-            max_results: 120,
-            queries: only_reviews,
-            ..GithubWorkItemsConfig::default()
-        });
+        let limited = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                max_results: 120,
+                queries: only_reviews,
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let items = limited.poll().expect("poll");
         let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         assert_eq!(items.len(), 120);
@@ -4585,10 +4623,13 @@ esac
     #[test]
     fn fetch_returns_the_ticket_with_its_description_and_comments() {
         let gh = fake_gh_issue("fetch-found");
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            gh_path: gh.display().to_string(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let detail = source.fetch("o/r#5").expect("fetch").expect("found");
         let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         assert_eq!(detail.ticket.key, "o/r#5");
@@ -4606,10 +4647,13 @@ esac
     #[test]
     fn fetch_returns_none_for_a_missing_ticket() {
         let gh = fake_gh_issue("fetch-missing");
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            gh_path: gh.display().to_string(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let result = source.fetch("o/r#404").expect("fetch");
         let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         assert!(result.is_none());
@@ -4669,7 +4713,7 @@ esac
 
     #[test]
     fn clean_pull_request_offers_your_default_merge_with_a_confirmation() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), AgentLaunch::default());
         let choices = source.choices(&merge_item(&merge_detail("CLEAN")));
         let ids: Vec<&str> = choices
             .choices
@@ -4731,7 +4775,7 @@ esac
 
     #[test]
     fn blocked_merge_is_disabled_with_the_reason_and_leaves_no_default() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
+        let source = GithubSource::new(GithubWorkItemsConfig::default(), AgentLaunch::default());
         let choices = source.choices(&merge_item(&merge_detail("BEHIND")));
         assert_eq!(
             choices.choices[0].disabled_reason.as_deref(),
@@ -4757,10 +4801,13 @@ esac
         )
         .unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            gh_path: gh.display().to_string(),
-            ..GithubWorkItemsConfig::default()
-        });
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
         let result = source.perform(&merge_item(&merge_detail("CLEAN")), "merge_commit");
         let args = std::fs::read_to_string(&log).unwrap_or_default();
         let _ = std::fs::remove_dir_all(&dir);

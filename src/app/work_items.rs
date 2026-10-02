@@ -766,9 +766,20 @@ impl App {
         if self.work_items.has_job(&key) {
             return Err(("work_item_busy", "Pick next is already starting".into()));
         }
-        let plan = source
-            .pick_next_plan(context, &self.state.worktree_directory)
+        let (agent, plan_command) = self.work_items.pick_next_agent();
+        if agent.agent.trim().is_empty() {
+            return Err((
+                "work_item_unavailable",
+                "No agent configured for pick next; set work_items.pick_next.agent or \
+                 work_items.agent"
+                    .into(),
+            ));
+        }
+        let plan_command = plan_command.to_string();
+        let mut plan = source
+            .pick_next_plan(context, &self.state.worktree_directory, &agent)
             .map_err(|message| ("work_item_unavailable", message))?;
+        plan.plan_command = plan_command;
         let workspace_source = plan.source.clone();
         let job_id = self
             .work_items
@@ -1470,6 +1481,12 @@ impl App {
             .work_items
             .job(job_id)
             .and_then(|job| job.agent_name.clone());
+        // Only terminal output and `agent.get` advance a started agent to ready. An agent whose
+        // integration reports it idle before the start settles (omp) then stays silent, so its
+        // brief would never be accepted.
+        if let Some(name) = agent_name.as_deref() {
+            self.reconcile_managed_agent_target(name);
+        }
         let accepts_paste = agent_name
             .as_deref()
             .is_some_and(|name| self.work_item_agent_accepts_paste(name));
@@ -1483,7 +1500,12 @@ impl App {
             let Some(job) = self.work_items.job_mut(job_id) else {
                 return;
             };
-            let text = job.plan.brief.clone();
+            // A plan-mode command goes in first; the brief follows once it is accepted.
+            let text = if job.plan.plan_command.is_empty() {
+                job.plan.brief.clone()
+            } else {
+                job.plan.plan_command.clone()
+            };
             let Some(attempt) = job.brief.as_mut() else {
                 return;
             };
@@ -1550,6 +1572,14 @@ impl App {
             }
             Next::Done => {
                 if let Some(job) = self.work_items.job_mut(job_id) {
+                    if !job.plan.plan_command.is_empty() {
+                        // The agent is in plan mode: the brief is its first planning request.
+                        job.plan.plan_command.clear();
+                        if let Some(attempt) = job.brief.as_mut() {
+                            attempt.next_attempt = now + AGENT_RETRY_INTERVAL;
+                        }
+                        return;
+                    }
                     job.brief = None;
                     job.brief_confirmation = Some(BriefConfirmation {
                         sent: now,
@@ -2290,6 +2320,7 @@ mod tests {
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
             brief: "brief".into(),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
                 agent: String::new(),
                 agent_args: Vec::new(),
@@ -2647,6 +2678,7 @@ mod tests {
             workspace_label: "Pick next \u{b7} Fake".into(),
             agent_name_hint: "pick-next-fake".into(),
             brief: "investigate".into(),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
                 agent: String::new(),
                 agent_args: Vec::new(),
@@ -2839,6 +2871,7 @@ mod tests {
             workspace_label: "#1 Title 1".into(),
             agent_name_hint: "review-1".into(),
             brief: "line one\nline two".into(),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
                 agent: "claude".into(),
                 agent_args: Vec::new(),
@@ -2911,6 +2944,99 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert_eq!(&sent[..], b"\x1b[200~line one\nline two\x1b[201~");
+    }
+
+    #[tokio::test]
+    async fn plan_command_is_submitted_before_the_brief() {
+        use crate::work_items::provision::AgentAttempt;
+
+        let Briefing {
+            mut app,
+            job_id,
+            pane_id,
+            mut pty_rx,
+            ..
+        } = briefing();
+        app.work_items.job_mut(job_id).unwrap().plan.plan_command = "/plan".into();
+        app.lookup_runtime_sender(0, pane_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[?2004h");
+        let started = Instant::now();
+        app.work_items.job_mut(job_id).unwrap().brief = Some(AgentAttempt {
+            started,
+            next_attempt: started,
+            pending: None,
+            blocked: false,
+        });
+
+        let position = |typed: &[u8], needle: &[u8]| {
+            typed
+                .windows(needle.len())
+                .position(|window| window == needle)
+        };
+        let mut typed = Vec::new();
+        let mut now = started;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while position(&typed, b"line one").is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "brief not sent: {:?}",
+                String::from_utf8_lossy(&typed)
+            );
+            app.advance_work_item_brief(job_id, now);
+            while let Ok(bytes) = pty_rx.try_recv() {
+                typed.extend_from_slice(&bytes);
+            }
+            now += Duration::from_secs(1);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let plan = position(&typed, b"/plan").expect("plan command typed");
+        assert!(plan < position(&typed, b"line one").expect("brief typed"));
+    }
+
+    #[tokio::test]
+    async fn brief_reaches_a_started_agent_that_went_idle_without_further_output() {
+        use crate::detect::Agent;
+        use crate::work_items::provision::AgentAttempt;
+
+        let Briefing {
+            mut app,
+            job_id,
+            pane_id,
+            terminal_id,
+            mut pty_rx,
+        } = briefing();
+        let started = Instant::now();
+        // Started through `agent.start`, already idle, and silent since the start settled.
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .begin_managed_agent(
+                "review-1".into(),
+                Agent::Claude,
+                started,
+                Duration::ZERO,
+                Duration::from_secs(60),
+            );
+        app.lookup_runtime_sender(0, pane_id)
+            .unwrap()
+            .test_process_pty_bytes(b"\x1b[?2004h");
+        app.work_items.job_mut(job_id).unwrap().brief = Some(AgentAttempt {
+            started,
+            next_attempt: started,
+            pending: None,
+            blocked: false,
+        });
+
+        let mut now = started;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pty_rx.try_recv().is_err() {
+            assert!(Instant::now() < deadline, "brief not sent");
+            app.advance_work_item_brief(job_id, now);
+            now += Duration::from_secs(1);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -3072,6 +3198,7 @@ mod tests {
             workspace_label: "Pick next \u{b7} Fake".into(),
             agent_name_hint: "pick-next-fake".into(),
             brief: "investigate".into(),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
                 agent: String::new(),
                 agent_args: Vec::new(),

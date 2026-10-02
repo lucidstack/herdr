@@ -1511,10 +1511,40 @@
       "title": "Work items",
       "keys": [
         {
+          "key": "work_items.agent",
+          "type": "string",
+          "default": "\"claude\"",
+          "description": "Coding agent started in the first tab of every workspace opened from a work item: GitHub and Jira workflows and Pick next. A workflow block's agent, or work_items.pick_next.agent, overrides it. Empty disables the agent-led choices."
+        },
+        {
+          "key": "work_items.agent_args",
+          "type": "list of strings",
+          "default": "[]",
+          "description": "Extra arguments for work_items.agent, for example [\"--model\", \"opus\"]. A workflow block's agent_args, or work_items.pick_next.agent_args, overrides them, separately from the agent."
+        },
+        {
+          "key": "work_items.pick_next.agent",
+          "type": "string",
+          "default": "unset",
+          "description": "Agent started in the Pick next discovery workspace. Unset uses work_items.agent; empty disables Pick next."
+        },
+        {
+          "key": "work_items.pick_next.agent_args",
+          "type": "list of strings",
+          "default": "unset",
+          "description": "Extra arguments for the Pick next agent. Unset uses work_items.agent_args."
+        },
+        {
+          "key": "work_items.pick_next.plan_command",
+          "type": "string",
+          "default": "unset",
+          "description": "Prompt sent to the Pick next agent before its brief to start it in plan mode, so the brief arrives as its first planning request. Unset sends \"/plan\" when the agent is omp and nothing otherwise; empty sends nothing. Herdr never approves the plan."
+        },
+        {
           "key": "work_items.github.enabled",
           "type": "boolean",
           "default": "true",
-          "description": "Poll GitHub for pull requests; setting the [work_items.github] table enables the source. Map local clones with [[work_items.github.repos]] entries (name, path, remote) to offer worktree reviews; worktrees are created through Herdr's worktree support, so worktree.created and worktree.removed plugin hooks run for them. Configure the review-request workflow with [[work_items.github.review_requested]] blocks: repos (owner/name list; empty applies to every repository, first matching block wins), on_resolved (\"keep\" or \"remove\"), delete_branch (delete the local review branch when its worktree is removed, default true), agent, agent_args (extra agent arguments, e.g. [\"--model\", \"opus\", \"--effort\", \"high\"] for Claude Code), tabs (the tabs after the agent's tab, each { label, command, fallback }; {plugin:ID} is an installed plugin's folder and {base} the pull request's base; fallback runs when command names a plugin that is not installed; default an editor tab with nvim . and a review tab with herdr-reviewr, falling back to lazygit) and diff_command ({file} is the downloaded diff). Configure the other events with [[work_items.github.changes_requested]], [[work_items.github.ci_failing]], [[work_items.github.assigned]] and [[work_items.github.mentioned]] blocks: repos, on_resolved, delete_branch (default false), agent, agent_args, tabs (as for review_requested, without {base}; default an editor tab with nvim . and a lazygit tab) and viewer_command ({file} is a downloaded thread). Pull request worktrees use the pull request's head branch, reopening a worktree that already has it checked out; assigned issues get a new issue/<number>-<title> branch from the default branch; mentions download the thread without a checkout."
+          "description": "Poll GitHub for pull requests; setting the [work_items.github] table enables the source. Map local clones with [[work_items.github.repos]] entries (name, path, remote) to offer worktree reviews; worktrees are created through Herdr's worktree support, so worktree.created and worktree.removed plugin hooks run for them. Configure the review-request workflow with [[work_items.github.review_requested]] blocks: repos (owner/name list; empty applies to every repository, first matching block wins), on_resolved (\"keep\" or \"remove\"), delete_branch (delete the local review branch when its worktree is removed, default true), agent (default work_items.agent), agent_args (extra agent arguments, e.g. [\"--model\", \"opus\", \"--effort\", \"high\"] for Claude Code; default work_items.agent_args), tabs (the tabs after the agent's tab, each { label, command, fallback }; {plugin:ID} is an installed plugin's folder and {base} the pull request's base; fallback runs when command names a plugin that is not installed; default an editor tab with nvim . and a review tab with herdr-reviewr, falling back to lazygit) and diff_command ({file} is the downloaded diff). Configure the other events with [[work_items.github.changes_requested]], [[work_items.github.ci_failing]], [[work_items.github.assigned]] and [[work_items.github.mentioned]] blocks: repos, on_resolved, delete_branch (default false), agent, agent_args, tabs (as for review_requested, without {base}; default an editor tab with nvim . and a lazygit tab) and viewer_command ({file} is a downloaded thread). Pull request worktrees use the pull request's head branch, reopening a worktree that already has it checked out; assigned issues get a new issue/<number>-<title> branch from the default branch; mentions download the thread without a checkout."
         },
         {
           "key": "work_items.github.gh_path",
@@ -1580,7 +1610,7 @@
           "key": "work_items.jira.enabled",
           "type": "boolean",
           "default": "true",
-          "description": "Poll Jira Cloud for issues; setting the [work_items.jira] table enables the source. The API token is read from the Herdr server's environment (token_env) and passed to curl on stdin; scoped tokens are sent through the api.atlassian.com gateway automatically. Map projects to local clones with [[work_items.jira.projects]] entries (key, path, remote, base_branch, branch_template with {key}, {key_lower} and {slug}); configure the workflow with [[work_items.jira.issues]] blocks whose repos list project keys (on_resolved, delete_branch, agent, agent_args, tabs; tabs are as for GitHub workflows, default an editor tab with nvim . and a lazygit tab)."
+          "description": "Poll Jira Cloud for issues; setting the [work_items.jira] table enables the source. The API token is read from the Herdr server's environment (token_env) and passed to curl on stdin; scoped tokens are sent through the api.atlassian.com gateway automatically. Map projects to local clones with [[work_items.jira.projects]] entries (key, path, remote, base_branch, branch_template with {key}, {key_lower} and {slug}); configure the workflow with [[work_items.jira.issues]] blocks whose repos list project keys (on_resolved, delete_branch, agent, agent_args, tabs; agent and agent_args default to work_items.agent and work_items.agent_args; tabs are as for GitHub workflows, default an editor tab with nvim . and a lazygit tab)."
         },
         {
           "key": "work_items.jira.site",

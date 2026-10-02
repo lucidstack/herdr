@@ -142,6 +142,9 @@ pub(crate) struct ProvisionPlan {
     pub agent_name_hint: String,
     /// Prompt delivered to the agent once it is ready.
     pub brief: String,
+    /// Prompt sent before the brief to switch the agent into plan mode, so the brief
+    /// arrives as its first planning request; empty sends none.
+    pub plan_command: String,
     pub layout: WorkspaceLayout,
     /// Delete the review branch when its worktree is removed.
     pub delete_branch: bool,
@@ -246,12 +249,13 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// `TECH-123` or `owner/repo#12`); `None` when the key does not exist.
     fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String>;
     /// Pure: plan for this provider's shared "Pick next" discovery workspace (a scratch
-    /// directory; no checkout), briefed with `context` (may be empty) to investigate the
-    /// tracker read-only and recommend what to work on next.
+    /// directory; no checkout) running `agent`, briefed with `context` (may be empty) to
+    /// investigate the tracker read-only and recommend what to work on next.
     fn pick_next_plan(
         &self,
         context: &str,
         worktree_directory: &Path,
+        agent: &crate::config::AgentLaunch,
     ) -> Result<ProvisionPlan, String>;
     /// Blocking; background thread only. Carries out a choice whose action is `Perform`
     /// and returns a one-line result for the user.

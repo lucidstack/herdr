@@ -120,6 +120,16 @@ tabs = [
 
 `agent` is the coding agent started in the first tab; leave it empty to disable the agent-led choices. `agent_args` are passed to it, for example `agent_args = ["--model", "opus", "--effort", "high"]` for Claude Code.
 
+Both default to `work_items.agent` and `work_items.agent_args`, which apply to every workspace Herdr opens from a work item: GitHub and Jira workflows alike, and **Pick next**. Switching every workflow to another agent is one line, and a block that sets its own `agent` or `agent_args` still wins for its repositories:
+
+```toml
+[work_items]
+agent = "omp"               # default: "claude"
+agent_args = []
+```
+
+A block's `agent` and `agent_args` override the defaults separately: a block that sets only `agent_args` keeps the default agent, and one that sets only `agent` keeps the default arguments.
+
 `tabs` lists the tabs opened after the agent's tab when the workspace has a checkout, in order. Each tab has a `label` and a `command` typed into it; `{plugin:ID}` in a command is an installed plugin's folder. When a command names a plugin that is not installed, the tab runs its `fallback` instead, or is skipped without one. An empty `tabs` list opens only the agent's tab. By default a worktree gets an **editor** tab (`nvim .`) and a **lazygit** tab.
 
 Review requests default to an **editor** tab and a **review** tab running [herdr-reviewr](https://github.com/persiyanov/herdr-reviewr) with the pull request's base branch fetched and passed as `--base`, so its branch scope shows exactly the pull request's changes; `{base}` in a review-request tab is that base. Without the `persiyanov.reviewr` plugin installed, the review tab falls back to lazygit. See the [configuration reference](/docs/config-reference/) for every key.
@@ -199,7 +209,16 @@ The agent in the item's workspace hears about what these choices do. Once one su
 
 ### Picking what to work on next
 
-Click **+ Pick next task…** at the bottom of the inbox (or bind `keys.pick_next`, unbound by default) when you are not sure what to take next. Choose the tracker, with Tab or a click when several are configured, and optionally say what you are after. Herdr opens a scratch workspace, **Pick next · Jira** for example, with the agent from your workflow and briefs it to investigate read-only: `herdr work-item search` and `show`, plus your mapped clones through `git -C`. It recommends one ticket and up to two alternatives, with why now, who works on related tickets and any overlap, then asks you.
+Click **+ Pick next task…** at the bottom of the inbox (or bind `keys.pick_next`, unbound by default) when you are not sure what to take next. Choose the tracker, with Tab or a click when several are configured, and optionally say what you are after. Herdr opens a scratch workspace, **Pick next · Jira** for example, with the agent from `work_items.agent` and briefs it to investigate read-only: `herdr work-item search` and `show`, plus your mapped clones through `git -C`. It recommends one ticket and up to two alternatives, with why now, who works on related tickets and any overlap, then asks you.
+
+Pick next can run another agent, or the same one with other arguments, under `[work_items.pick_next]`; each unset key falls back to `work_items.agent` and `work_items.agent_args`. It starts the agent in plan mode where Herdr knows how: for omp it sends `/plan` before the brief, so the brief is omp's first planning request and omp plans with you before it touches anything. The plan is not approved for you. `plan_command` sets the prompt sent before the brief for other agents, or `""` to send none:
+
+```toml
+[work_items.pick_next]
+agent = "omp"
+agent_args = ["--model", "opus"]
+plan_command = "/plan"      # default: "/plan" for omp, nothing otherwise
+```
 
 Talk it through in its pane. Once you confirm a pick, the agent adds the ticket to the inbox with `herdr work-item add` and chooses it (the local choice unless you ask for another), so its workspace is set up as usual. It never assigns or transitions the ticket.
 

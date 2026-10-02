@@ -57,13 +57,63 @@ fn default_review_tabs() -> Vec<WorkspaceTabConfig> {
 pub const DEFAULT_JIRA_JQL: &str =
     "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// Agent started in work-item workspaces when nothing chooses another.
+pub const DEFAULT_AGENT: &str = "claude";
+/// omp's slash command that switches its session into plan mode.
+const OMP_PLAN_COMMAND: &str = "/plan";
+
+/// An agent kind and the extra arguments it is started with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLaunch {
+    /// Agent kind, e.g. "claude" or "omp"; empty starts none.
+    pub agent: String,
+    pub args: Vec<String>,
+}
+
+impl Default for AgentLaunch {
+    fn default() -> Self {
+        Self {
+            agent: DEFAULT_AGENT.into(),
+            args: Vec::new(),
+        }
+    }
+}
+
+impl AgentLaunch {
+    /// `agent` and `args` where set, each falling back to `self` on its own.
+    fn overridden_by(&self, agent: Option<&String>, args: Option<&Vec<String>>) -> Self {
+        Self {
+            agent: agent.unwrap_or(&self.agent).clone(),
+            args: args.unwrap_or(&self.args).clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct WorkItemsConfig {
+    /// Agent started in the first tab of every workspace opened from a work item, unless a workflow block or pick_next sets its own. Empty disables the agent-led choices. Default: "claude".
+    pub agent: String,
+    /// Extra arguments for that agent, unless a workflow block or pick_next sets its own. Default: [].
+    pub agent_args: Vec<String>,
+    /// The "Pick next task…" discovery workspace.
+    pub pick_next: PickNextConfig,
     /// GitHub pull requests. Unset disables the source.
     pub github: Option<GithubWorkItemsConfig>,
     /// Jira issues. Unset disables the source.
     pub jira: Option<JiraWorkItemsConfig>,
+}
+
+impl Default for WorkItemsConfig {
+    fn default() -> Self {
+        Self {
+            agent: DEFAULT_AGENT.into(),
+            agent_args: Vec::new(),
+            pick_next: PickNextConfig::default(),
+            github: None,
+            jira: None,
+        }
+    }
 }
 
 impl WorkItemsConfig {
@@ -72,6 +122,50 @@ impl WorkItemsConfig {
     pub fn credential_env_names(&self) -> impl Iterator<Item = &str> {
         self.jira.iter().map(|jira| jira.token_env.as_str())
     }
+
+    /// The agent of workflow blocks that do not set their own.
+    pub fn default_agent(&self) -> AgentLaunch {
+        AgentLaunch {
+            agent: self.agent.clone(),
+            args: self.agent_args.clone(),
+        }
+    }
+
+    /// The agent of the "Pick next" workspace.
+    pub fn pick_next_agent(&self) -> AgentLaunch {
+        self.default_agent().overridden_by(
+            self.pick_next.agent.as_ref(),
+            self.pick_next.agent_args.as_ref(),
+        )
+    }
+
+    /// Prompt sent to the "Pick next" agent before its brief to switch it into plan mode;
+    /// empty sends none.
+    pub fn pick_next_plan_command(&self) -> &str {
+        match &self.pick_next.plan_command {
+            Some(command) => command.trim(),
+            None if self
+                .pick_next_agent()
+                .agent
+                .trim()
+                .eq_ignore_ascii_case("omp") =>
+            {
+                OMP_PLAN_COMMAND
+            }
+            None => "",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PickNextConfig {
+    /// Agent started in the "Pick next" workspace. Empty disables pick next. Default: work_items.agent.
+    pub agent: Option<String>,
+    /// Extra arguments for the "Pick next" agent. Default: work_items.agent_args.
+    pub agent_args: Option<Vec<String>>,
+    /// Prompt sent to the agent before the brief, to start it in plan mode; the brief then arrives as its first planning request. Empty sends none. Default: "/plan" when the agent is omp, otherwise none.
+    pub plan_command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -250,10 +344,10 @@ pub struct ReviewRequestedConfig {
     pub on_resolved: OnResolvedConfig,
     /// Delete the local review branch when its worktree is removed. Default: true.
     pub delete_branch: bool,
-    /// Agent started in the first tab. Empty disables the agent-led choices. Default: "claude".
-    pub agent: String,
-    /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
-    pub agent_args: Vec<String>,
+    /// Agent started in the first tab. Empty disables the agent-led choices. Default: work_items.agent.
+    pub agent: Option<String>,
+    /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: work_items.agent_args.
+    pub agent_args: Option<Vec<String>>,
     /// Tabs after the agent's tab in a worktree review, each { label, command, fallback }; {base} is the pull request's base branch. Default: an "editor" tab running "nvim ." and a "review" tab running "{plugin:persiyanov.reviewr}/bin/herdr-reviewr --base {base}", falling back to "lazygit".
     pub tabs: Vec<WorkspaceTabConfig>,
     /// Command run in the diff tab of an agent review without checkout; {file} is the downloaded diff. Empty disables the tab. Default: "nvim -R {file}".
@@ -266,8 +360,8 @@ impl Default for ReviewRequestedConfig {
             repos: Vec::new(),
             on_resolved: OnResolvedConfig::Keep,
             delete_branch: true,
-            agent: "claude".into(),
-            agent_args: Vec::new(),
+            agent: None,
+            agent_args: None,
             tabs: default_review_tabs(),
             diff_command: "nvim -R {file}".into(),
         }
@@ -277,6 +371,16 @@ impl Default for ReviewRequestedConfig {
 impl ReviewRequestedConfig {
     pub fn applies_to(&self, repo: &str) -> bool {
         repo_matches(&self.repos, repo)
+    }
+
+    /// This block's agent, else `default`'s.
+    pub fn agent<'a>(&'a self, default: &'a AgentLaunch) -> &'a str {
+        self.agent.as_deref().unwrap_or(&default.agent)
+    }
+
+    /// This block's agent arguments, else `default`'s.
+    pub fn agent_args<'a>(&'a self, default: &'a AgentLaunch) -> &'a [String] {
+        self.agent_args.as_deref().unwrap_or(&default.args)
     }
 }
 
@@ -289,10 +393,10 @@ pub struct BranchWorkflowConfig {
     pub on_resolved: OnResolvedConfig,
     /// Delete the local branch when a worktree created for it is removed. Default: false.
     pub delete_branch: bool,
-    /// Agent started in the first tab. Empty disables the agent-led choices. Default: "claude".
-    pub agent: String,
-    /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
-    pub agent_args: Vec<String>,
+    /// Agent started in the first tab. Empty disables the agent-led choices. Default: work_items.agent.
+    pub agent: Option<String>,
+    /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: work_items.agent_args.
+    pub agent_args: Option<Vec<String>>,
     /// Tabs after the agent's tab in a workspace with a checkout, each { label, command, fallback }. Default: an "editor" tab running "nvim ." and a "lazygit" tab running "lazygit".
     pub tabs: Vec<WorkspaceTabConfig>,
     /// Command showing a downloaded thread when there is no checkout; {file} is the file. Empty disables the tab. Default: "nvim -R {file}".
@@ -305,8 +409,8 @@ impl Default for BranchWorkflowConfig {
             repos: Vec::new(),
             on_resolved: OnResolvedConfig::Keep,
             delete_branch: false,
-            agent: "claude".into(),
-            agent_args: Vec::new(),
+            agent: None,
+            agent_args: None,
             tabs: default_branch_tabs(),
             viewer_command: "nvim -R {file}".into(),
         }
@@ -316,6 +420,16 @@ impl Default for BranchWorkflowConfig {
 impl BranchWorkflowConfig {
     pub fn applies_to(&self, repo: &str) -> bool {
         repo_matches(&self.repos, repo)
+    }
+
+    /// This block's agent, else `default`'s.
+    pub fn agent<'a>(&'a self, default: &'a AgentLaunch) -> &'a str {
+        self.agent.as_deref().unwrap_or(&default.agent)
+    }
+
+    /// This block's agent arguments, else `default`'s.
+    pub fn agent_args<'a>(&'a self, default: &'a AgentLaunch) -> &'a [String] {
+        self.agent_args.as_deref().unwrap_or(&default.args)
     }
 }
 
@@ -389,7 +503,75 @@ agent = ""
         assert!(!app.delete_branch);
         assert!(fallback.applies_to("acme/other"));
         assert_eq!(fallback.on_resolved, OnResolvedConfig::Keep);
-        assert_eq!(fallback.agent, "");
+        // An empty agent set on the block beats the default.
+        assert_eq!(fallback.agent(&AgentLaunch::default()), "");
+    }
+
+    #[test]
+    fn global_agent_reaches_every_workflow_and_pick_next_unless_overridden() {
+        let config: Config = toml::from_str(
+            r#"
+[work_items]
+agent = "omp"
+agent_args = ["--model", "x"]
+
+[work_items.github]
+[[work_items.github.review_requested]]
+repos = ["acme/app"]
+[[work_items.github.review_requested]]
+agent = "claude"
+
+[work_items.jira]
+[[work_items.jira.issues]]
+agent_args = []
+"#,
+        )
+        .expect("config parses");
+        let work_items = config.work_items;
+        let default = work_items.default_agent();
+        let github = work_items.github.as_ref().expect("github configured");
+        let [inherits, own] = github.review_requested.as_slice() else {
+            panic!("two blocks");
+        };
+        assert_eq!(inherits.agent(&default), "omp");
+        assert_eq!(inherits.agent_args(&default), ["--model", "x"]);
+        assert_eq!(own.agent(&default), "claude");
+        let jira = &work_items.jira.as_ref().expect("jira configured").issues[0];
+        assert_eq!(jira.agent(&default), "omp");
+        assert!(jira.agent_args(&default).is_empty());
+        assert_eq!(
+            work_items.pick_next_agent(),
+            AgentLaunch {
+                agent: "omp".into(),
+                args: vec!["--model".into(), "x".into()],
+            }
+        );
+        assert_eq!(work_items.pick_next_plan_command(), "/plan");
+    }
+
+    #[test]
+    fn pick_next_settings_override_the_defaults_and_plan_mode() {
+        let parse = |toml: &str| -> WorkItemsConfig {
+            toml::from_str::<Config>(toml)
+                .expect("config parses")
+                .work_items
+        };
+        let claude = parse("[work_items.pick_next]\nagent_args = [\"--model\", \"opus\"]\n");
+        assert_eq!(claude.pick_next_agent().agent, "claude");
+        assert_eq!(claude.pick_next_agent().args, ["--model", "opus"]);
+        assert_eq!(claude.pick_next_plan_command(), "");
+
+        let omp =
+            parse("[work_items]\nagent = \"claude\"\n[work_items.pick_next]\nagent = \"omp\"\n");
+        assert_eq!(omp.default_agent().agent, "claude");
+        assert_eq!(omp.pick_next_agent().agent, "omp");
+        assert_eq!(omp.pick_next_plan_command(), "/plan");
+
+        let no_plan =
+            parse("[work_items]\nagent = \"omp\"\n[work_items.pick_next]\nplan_command = \"\"\n");
+        assert_eq!(no_plan.pick_next_plan_command(), "");
+        let custom = parse("[work_items.pick_next]\nplan_command = \"/plan-mode\"\n");
+        assert_eq!(custom.pick_next_plan_command(), "/plan-mode");
     }
 
     #[test]
