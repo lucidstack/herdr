@@ -127,6 +127,19 @@ struct AgentTranscript {
     path: String,
 }
 
+/// A search of the agent's own files for the transcript of a session whose integration
+/// never reported one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranscriptLookup {
+    session_ref: crate::agent_resume::AgentSessionRef,
+    /// When the last search found nothing; `None` while a search is running.
+    failed_at: Option<Instant>,
+}
+
+/// How long a session whose transcript could not be found waits before Herdr searches
+/// again. The agent may not have written the file yet.
+const TRANSCRIPT_LOOKUP_RETRY: Duration = Duration::from_secs(30);
+
 /// Notes kept per agent before the oldest is dropped.
 const MAX_AGENT_NOTES: usize = 20;
 
@@ -157,6 +170,8 @@ pub struct TerminalState {
     /// The transcript file reported for a session whose reference is an id. It counts only
     /// while that session is the terminal's current one.
     agent_transcript: Option<AgentTranscript>,
+    /// The search for the current session's transcript, while it runs or after it failed.
+    transcript_lookup: Option<TranscriptLookup>,
     /// Notes for the agent about changes Herdr made outside its session, oldest first,
     /// waiting for its integration to take them.
     agent_notes: Vec<AgentNote>,
@@ -207,6 +222,7 @@ impl TerminalState {
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
             agent_transcript: None,
+            transcript_lookup: None,
             agent_notes: Vec::new(),
             reported_resume: None,
             reported_resume_revision: 0,
@@ -1496,17 +1512,26 @@ impl TerminalState {
         std::mem::take(&mut self.agent_notes)
     }
 
-    /// The reference of the session Herdr currently attributes to this terminal: the hook
-    /// authority's, else the persisted one.
-    fn current_session_ref(&self) -> Option<&crate::agent_resume::AgentSessionRef> {
+    /// The agent and reference of the session Herdr currently attributes to this terminal:
+    /// the hook authority's, else the persisted one.
+    fn current_session(&self) -> Option<(&str, &crate::agent_resume::AgentSessionRef)> {
         self.hook_authority
             .as_ref()
-            .and_then(|authority| authority.session_ref.as_ref())
+            .and_then(|authority| {
+                authority
+                    .session_ref
+                    .as_ref()
+                    .map(|session_ref| (authority.agent_label.as_str(), session_ref))
+            })
             .or_else(|| {
                 self.persisted_agent_session
                     .as_ref()
-                    .map(|session| &session.session_ref)
+                    .map(|session| (session.agent.as_str(), &session.session_ref))
             })
+    }
+
+    fn current_session_ref(&self) -> Option<&crate::agent_resume::AgentSessionRef> {
+        self.current_session().map(|(_, session_ref)| session_ref)
     }
 
     /// Remembers the transcript file reported for `session_ref`, if that is the current
@@ -1546,6 +1571,70 @@ impl TerminalState {
         match current.kind {
             crate::agent_resume::AgentSessionRefKind::Path => Some(current.value.as_str()),
             crate::agent_resume::AgentSessionRefKind::Id => self.reported_agent_transcript_path(),
+        }
+    }
+
+    /// Starts a search for the current session's transcript when Herdr can find it on its
+    /// own: a Claude session known only by its id, with no transcript reported, no search
+    /// already running for it, and no failed one within `TRANSCRIPT_LOOKUP_RETRY`. Returns
+    /// the session to search for.
+    pub fn begin_agent_transcript_lookup(
+        &mut self,
+        now: Instant,
+    ) -> Option<crate::agent_resume::AgentSessionRef> {
+        let (agent_label, session_ref) = self.current_session()?;
+        if session_ref.kind != crate::agent_resume::AgentSessionRefKind::Id
+            || crate::transcript::TranscriptFormat::for_agent(agent_label)
+                != Some(crate::transcript::TranscriptFormat::Claude)
+            || self.reported_agent_transcript_path().is_some()
+        {
+            return None;
+        }
+        if let Some(lookup) = self
+            .transcript_lookup
+            .as_ref()
+            .filter(|lookup| lookup.session_ref == *session_ref)
+        {
+            let retry_due = lookup
+                .failed_at
+                .is_some_and(|failed_at| now.duration_since(failed_at) >= TRANSCRIPT_LOOKUP_RETRY);
+            if !retry_due {
+                return None;
+            }
+        }
+        let session_ref = session_ref.clone();
+        self.transcript_lookup = Some(TranscriptLookup {
+            session_ref: session_ref.clone(),
+            failed_at: None,
+        });
+        Some(session_ref)
+    }
+
+    /// Takes the result of a search started by `begin_agent_transcript_lookup`. A found
+    /// transcript is recorded as if the integration had reported it. Returns whether the
+    /// current session gained a transcript.
+    pub fn finish_agent_transcript_lookup(
+        &mut self,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+        path: Option<String>,
+        now: Instant,
+    ) -> bool {
+        let Some(lookup) = self
+            .transcript_lookup
+            .as_mut()
+            .filter(|lookup| lookup.session_ref == *session_ref)
+        else {
+            return false;
+        };
+        match path {
+            Some(path) => {
+                self.transcript_lookup = None;
+                self.record_agent_transcript(session_ref, path)
+            }
+            None => {
+                lookup.failed_at = Some(now);
+                false
+            }
         }
     }
 
@@ -2650,6 +2739,99 @@ mod tests {
         });
 
         assert_eq!(terminal.agent_transcript_path(), Some(path.as_str()));
+    }
+
+    fn claude_id_session(id: &str) -> crate::agent_resume::PersistedAgentSession {
+        crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id(id).unwrap(),
+        }
+    }
+
+    #[test]
+    fn transcript_lookup_runs_once_and_retries_a_failure_only_after_a_while() {
+        let mut terminal = test_terminal();
+        let session = claude_id_session("abc");
+        terminal.set_persisted_agent_session(session.clone());
+        let start = Instant::now();
+
+        assert_eq!(
+            terminal.begin_agent_transcript_lookup(start),
+            Some(session.session_ref.clone())
+        );
+        assert_eq!(terminal.begin_agent_transcript_lookup(start), None);
+
+        assert!(!terminal.finish_agent_transcript_lookup(&session.session_ref, None, start));
+        let before_retry = start + TRANSCRIPT_LOOKUP_RETRY - Duration::from_millis(1);
+        assert_eq!(terminal.begin_agent_transcript_lookup(before_retry), None);
+        let retry = start + TRANSCRIPT_LOOKUP_RETRY;
+        assert_eq!(
+            terminal.begin_agent_transcript_lookup(retry),
+            Some(session.session_ref.clone())
+        );
+
+        assert!(terminal.finish_agent_transcript_lookup(
+            &session.session_ref,
+            Some("/t/abc.jsonl".into()),
+            retry
+        ));
+        assert_eq!(terminal.agent_transcript_path(), Some("/t/abc.jsonl"));
+        let much_later = retry + TRANSCRIPT_LOOKUP_RETRY * 10;
+        assert_eq!(terminal.begin_agent_transcript_lookup(much_later), None);
+    }
+
+    #[test]
+    fn transcript_found_for_a_replaced_session_is_not_recorded() {
+        let mut terminal = test_terminal();
+        let first = claude_id_session("first");
+        terminal.set_persisted_agent_session(first.clone());
+        let now = Instant::now();
+        assert!(terminal.begin_agent_transcript_lookup(now).is_some());
+
+        let second = claude_id_session("second");
+        terminal.set_persisted_agent_session(second.clone());
+
+        assert!(!terminal.finish_agent_transcript_lookup(
+            &first.session_ref,
+            Some("/t/first.jsonl".into()),
+            now
+        ));
+        assert_eq!(terminal.agent_transcript_path(), None);
+        assert_eq!(
+            terminal.begin_agent_transcript_lookup(now),
+            Some(second.session_ref)
+        );
+    }
+
+    #[test]
+    fn transcript_lookup_is_only_for_claude_sessions_without_a_known_transcript() {
+        let now = Instant::now();
+
+        let mut reported = test_terminal();
+        let session = claude_id_session("abc");
+        reported.set_persisted_agent_session(session.clone());
+        reported.record_agent_transcript(&session.session_ref, "/t/abc.jsonl".into());
+        assert_eq!(reported.begin_agent_transcript_lookup(now), None);
+
+        let mut omp = test_terminal();
+        omp.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:omp".into(),
+            agent: "omp".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(test_session_path(
+                "omp-session.jsonl",
+            ))
+            .unwrap(),
+        });
+        assert_eq!(omp.begin_agent_transcript_lookup(now), None);
+
+        let mut codex = test_terminal();
+        codex.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("abc").unwrap(),
+        });
+        assert_eq!(codex.begin_agent_transcript_lookup(now), None);
     }
 
     #[test]

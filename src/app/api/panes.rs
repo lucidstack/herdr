@@ -1583,6 +1583,7 @@ impl App {
         let applied =
             report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.record_agent_transcript(ws_idx, pane_id, session_ref, transcript_path);
+        self.look_up_agent_transcript(ws_idx, pane_id);
         self.report_agent_resume(
             id,
             ws_idx,
@@ -1634,6 +1635,7 @@ impl App {
         let applied =
             report_is_newer && self.session_report_applied(ws_idx, pane_id, session_ref.as_ref());
         self.record_agent_transcript(ws_idx, pane_id, session_ref, transcript_path);
+        self.look_up_agent_transcript(ws_idx, pane_id);
         self.report_agent_resume(
             id,
             ws_idx,

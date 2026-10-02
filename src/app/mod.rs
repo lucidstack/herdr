@@ -6,6 +6,7 @@
 pub(crate) mod actions;
 mod agent_notes;
 mod agent_resume;
+mod agent_transcripts;
 pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
@@ -648,6 +649,7 @@ impl App {
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.look_up_missing_agent_transcripts();
         app
     }
 
@@ -713,6 +715,7 @@ impl App {
                 .collect(),
             Instant::now(),
         );
+        app.look_up_missing_agent_transcripts();
         Ok(app)
     }
 

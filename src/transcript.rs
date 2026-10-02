@@ -13,8 +13,10 @@ use std::path::Path;
 use serde::Deserialize;
 
 mod activity;
+mod locate;
 
 pub use activity::{activity, DEFAULT_LIMIT, MAX_LIMIT};
+pub use locate::find_claude_transcript;
 
 const READ_CHUNK: usize = 64 * 1024;
 
