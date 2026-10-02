@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
 use crate::config::{
-    BranchWorkflowConfig, JiraProjectConfig, JiraWorkItemsConfig, OnResolvedConfig,
+    AgentLaunch, BranchWorkflowConfig, JiraProjectConfig, JiraWorkItemsConfig, OnResolvedConfig,
 };
 
 use super::github::{one_line, slug, truncate_chars};
@@ -41,6 +41,8 @@ const AGENT_CHOICE_ID: &str = "local_agent";
 pub(crate) struct JiraSource {
     config: JiraWorkItemsConfig,
     fallback: BranchWorkflowConfig,
+    /// `work_items.agent`, for blocks that do not set their own.
+    default_agent: AgentLaunch,
     build_error: Option<String>,
     /// API base that accepted the token: the site or the gateway.
     api_base: Mutex<Option<String>>,
@@ -400,7 +402,7 @@ fn start_reminder_for(detail: &JiraDetail) -> Option<StartReminder> {
 }
 
 impl JiraSource {
-    pub(crate) fn new(config: JiraWorkItemsConfig) -> Self {
+    pub(crate) fn new(config: JiraWorkItemsConfig, default_agent: AgentLaunch) -> Self {
         let build_error = if config.site.trim().is_empty() {
             Some("set work_items.jira.site, e.g. \"example.atlassian.net\"".to_string())
         } else if config.email.trim().is_empty() {
@@ -411,6 +413,7 @@ impl JiraSource {
         Self {
             config,
             fallback: BranchWorkflowConfig::default(),
+            default_agent,
             build_error,
             api_base: Mutex::new(None),
             me: Mutex::new(None),
@@ -1176,7 +1179,7 @@ impl WorkItemSource for JiraSource {
             .then(|| format!("No local checkout configured for Jira project {project}"));
         let no_agent = self
             .workflow(project)
-            .agent
+            .agent(&self.default_agent)
             .is_empty()
             .then(|| format!("No agent configured for Jira project {project}"));
         let existing = item_detail(item).and_then(|detail| {
@@ -1276,7 +1279,7 @@ impl WorkItemSource for JiraSource {
             format!("No local checkout configured for Jira project {project_name}")
         })?;
         let workflow = self.workflow(project_name);
-        if agent_starts && workflow.agent.is_empty() {
+        if agent_starts && workflow.agent(&self.default_agent).is_empty() {
             return Err(format!(
                 "No agent configured for Jira project {project_name}"
             ));
@@ -1310,9 +1313,10 @@ impl WorkItemSource for JiraSource {
                 &branch,
                 item.open_pull_request(),
             ),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
-                agent: workflow.agent.clone(),
-                agent_args: workflow.agent_args.clone(),
+                agent: workflow.agent(&self.default_agent).to_string(),
+                agent_args: workflow.agent_args(&self.default_agent).to_vec(),
                 tabs: workflow.tabs.clone(),
                 diff_command: String::new(),
             },
@@ -1514,22 +1518,18 @@ impl WorkItemSource for JiraSource {
         &self,
         context: &str,
         worktree_directory: &Path,
+        agent: &AgentLaunch,
     ) -> Result<ProvisionPlan, String> {
         if let Some(error) = &self.build_error {
             return Err(error.clone());
         }
-        // The agent you work issues with; the first mapped project picks the block.
+        // The tabs you work issues with; the first mapped project picks the block.
         let first_project = self
             .config
             .projects
             .first()
             .map_or("", |project| project.key.as_str());
         let config = self.workflow(first_project);
-        if config.agent.is_empty() {
-            return Err(
-                "No agent configured for Jira; set work_items.jira.issues.<block>.agent".into(),
-            );
-        }
         let directory =
             crate::worktree::default_checkout_path(worktree_directory, "pick-next", "jira");
         Ok(ProvisionPlan {
@@ -1537,9 +1537,10 @@ impl WorkItemSource for JiraSource {
             workspace_label: format!("Pick next \u{b7} {}", self.label()),
             agent_name_hint: "pick-next-jira".into(),
             brief: pick_next_brief(&self.config.projects, context),
+            plan_command: String::new(),
             layout: WorkspaceLayout {
-                agent: config.agent.clone(),
-                agent_args: config.agent_args.clone(),
+                agent: agent.agent.clone(),
+                agent_args: agent.args.clone(),
                 tabs: config.tabs.clone(),
                 diff_command: String::new(),
             },
@@ -1571,18 +1572,21 @@ mod tests {
     }
 
     fn source() -> JiraSource {
-        JiraSource::new(JiraWorkItemsConfig {
-            site: "example.atlassian.net".into(),
-            email: "me@example.test".into(),
-            projects: vec![JiraProjectConfig {
-                key: "TECH".into(),
-                path: "/src/app".into(),
-                remote: "origin".into(),
-                base_branch: None,
-                branch_template: "ar/{key}-{slug}".into(),
-            }],
-            ..JiraWorkItemsConfig::default()
-        })
+        JiraSource::new(
+            JiraWorkItemsConfig {
+                site: "example.atlassian.net".into(),
+                email: "me@example.test".into(),
+                projects: vec![JiraProjectConfig {
+                    key: "TECH".into(),
+                    path: "/src/app".into(),
+                    remote: "origin".into(),
+                    base_branch: None,
+                    branch_template: "ar/{key}-{slug}".into(),
+                }],
+                ..JiraWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        )
     }
 
     fn item(key: &str, detail: Option<&JiraDetail>) -> WorkItem {
@@ -2037,7 +2041,7 @@ mod tests {
 
     #[test]
     fn missing_site_or_email_is_reported_by_poll() {
-        let source = JiraSource::new(JiraWorkItemsConfig::default());
+        let source = JiraSource::new(JiraWorkItemsConfig::default(), AgentLaunch::default());
         assert!(source.poll().unwrap_err().contains("work_items.jira.site"));
     }
 

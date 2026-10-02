@@ -325,6 +325,7 @@ impl WorkItemSource for FakeSource {
         &self,
         context: &str,
         _worktree_directory: &std::path::Path,
+        _agent: &crate::config::AgentLaunch,
     ) -> Result<ProvisionPlan, String> {
         self.pick_next_contexts
             .lock()
