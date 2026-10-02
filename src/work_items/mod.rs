@@ -1216,6 +1216,7 @@ impl WorkItems {
                     action: crate::api::schema::WorkItemChoiceAction::Perform,
                     disabled_reason: None,
                     confirm: None,
+                    options: Vec::new(),
                 },
             );
         }
@@ -1249,6 +1250,7 @@ impl WorkItems {
                         action: crate::api::schema::WorkItemChoiceAction::Perform,
                         disabled_reason: None,
                         confirm: None,
+                        options: Vec::new(),
                     },
                 );
                 at += 1;
@@ -1278,6 +1280,7 @@ impl WorkItems {
                     },
                     disabled_reason: None,
                     confirm: None,
+                    options: Vec::new(),
                 },
             );
             if !default_chosen && item.open_pull_request().is_some() {
@@ -1457,6 +1460,8 @@ impl WorkItems {
         item.phase = WorkItemPhase::Local;
         item.seen = true;
         item.provisioning = Some(provision::initial_progress(&plan));
+        item.brief_failed_at = None;
+        item.brief_failure_outdated = false;
         let job_id = self.next_job_id;
         self.next_job_id += 1;
         self.jobs.insert(
@@ -1542,7 +1547,8 @@ impl WorkItems {
         self.jobs.values().map(|job| job.job_id).collect()
     }
 
-    /// Applies `update` to the progress of the job's item.
+    /// Applies `update` to the progress of the job's item, and notes when its agent brief
+    /// fails.
     pub(crate) fn update_progress(
         &mut self,
         job_id: u64,
@@ -1551,16 +1557,20 @@ impl WorkItems {
         let Some(key) = self.job(job_id).map(|job| job.key.clone()) else {
             return;
         };
-        let Some(progress) = self
-            .state
-            .get_mut(&key)
-            .and_then(|item| item.provisioning.as_mut())
-        else {
+        let Some(item) = self.state.get_mut(&key) else {
+            return;
+        };
+        let Some(progress) = item.provisioning.as_mut() else {
             return;
         };
         let before = progress.clone();
         update(progress);
-        if *progress != before {
+        let changed = *progress != before;
+        if provision::has_failed_brief(progress) && !provision::has_failed_brief(&before) {
+            // Compared with agents' turn ends, see `settle_brief_failures`.
+            item.brief_failed_at = Some(Instant::now());
+        }
+        if changed {
             self.changed();
         }
     }
@@ -1659,6 +1669,7 @@ impl WorkItems {
     ) -> Vec<attention::Transition> {
         use attention::{Candidate, ItemSignals, Subject};
 
+        self.settle_brief_failures(agents);
         let hosts = self.pull_request_hosts();
         let mut folded: HashMap<String, Option<attention::Need>> = HashMap::new();
         for item in self.state.items() {
@@ -1706,6 +1717,34 @@ impl WorkItems {
             self.revision += 1;
         }
         update.transitions
+    }
+
+    /// A failed agent brief stops needing you once an agent in the item's workspace has taken
+    /// a turn after the failure: it worked, so it became ready after all, and the brief was
+    /// sent late or by hand. This holds for good, so the failure does not return once that
+    /// agent goes away. The step stays failed in `provisioning`; only the attention clears.
+    /// The failure and the turn are both moments on the monotonic clock, so a machine that
+    /// slept in between cannot reorder them.
+    fn settle_brief_failures(&mut self, agents: &HashMap<String, attention::AgentVerdict>) {
+        for item in self.state.items_mut() {
+            if item.brief_failure_outdated {
+                continue;
+            }
+            let Some(failed_at) = item.brief_failed_at else {
+                continue;
+            };
+            let Some(verdict) = item
+                .workspace_id
+                .as_deref()
+                .and_then(|workspace_id| agents.get(workspace_id))
+            else {
+                continue;
+            };
+            let brief_failed = item.provisioning.as_ref().is_some_and(|provisioning| {
+                provisioning.finished && provision::has_failed_brief(provisioning)
+            });
+            item.brief_failure_outdated = brief_failed && verdict.took_turn_after(failed_at);
+        }
     }
 
     /// What the tracker asks of you, unless the item is hidden, waits on others, or was
@@ -1823,7 +1862,9 @@ struct CarriedChoice<'a> {
     is_default: bool,
 }
 
-/// A failed choice, a failed provisioning step, or a workspace that could not be removed.
+/// A failed choice, a failed provisioning step, or a workspace that could not be removed. A
+/// failed agent brief counts only until an agent took a turn after it, see
+/// `WorkItems::settle_brief_failures`.
 fn failure_need(item: &WorkItem) -> Option<attention::Need> {
     let failed = |reason: String| Some(attention::Need::new(AttentionKind::Failed, reason));
     if let Some(outcome) = item
@@ -1838,10 +1879,11 @@ fn failure_need(item: &WorkItem) -> Option<attention::Need> {
         .as_ref()
         .filter(|provisioning| provisioning.finished)
         .and_then(|provisioning| {
-            provisioning
-                .steps
-                .iter()
-                .find(|step| step.status == crate::api::schema::WorkItemStepStatus::Failed)
+            provisioning.steps.iter().find(|step| {
+                step.status == crate::api::schema::WorkItemStepStatus::Failed
+                    && !(item.brief_failure_outdated
+                        && step.step == crate::api::schema::WorkItemStep::AgentBrief)
+            })
         });
     if let Some(step) = failed_step {
         return failed(
@@ -2613,15 +2655,19 @@ projects = [
         items.state.items()[0].key.clone()
     }
 
-    fn local_review_reason(items: &WorkItems, key: &str) -> Option<String> {
+    /// The switches the item's review choice offers.
+    fn review_switches(items: &WorkItems, key: &str) -> Vec<String> {
         items
             .item_info(key)
             .expect("item")
             .choices
             .into_iter()
-            .find(|choice| choice.choice_id == "local")
-            .expect("local review offered")
-            .disabled_reason
+            .find(|choice| choice.choice_id == "review")
+            .expect("review offered")
+            .options
+            .into_iter()
+            .map(|option| option.option_id)
+            .collect()
     }
 
     fn store_policy(name: &str, load: bool) -> StorePolicy {
@@ -2663,7 +2709,8 @@ projects = [
             now,
         );
 
-        assert_eq!(local_review_reason(&items, &key), None);
+        // Linked, the repository is mapped, so a review can have its worktree.
+        assert_eq!(review_switches(&items, &key), ["worktree", "post"]);
         assert_eq!(
             items.state.get(&key).expect("item").phase,
             WorkItemPhase::Pending
@@ -2698,6 +2745,180 @@ projects = [
         let _ = std::fs::remove_dir_all(parent);
         let key = review_request(&mut items);
 
-        assert_eq!(local_review_reason(&items, &key), None);
+        assert_eq!(review_switches(&items, &key), ["worktree", "post"]);
+    }
+
+    /// The inbox with ticket `fake:a` started in workspace `w1`, whose provisioning finished
+    /// with its agent brief failed at the moment returned.
+    fn item_with_failed_brief() -> (WorkItems, Instant) {
+        use crate::api::schema::{WorkItemStep, WorkItemStepInfo, WorkItemStepStatus};
+
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        poll(&mut items, &["a"]);
+        // Ahead of now, so moments before it are safe to make.
+        let failed_at = Instant::now() + Duration::from_secs(3_600);
+        let item = items.state.get_mut("fake:a").expect("item");
+        item.phase = WorkItemPhase::Local;
+        item.workspace_id = Some("w1".into());
+        item.provisioning = Some(WorkItemProvisioningInfo {
+            steps: vec![
+                WorkItemStepInfo {
+                    step: WorkItemStep::Checkout,
+                    label: "Worktree created".into(),
+                    status: WorkItemStepStatus::Done,
+                    detail: None,
+                },
+                WorkItemStepInfo {
+                    step: WorkItemStep::AgentBrief,
+                    label: "Agent briefed".into(),
+                    status: WorkItemStepStatus::Failed,
+                    detail: Some("agent still idle 15 s after the brief".into()),
+                },
+            ],
+            finished: true,
+            finished_at: Some(1_000),
+        });
+        item.brief_failed_at = Some(failed_at);
+        (items, failed_at)
+    }
+
+    /// What the agents of workspace `w1` mean for you when the latest turn of one ended at
+    /// `turn_ended`.
+    fn agents_in_w1(turn_ended: Option<Instant>) -> HashMap<String, attention::AgentVerdict> {
+        HashMap::from([(
+            "w1".to_string(),
+            attention::AgentVerdict {
+                turn_finished_at: turn_ended,
+                ..attention::AgentVerdict::default()
+            },
+        )])
+    }
+
+    fn attention_of_a(items: &WorkItems) -> Option<AttentionKind> {
+        items
+            .attention(&attention::Subject::Item("fake:a".into()))
+            .map(|attention| attention.kind)
+    }
+
+    #[test]
+    fn a_failed_agent_brief_stops_needing_you_once_an_agent_took_a_turn_after_it() {
+        let (mut items, failed_at) = item_with_failed_brief();
+        let mut attention_after = |turn_ended: Option<Instant>| {
+            items.update_attention(&agents_in_w1(turn_ended), Vec::new(), 2_000);
+            attention_of_a(&items)
+        };
+        assert_eq!(attention_after(None), Some(AttentionKind::Failed));
+        // The agent worked after the failure, so it was ready after all.
+        assert_eq!(
+            attention_after(Some(failed_at + Duration::from_secs(5))),
+            None
+        );
+        // For good: the failure does not return once that agent is gone.
+        assert_eq!(attention_after(None), None);
+
+        // Only the attention clears; the step stays failed.
+        let steps = &items
+            .get("fake:a")
+            .expect("item")
+            .provisioning
+            .as_ref()
+            .expect("provisioning")
+            .steps;
+        assert_eq!(
+            steps[1].status,
+            crate::api::schema::WorkItemStepStatus::Failed
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ended_before_the_failure_never_clears_it_whatever_the_time() {
+        let (mut items, failed_at) = item_with_failed_brief();
+        // E.g. answering the agent's folder trust prompt, before the brief failed. However far
+        // the wall clock moves meanwhile, as over a night the machine sleeps, it stays before.
+        let before = agents_in_w1(Some(failed_at - Duration::from_secs(5)));
+        for now_unix in [0, 2_000, 4_000_000_000, u64::MAX / 2] {
+            items.update_attention(&before, Vec::new(), now_unix);
+            assert_eq!(
+                attention_of_a(&items),
+                Some(AttentionKind::Failed),
+                "at Unix time {now_unix}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_does_not_make_up_for_a_workspace_that_failed_to_come_up() {
+        use crate::api::schema::WorkItemStepStatus;
+
+        let (mut items, failed_at) = item_with_failed_brief();
+        let provisioning = items
+            .state
+            .get_mut("fake:a")
+            .and_then(|item| item.provisioning.as_mut())
+            .expect("provisioning");
+        provisioning.steps[0].status = WorkItemStepStatus::Failed;
+        provisioning.steps[1].status = WorkItemStepStatus::Skipped;
+
+        items.update_attention(
+            &agents_in_w1(Some(failed_at + Duration::from_secs(5))),
+            Vec::new(),
+            2_000,
+        );
+        assert_eq!(attention_of_a(&items), Some(AttentionKind::Failed));
+    }
+
+    #[test]
+    fn a_new_attempt_whose_brief_fails_needs_you_until_a_turn_after_that_failure() {
+        use crate::api::schema::{WorkItemStep, WorkItemStepStatus};
+
+        let (mut items, failed_at) = item_with_failed_brief();
+        items.update_attention(
+            &agents_in_w1(Some(failed_at + Duration::from_secs(5))),
+            Vec::new(),
+            2_000,
+        );
+        assert_eq!(attention_of_a(&items), None);
+
+        // The user starts over, and this time the brief fails after the agent's last turn.
+        let last_turn = Instant::now();
+        let plan = ProvisionPlan {
+            source: source::WorkspaceSource::Scratch(PathBuf::from("/scratch")),
+            workspace_label: "#1 Title".into(),
+            agent_name_hint: "agent-1".into(),
+            brief: "brief".into(),
+            layout: source::WorkspaceLayout {
+                agent: "claude".into(),
+                agent_args: Vec::new(),
+                tabs: Vec::new(),
+                diff_command: String::new(),
+            },
+            delete_branch: false,
+        };
+        let job_id = items.start_job("fake:a", plan).expect("job");
+        items.update_progress(job_id, |progress| {
+            provision::set_step(
+                progress,
+                WorkItemStep::Checkout,
+                WorkItemStepStatus::Done,
+                None,
+            );
+            provision::set_step(
+                progress,
+                WorkItemStep::AgentBrief,
+                WorkItemStepStatus::Failed,
+                Some("agent still idle 15 s after the brief".into()),
+            );
+        });
+        items.update_attention(&agents_in_w1(Some(last_turn)), Vec::new(), 2_000);
+        assert_eq!(attention_of_a(&items), Some(AttentionKind::Failed));
+
+        // A turn after this failure settles it in turn.
+        items.update_attention(
+            &agents_in_w1(Some(Instant::now() + Duration::from_secs(1))),
+            Vec::new(),
+            2_000,
+        );
+        assert_eq!(attention_of_a(&items), None);
     }
 }

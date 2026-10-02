@@ -48,6 +48,34 @@ pub(crate) struct ItemChoices {
     pub default_choice_id: Option<String>,
 }
 
+/// The ids of the options of `choice` that are switched on. `requested` names them; without
+/// it they are the options on by default. Fails with the first id the choice does not offer.
+pub(crate) fn switched_on_options<'a>(
+    choice: &WorkItemChoiceInfo,
+    requested: Option<&'a [String]>,
+) -> Result<Vec<String>, &'a str> {
+    let Some(requested) = requested else {
+        return Ok(choice
+            .options
+            .iter()
+            .filter(|option| option.default)
+            .map(|option| option.option_id.clone())
+            .collect());
+    };
+    if let Some(unknown) = requested
+        .iter()
+        .find(|id| !choice.options.iter().any(|option| option.option_id == **id))
+    {
+        return Err(unknown);
+    }
+    Ok(choice
+        .options
+        .iter()
+        .filter(|option| requested.contains(&option.option_id))
+        .map(|option| option.option_id.clone())
+        .collect())
+}
+
 /// A worktree created through Herdr's worktree support on a local branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorktreeSpec {
@@ -198,11 +226,13 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn prepare(&self, item: &SourceItem) -> PreparedItem;
     /// Pure: choices offered for an item.
     fn choices(&self, item: &WorkItem) -> ItemChoices;
-    /// Pure: plan for `choice_id`, whose action provisions a workspace.
+    /// Pure: plan for `choice_id`, whose action provisions a workspace. `options` are the ids
+    /// of the choice's options switched on.
     fn provision_plan(
         &self,
         item: &WorkItem,
         choice_id: &str,
+        options: &[String],
         worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String>;
     /// Pure: whether the item's workspace is removed once the source stops reporting it.
@@ -311,5 +341,71 @@ pub(crate) trait WorkItemSource: Send + Sync {
             crate::api::schema::AttentionKind::New,
             title,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceOptionInfo};
+
+    fn choice_with(options: &[(&str, bool)]) -> WorkItemChoiceInfo {
+        WorkItemChoiceInfo {
+            choice_id: "review".into(),
+            label: "Review".into(),
+            description: None,
+            action: WorkItemChoiceAction::ProvisionWorkspace,
+            disabled_reason: None,
+            confirm: None,
+            options: options
+                .iter()
+                .map(|(id, default)| WorkItemChoiceOptionInfo {
+                    option_id: (*id).into(),
+                    label: (*id).into(),
+                    description: None,
+                    default: *default,
+                })
+                .collect(),
+        }
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn naming_no_options_switches_on_the_ones_on_by_default() {
+        let choice = choice_with(&[("worktree", true), ("post", false)]);
+        assert_eq!(switched_on_options(&choice, None), Ok(ids(&["worktree"])));
+    }
+
+    #[test]
+    fn naming_options_switches_on_exactly_those_in_the_choices_order() {
+        let choice = choice_with(&[("worktree", true), ("post", false)]);
+        assert_eq!(
+            switched_on_options(&choice, Some(&ids(&["post", "worktree", "post"]))),
+            Ok(ids(&["worktree", "post"]))
+        );
+        assert_eq!(
+            switched_on_options(&choice, Some(&ids(&["post"]))),
+            Ok(ids(&["post"]))
+        );
+        // An empty list switches every option off; it is not the defaults.
+        assert_eq!(switched_on_options(&choice, Some(&[])), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn an_option_the_choice_does_not_offer_is_rejected_next_to_valid_ones_too() {
+        let choice = choice_with(&[("worktree", true)]);
+        assert_eq!(
+            switched_on_options(&choice, Some(&ids(&["worktree", "teleport"]))),
+            Err("teleport")
+        );
+
+        let plain = choice_with(&[]);
+        assert_eq!(
+            switched_on_options(&plain, Some(&ids(&["worktree"]))),
+            Err("worktree")
+        );
     }
 }

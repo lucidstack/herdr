@@ -632,6 +632,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentPrompt(_) => "agent.prompt",
         Method::AgentWait(_) => "agent.wait",
         Method::AgentLastMessage(_) => "agent.last_message",
+        Method::AgentDismiss(_) => "agent.dismiss",
         Method::AgentActivity(_) => "agent.activity",
         Method::AgentNotesTake(_) => "agent.notes.take",
         Method::AgentNotesAdd(_) => "agent.notes.add",

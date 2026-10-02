@@ -8,6 +8,8 @@ mod worktree_overlays;
 pub(crate) struct OverlayRender {
     pub(crate) area: Rect,
     pub(crate) menu_rows: Vec<(Rect, usize)>,
+    /// The highlighted work-item choice's option toggles, with each option's index.
+    pub(crate) option_rows: Vec<(Rect, usize)>,
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,
     pub(crate) cancel: Rect,

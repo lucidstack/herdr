@@ -303,9 +303,11 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        // `work_item.choose` gained the optional `options`. A client sends it only for a choice
+        // whose projection lists options, which a server without them never does.
         assert_eq!(
             actual.remove("work_item.choose").as_deref(),
-            Some("f17df9c37fc54879cf5012c04aac0de1cf9995970b0b50679135bd4e2df622fe")
+            Some("3e7c45bd5dc2cd486cc8601b167ab6be7be0606e4d4b355231898d50f6f92014")
         );
         assert_eq!(
             actual.remove("work_item.mark_seen").as_deref(),

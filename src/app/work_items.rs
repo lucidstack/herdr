@@ -786,11 +786,13 @@ impl App {
         Ok(())
     }
 
-    /// Validates and starts local provisioning for `key`. Errors are `(code, message)`.
+    /// Validates and starts local provisioning for `key`. `options` are the ids of the choice's
+    /// options switched on. Errors are `(code, message)`.
     pub(super) fn start_work_item_provisioning(
         &mut self,
         key: &str,
         choice_id: &str,
+        options: &[String],
     ) -> Result<(), (&'static str, String)> {
         if self.work_items.has_job(key) {
             return Err(("work_item_busy", format!("{key} is already being prepared")));
@@ -812,7 +814,7 @@ impl App {
             return Err(("work_item_not_found", format!("unknown work item {key}")));
         };
         let plan = source
-            .provision_plan(&item, choice_id, &self.state.worktree_directory)
+            .provision_plan(&item, choice_id, options, &self.state.worktree_directory)
             .map_err(|message| ("work_item_unavailable", message))?;
         let workspace_source = plan.source.clone();
         let job_id = self
@@ -1820,6 +1822,7 @@ mod tests {
             app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:a".into(),
                 choice_id: "do".into(),
+                options: None,
             })))
         };
 
@@ -1908,6 +1911,7 @@ mod tests {
             app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:a".into(),
                 choice_id: choice_id.into(),
+                options: None,
             })))
         };
         let fixed = choose(&mut app, START_WORK_CHOICE_ID);
@@ -1949,6 +1953,7 @@ mod tests {
                 app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
                     item_id: "fake:a".into(),
                     choice_id: "brief".into(),
+                    options: None,
                 })));
             serde_json::from_str::<ErrorResponse>(&response)
                 .expect("error response")
@@ -2005,6 +2010,7 @@ mod tests {
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "tracker:T-1".into(),
                 choice_id: "pull_request:do".into(),
+                options: None,
             }),
         )
         .expect("carried choice accepted");
@@ -2066,6 +2072,7 @@ mod tests {
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "tracker:T-1".into(),
                 choice_id: "pull_request:brief".into(),
+                options: None,
             }),
         )
         .expect("carried brief accepted");
@@ -2092,6 +2099,7 @@ mod tests {
             app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:a".into(),
                 choice_id: "web".into(),
+                options: None,
             })));
         assert!(
             serde_json::from_str::<SuccessResponse>(&response).is_ok(),
@@ -2124,6 +2132,7 @@ mod tests {
         app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
             item_id: "fake:a".into(),
             choice_id: "web".into(),
+            options: None,
         })));
         source.set_items(Vec::new());
         app.work_items.schedule_all_for_test(Instant::now());
@@ -2311,6 +2320,7 @@ mod tests {
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:1".into(),
                 choice_id: "local".into(),
+                options: None,
             }),
         )
     }
@@ -2441,6 +2451,7 @@ mod tests {
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:1".into(),
                 choice_id: PULL_REQUEST_READY_CHOICE_ID.into(),
+                options: None,
             }),
         )
         .expect("ready accepted");
@@ -2523,6 +2534,7 @@ mod tests {
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:1".into(),
                 choice_id: CLOSE_TICKET_CHOICE_ID.into(),
+                options: None,
             }),
         )
         .expect("closing accepted");
@@ -2750,6 +2762,7 @@ mod tests {
             Method::WorkItemChoose(WorkItemChooseParams {
                 item_id: "fake:1".into(),
                 choice_id: "do".into(),
+                options: None,
             }),
         )
         .expect("action accepted");
@@ -3108,5 +3121,159 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    fn choose_with(
+        app: &mut App,
+        choice_id: &str,
+        options: Option<&[&str]>,
+    ) -> Result<ResponseResult, String> {
+        api(
+            app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: choice_id.into(),
+                options: options.map(|ids| ids.iter().map(|id| id.to_string()).collect()),
+            }),
+        )
+    }
+
+    /// An app whose fake source's "local" choice has a "worktree" switch, on by default, and a
+    /// "post" switch, off by default. The source has no plan, so choosing "local" ends once
+    /// the source was asked for one.
+    fn app_with_switches() -> (App, Arc<FakeSource>) {
+        use crate::api::schema::WorkItemChoiceOptionInfo;
+
+        let mut app = test_app();
+        let source = FakeSource::with_items(vec![source_item("1")]);
+        let switch = |id: &str, default| WorkItemChoiceOptionInfo {
+            option_id: id.into(),
+            label: id.into(),
+            description: None,
+            default,
+        };
+        *source.local_options.lock().unwrap() =
+            vec![switch("worktree", true), switch("post", false)];
+        app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        (app, source)
+    }
+
+    #[test]
+    fn choosing_runs_a_choice_with_its_default_options_unless_options_are_named() {
+        let (mut app, source) = app_with_switches();
+        for named in [None, Some(&["post"][..]), Some(&[][..])] {
+            // The source has no plan, so each attempt ends at "no plan scripted".
+            assert_eq!(
+                choose_with(&mut app, "local", named),
+                Err("work_item_unavailable".to_string())
+            );
+        }
+        let asked = source.provisioned_with.lock().unwrap();
+        assert_eq!(*asked, [vec!["worktree"], vec!["post"], vec![]]);
+    }
+
+    #[test]
+    fn an_unknown_option_is_refused_before_anything_runs() {
+        let (mut app, source) = app_with_switches();
+        let response =
+            app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: "local".into(),
+                options: Some(vec!["worktree".into(), "teleport".into()]),
+            })));
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "unknown_option");
+        assert!(
+            error.error.message.contains("teleport") && error.error.message.contains("local"),
+            "{}",
+            error.error.message
+        );
+
+        // A refused request leaves the item as it was.
+        assert!(source.provisioned_with.lock().unwrap().is_empty());
+        assert_eq!(list(&mut app)[0].phase, WorkItemPhase::Pending);
+    }
+
+    /// Marks the checkout step of `job_id` done, as opening its workspace does.
+    fn checkout_done(app: &mut App, job_id: u64) {
+        app.work_items.update_progress(job_id, |progress| {
+            crate::work_items::provision::set_step(
+                progress,
+                crate::api::schema::WorkItemStep::Checkout,
+                WorkItemStepStatus::Done,
+                None,
+            )
+        });
+    }
+
+    #[tokio::test]
+    async fn provisioning_reports_when_its_last_step_ended() {
+        let Briefing {
+            mut app, job_id, ..
+        } = briefing();
+        let before = crate::work_items::unix_now();
+        let progress = |app: &mut App| list(app)[0].provisioning.clone().expect("provisioning");
+
+        checkout_done(&mut app, job_id);
+        let running = progress(&mut app);
+        assert!(!running.finished);
+        assert_eq!(running.finished_at, None);
+
+        let sent = Instant::now();
+        await_confirmation(&mut app, job_id, sent);
+        app.confirm_work_item_brief(job_id, sent + super::BRIEF_START_TIMEOUT);
+        let done = progress(&mut app);
+        assert!(done.finished);
+        let finished_at = done.finished_at.expect("a finished provisioning says when");
+        assert!(before <= finished_at && finished_at <= crate::work_items::unix_now());
+    }
+
+    #[tokio::test]
+    async fn a_failed_brief_stops_needing_you_once_the_agent_finished_a_turn_after_it() {
+        use crate::api::schema::AttentionKind;
+        use crate::detect::{Agent, AgentState};
+
+        let Briefing {
+            mut app,
+            job_id,
+            terminal_id,
+            ..
+        } = briefing();
+        let set_state = |app: &mut App, state| {
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), state);
+        };
+        let attention = |app: &mut App| {
+            app.attention_schedule.mark_dirty();
+            app.sync_work_item_events();
+            list(app)[0]
+                .attention
+                .as_ref()
+                .map(|attention| attention.kind)
+        };
+        // The workspace is up. The agent asked whether to trust the folder and was answered,
+        // which ended a turn, then stayed idle after its brief.
+        let workspace_id = app.state.workspaces[0].id.clone();
+        app.work_items.link_workspace(job_id, &workspace_id);
+        checkout_done(&mut app, job_id);
+        set_state(&mut app, AgentState::Blocked);
+        set_state(&mut app, AgentState::Idle);
+        let sent = Instant::now();
+        await_confirmation(&mut app, job_id, sent);
+        app.confirm_work_item_brief(job_id, sent + super::BRIEF_START_TIMEOUT);
+        app.work_items.finish_job_if_done(job_id);
+
+        // That turn ended before the brief failed, so it does not count.
+        assert_eq!(attention(&mut app), Some(AttentionKind::Failed));
+        // The agent working is not yet a turn taken; finishing one is.
+        set_state(&mut app, AgentState::Working);
+        assert_eq!(attention(&mut app), Some(AttentionKind::Failed));
+        set_state(&mut app, AgentState::Idle);
+        assert_eq!(attention(&mut app), None);
+        assert_eq!(brief_step(&mut app).0, WorkItemStepStatus::Failed);
     }
 }

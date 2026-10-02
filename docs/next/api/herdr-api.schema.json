@@ -1409,12 +1409,47 @@
             },
             "label": {
               "type": "string"
+            },
+            "options": {
+              "description": "Switches the user sets before running the choice. `work_item.choose` takes the ones\nswitched on. Omitted when the choice has none.",
+              "items": {
+                "$ref": "#/schemas/event/$defs/WorkItemChoiceOptionInfo"
+              },
+              "type": "array"
             }
           },
           "required": [
             "choice_id",
             "label",
             "action"
+          ],
+          "type": "object"
+        },
+        "WorkItemChoiceOptionInfo": {
+          "description": "A switch of a choice, e.g. whether reviewing a pull request creates a worktree.",
+          "properties": {
+            "default": {
+              "description": "Whether it is on when `work_item.choose` names no options.",
+              "type": "boolean"
+            },
+            "description": {
+              "description": "One line explaining what the switch does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "option_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "option_id",
+            "label",
+            "default"
           ],
           "type": "object"
         },
@@ -1662,6 +1697,15 @@
           "properties": {
             "finished": {
               "type": "boolean"
+            },
+            "finished_at": {
+              "description": "Unix time in seconds when every step had finished. Present once `finished` is true.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "steps": {
               "items": {
@@ -5182,6 +5226,16 @@
             },
             "item_id": {
               "type": "string"
+            },
+            "options": {
+              "description": "Ids of the choice's options to switch on, from `WorkItemChoiceInfo.options`. Absent:\neach option's `default`. An id the choice does not offer is an `unknown_option` error.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
             }
           },
           "required": [
@@ -6518,6 +6572,22 @@
           "properties": {
             "method": {
               "const": "agent.last_message",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.dismiss",
               "type": "string"
             },
             "params": {
@@ -12731,12 +12801,47 @@
             },
             "label": {
               "type": "string"
+            },
+            "options": {
+              "description": "Switches the user sets before running the choice. `work_item.choose` takes the ones\nswitched on. Omitted when the choice has none.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkItemChoiceOptionInfo"
+              },
+              "type": "array"
             }
           },
           "required": [
             "choice_id",
             "label",
             "action"
+          ],
+          "type": "object"
+        },
+        "WorkItemChoiceOptionInfo": {
+          "description": "A switch of a choice, e.g. whether reviewing a pull request creates a worktree.",
+          "properties": {
+            "default": {
+              "description": "Whether it is on when `work_item.choose` names no options.",
+              "type": "boolean"
+            },
+            "description": {
+              "description": "One line explaining what the switch does.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "option_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "option_id",
+            "label",
+            "default"
           ],
           "type": "object"
         },
@@ -13003,6 +13108,15 @@
           "properties": {
             "finished": {
               "type": "boolean"
+            },
+            "finished_at": {
+              "description": "Unix time in seconds when every step had finished. Present once `finished` is true.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "steps": {
               "items": {

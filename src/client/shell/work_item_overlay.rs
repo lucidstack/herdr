@@ -21,6 +21,8 @@ pub(super) fn render_work_item_overlay(
 
 /// Longest the status message above the choices may wrap to.
 const MAX_STATUS_ROWS: usize = 3;
+/// Most switches the dialog shows for one choice: each has a digit to flip it.
+const MAX_OPTION_ROWS: usize = 9;
 
 fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Option<OverlayRender> {
     let item = &o.item;
@@ -34,8 +36,22 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         )
     });
     let status_height = status_rows.len().max(1) as u16;
-    // Heading, title and status, gap, one row per choice, gap, detail, hint, plus borders.
-    let q = popup(b.area, WIDTH, choice_count + 8 + status_height)?;
+    // Rows kept free below the choices for the most switches any choice has, so the dialog
+    // keeps its height as the highlight moves.
+    let option_rows = item
+        .choices
+        .iter()
+        .map(|choice| choice.options.len())
+        .max()
+        .unwrap_or(0)
+        .min(MAX_OPTION_ROWS) as u16;
+    // Heading, title and status, gap, one row per choice, the switches, gap, detail, hint,
+    // plus borders.
+    let q = popup(
+        b.area,
+        WIDTH,
+        choice_count + 8 + status_height + option_rows,
+    )?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
     let mut heading = format!(" {}", item.context);
     if let Some(state) = &item.tracker_state {
@@ -82,10 +98,11 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         .filter(|outcome| outcome.succeeded)
         .map(|outcome| outcome.choice_id.as_str());
     let spinner = SPINNER_FRAMES[o.spinner_frame % SPINNER_FRAMES.len()];
+    let options_top = i.bottom().saturating_sub(3 + option_rows);
     let mut menu_rows = Vec::with_capacity(item.choices.len());
     for (index, choice) in item.choices.iter().enumerate() {
         let y = i.y + 3 + status_height + index as u16;
-        if y >= i.bottom().saturating_sub(3) {
+        if y >= options_top {
             break;
         }
         let rect = Rect::new(i.x + 1, y, i.width.saturating_sub(2), 1);
@@ -126,6 +143,39 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         }
         menu_rows.push((rect, index));
     }
+    // The highlighted choice's switches, flipped with their number or a click.
+    let highlighted_options = item
+        .choices
+        .get(o.highlighted)
+        .filter(|choice| choice.disabled_reason.is_none());
+    let mut option_hits = Vec::new();
+    if let Some(choice) = highlighted_options {
+        for (index, option) in choice.options.iter().take(MAX_OPTION_ROWS).enumerate() {
+            let y = options_top + index as u16;
+            if y >= i.bottom().saturating_sub(3) {
+                break;
+            }
+            let rect = Rect::new(i.x + 1, y, i.width.saturating_sub(2), 1);
+            let on = o.option_on(choice, option);
+            let style = Style::default()
+                .fg(if on { p.text } else { p.subtext0 })
+                .bg(p.panel_bg);
+            put_text(
+                b,
+                rect.x,
+                rect.y,
+                rect.width,
+                &format!(
+                    "   {} [{}] {}",
+                    index + 1,
+                    if on { "x" } else { " " },
+                    option.label
+                ),
+                style,
+            );
+            option_hits.push((rect, index));
+        }
+    }
     let confirming = o
         .confirming
         .filter(|index| *index == o.highlighted)
@@ -149,16 +199,23 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
             );
         }
     }
+    let toggles = highlighted_options
+        .map(|choice| choice.options.len().min(MAX_OPTION_ROWS))
+        .filter(|count| *count > 0);
+    let hint = match (confirming.is_some(), toggles) {
+        (true, _) => " ↵ again to confirm · ↑/↓ choose · esc cancel".to_string(),
+        (false, Some(1)) => " ↑/↓ choose · 1 toggle · ↵ confirm · esc cancel".to_string(),
+        (false, Some(count)) => {
+            format!(" ↑/↓ choose · 1-{count} toggle · ↵ confirm · esc cancel")
+        }
+        (false, None) => " ↑/↓ choose · ↵ confirm · esc cancel".to_string(),
+    };
     put_text(
         b,
         i.x,
         i.bottom().saturating_sub(1),
         i.width,
-        if confirming.is_some() {
-            " ↵ again to confirm · ↑/↓ choose · esc cancel"
-        } else {
-            " ↑/↓ choose · ↵ confirm · esc cancel"
-        },
+        &hint,
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     Some(OverlayRender {
@@ -170,6 +227,7 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
             .unwrap_or_default(),
         cancel: Rect::default(),
         menu_rows,
+        option_rows: option_hits,
         ..OverlayRender::default()
     })
 }

@@ -69,6 +69,24 @@ impl App {
                 format!("unknown choice {} for {}", params.choice_id, params.item_id),
             );
         };
+        // Checked whatever the choice does, so a misspelt option never runs it with defaults.
+        // Only a choice that starts a workspace takes its options into account so far.
+        let options = match crate::work_items::source::switched_on_options(
+            &choice,
+            params.options.as_deref(),
+        ) {
+            Ok(options) => options,
+            Err(unknown) => {
+                return encode_error(
+                    id,
+                    "unknown_option",
+                    format!(
+                        "unknown option {unknown} for choice {} of {}",
+                        params.choice_id, params.item_id
+                    ),
+                );
+            }
+        };
         if choice.choice_id == crate::work_items::source::MUTE_START_REMINDER_CHOICE_ID {
             return match self.work_items.mute_start_reminder(&params.item_id) {
                 Ok(()) => encode_success(id, ResponseResult::Ok {}),
@@ -87,7 +105,11 @@ impl App {
                 }
             }
             WorkItemChoiceAction::ProvisionWorkspace => {
-                match self.start_work_item_provisioning(&params.item_id, &params.choice_id) {
+                match self.start_work_item_provisioning(
+                    &params.item_id,
+                    &params.choice_id,
+                    &options,
+                ) {
                     Ok(()) => encode_success(id, ResponseResult::Ok {}),
                     Err((code, message)) => encode_error(id, code, message),
                 }

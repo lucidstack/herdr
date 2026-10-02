@@ -11,6 +11,10 @@ pub struct WorkItemTarget {
 pub struct WorkItemChooseParams {
     pub item_id: String,
     pub choice_id: String,
+    /// Ids of the choice's options to switch on, from `WorkItemChoiceInfo.options`. Absent:
+    /// each option's `default`. An id the choice does not offer is an `unknown_option` error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -116,6 +120,22 @@ pub struct WorkItemChoiceInfo {
     /// Shown before a choice that cannot be undone runs; the user confirms it a second time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<String>,
+    /// Switches the user sets before running the choice. `work_item.choose` takes the ones
+    /// switched on. Omitted when the choice has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<WorkItemChoiceOptionInfo>,
+}
+
+/// A switch of a choice, e.g. whether reviewing a pull request creates a worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemChoiceOptionInfo {
+    pub option_id: String,
+    pub label: String,
+    /// One line explaining what the switch does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether it is on when `work_item.choose` names no options.
+    pub default: bool,
 }
 
 /// Starts the id of a choice a ticket offers on behalf of the pull request linked to it. The
@@ -160,6 +180,9 @@ pub struct WorkItemStepInfo {
 pub struct WorkItemProvisioningInfo {
     pub steps: Vec<WorkItemStepInfo>,
     pub finished: bool,
+    /// Unix time in seconds when every step had finished. Present once `finished` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

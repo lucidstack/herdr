@@ -178,6 +178,7 @@ mod tests {
             provisioning: Some(WorkItemProvisioningInfo {
                 steps: Vec::new(),
                 finished: false,
+                finished_at: None,
             }),
             resolve_error: Some("dirty".into()),
             action_running: None,
@@ -188,6 +189,8 @@ mod tests {
             is_pick_next: false,
             start_reminder_muted: true,
             phase_before_action: Some(WorkItemPhase::Local),
+            brief_failure_outdated: true,
+            brief_failed_at: Some(std::time::Instant::now()),
         }
     }
 
@@ -241,6 +244,8 @@ mod tests {
             action_outcome: None,
             action_error: None,
             phase_before_action: None,
+            brief_failure_outdated: false,
+            brief_failed_at: None,
             ..original
         };
         assert_eq!(

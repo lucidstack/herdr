@@ -30,6 +30,7 @@ pub(super) fn run_work_item_command(args: &[String]) -> std::io::Result<i32> {
                 Method::WorkItemChoose(WorkItemChooseParams {
                     item_id: item_id.clone(),
                     choice_id: choice_id.clone(),
+                    options: None,
                 }),
             ),
             _ => usage("herdr work-item choose ITEM_ID CHOICE_ID"),

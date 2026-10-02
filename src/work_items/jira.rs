@@ -394,6 +394,7 @@ fn start_reminder_for(detail: &JiraDetail) -> Option<StartReminder> {
             action: WorkItemChoiceAction::Perform,
             disabled_reason,
             confirm: None,
+            options: Vec::new(),
         },
     })
 }
@@ -1217,6 +1218,7 @@ impl WorkItemSource for JiraSource {
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone(),
                 confirm: None,
+                options: Vec::new(),
             });
         }
         if pull_request.is_none() {
@@ -1229,6 +1231,7 @@ impl WorkItemSource for JiraSource {
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: unmapped.clone().or(no_agent),
                 confirm: None,
+                options: Vec::new(),
             });
         }
         choices.push(WorkItemChoiceInfo {
@@ -1240,6 +1243,7 @@ impl WorkItemSource for JiraSource {
             },
             disabled_reason: None,
             confirm: None,
+            options: Vec::new(),
         });
         ItemChoices {
             choices,
@@ -1258,6 +1262,7 @@ impl WorkItemSource for JiraSource {
         &self,
         item: &WorkItem,
         choice_id: &str,
+        _options: &[String],
         _worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String> {
         let agent_starts = match choice_id {
@@ -1492,6 +1497,7 @@ impl WorkItemSource for JiraSource {
                 action: WorkItemChoiceAction::Perform,
                 disabled_reason: None,
                 confirm: None,
+                options: Vec::new(),
             },
         })
     }
@@ -1614,6 +1620,8 @@ mod tests {
             is_pick_next: false,
             start_reminder_muted: false,
             phase_before_action: None,
+            brief_failure_outdated: false,
+            brief_failed_at: None,
         }
     }
 
@@ -1859,7 +1867,7 @@ mod tests {
             Some("local")
         );
         let plan = source
-            .provision_plan(&item, "local_agent", Path::new("/w"))
+            .provision_plan(&item, "local_agent", &[], Path::new("/w"))
             .expect("plan");
         assert_eq!(
             plan.source,
@@ -1897,7 +1905,7 @@ mod tests {
             .as_deref()
             .is_some_and(|description| description.starts_with("Reopens your worktree")));
         let plan = source
-            .provision_plan(&item, "local", Path::new("/w"))
+            .provision_plan(&item, "local", &[], Path::new("/w"))
             .expect("plan");
         let WorkspaceSource::Worktree(spec) = &plan.source else {
             panic!("worktree");
@@ -1975,7 +1983,7 @@ mod tests {
         assert!(!description.contains("proposes a plan"), "{description}");
 
         let plan = source
-            .provision_plan(&item, "local", Path::new("/w"))
+            .provision_plan(&item, "local", &[], Path::new("/w"))
             .expect("plan");
         assert!(plan.brief.contains("o/r#12 (approved)"), "{}", plan.brief);
         assert!(
@@ -2018,7 +2026,12 @@ mod tests {
         assert_eq!(choices.default_choice_id.as_deref(), Some("jira"));
         assert!(choices.choices[0].disabled_reason.is_some());
         assert!(source
-            .provision_plan(&item("OPS-1", Some(&detail())), "local", Path::new("/w"))
+            .provision_plan(
+                &item("OPS-1", Some(&detail())),
+                "local",
+                &[],
+                Path::new("/w"),
+            )
             .is_err());
     }
 

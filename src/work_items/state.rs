@@ -91,6 +91,16 @@ pub(crate) struct WorkItem {
     /// item is leaving (a merge keeps waiting for the source to drop it).
     #[serde(skip)]
     pub phase_before_action: Option<WorkItemPhase>,
+    /// When the agent brief of the current provisioning failed. On the monotonic clock agents'
+    /// turn ends are on, unlike the Unix `finished_at` the API reports, which would drift from
+    /// it while the machine sleeps.
+    #[serde(skip)]
+    pub brief_failed_at: Option<std::time::Instant>,
+    /// A failed agent brief no longer needs you: an agent in the item's workspace took a turn
+    /// after it. Set once, so the failure does not return when that agent goes away; reset
+    /// with each provisioning.
+    #[serde(skip)]
+    pub brief_failure_outdated: bool,
 }
 
 /// External id of a provider's "Pick next" discovery row.
@@ -136,6 +146,8 @@ impl WorkItem {
             is_pick_next: false,
             start_reminder_muted: false,
             phase_before_action: None,
+            brief_failure_outdated: false,
+            brief_failed_at: None,
         }
     }
 
@@ -176,6 +188,8 @@ impl WorkItem {
             is_pick_next: true,
             start_reminder_muted: false,
             phase_before_action: None,
+            brief_failure_outdated: false,
+            brief_failed_at: None,
         }
     }
 
@@ -281,6 +295,10 @@ impl WorkItemsState {
 
     pub(crate) fn items(&self) -> &[WorkItem] {
         &self.items
+    }
+
+    pub(crate) fn items_mut(&mut self) -> &mut [WorkItem] {
+        &mut self.items
     }
 
     pub(crate) fn get(&self, key: &str) -> Option<&WorkItem> {

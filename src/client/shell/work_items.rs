@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::api::schema::{
-    Method, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams, WorkItemInfo,
-    WorkItemLinkParams, WorkItemPhase, WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget,
-    WorkspaceTarget, WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX,
+    Method, WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo,
+    WorkItemChooseParams, WorkItemHideParams, WorkItemInfo, WorkItemLinkParams, WorkItemPhase,
+    WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
+    WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX,
 };
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -151,11 +152,45 @@ pub(super) struct ClientWorkItemOverlay {
     /// The choice waiting for a second confirm, when it cannot be undone.
     pub(super) confirming: Option<usize>,
     pub(super) spinner_frame: usize,
+    /// Options the user switched away from their defaults, as (choice id, option id) pairs.
+    /// Kept apart from `item`, which a newer projection replaces while the dialog is open.
+    pub(super) flipped: HashSet<(String, String)>,
 }
 
 impl ClientWorkItemOverlay {
     pub(super) fn checklist(&self) -> bool {
         self.show_checklist
+    }
+
+    fn is_flipped(&self, choice: &WorkItemChoiceInfo, option: &WorkItemChoiceOptionInfo) -> bool {
+        self.flipped
+            .contains(&(choice.choice_id.clone(), option.option_id.clone()))
+    }
+
+    /// Whether `option` of `choice` is switched on as things stand.
+    pub(super) fn option_on(
+        &self,
+        choice: &WorkItemChoiceInfo,
+        option: &WorkItemChoiceOptionInfo,
+    ) -> bool {
+        option.default != self.is_flipped(choice, option)
+    }
+
+    /// The `options` to send when running `choice`: the ones switched on, or `None` while
+    /// every switch is at its default, which the server applies by itself.
+    pub(super) fn chosen_options(&self, choice: &WorkItemChoiceInfo) -> Option<Vec<String>> {
+        choice
+            .options
+            .iter()
+            .any(|option| self.is_flipped(choice, option))
+            .then(|| {
+                choice
+                    .options
+                    .iter()
+                    .filter(|option| self.option_on(choice, option))
+                    .map(|option| option.option_id.clone())
+                    .collect()
+            })
     }
 }
 
@@ -385,14 +420,20 @@ fn menu_links(
     links
 }
 
+/// Whether provisioning failed and the failure is what the item needs you for. One that has
+/// settled since, such as a brief that looked undelivered until its agent worked, is history:
+/// the row then shows the agent's status like that of any item that needs nothing.
 fn provisioning_failed(item: &WorkItemInfo) -> bool {
-    item.provisioning.as_ref().is_some_and(|provisioning| {
-        provisioning.finished
-            && provisioning
-                .steps
-                .iter()
-                .any(|step| step.status == WorkItemStepStatus::Failed)
-    })
+    item.attention
+        .as_ref()
+        .is_some_and(|attention| attention.kind == crate::api::schema::AttentionKind::Failed)
+        && item.provisioning.as_ref().is_some_and(|provisioning| {
+            provisioning.finished
+                && provisioning
+                    .steps
+                    .iter()
+                    .any(|step| step.status == WorkItemStepStatus::Failed)
+        })
 }
 
 fn item_animates(item: &WorkItemInfo) -> bool {
@@ -1429,6 +1470,7 @@ impl ClientShellState {
                 show_checklist,
                 confirming: None,
                 spinner_frame: self.work_items.spinner_frame,
+                flipped: HashSet::new(),
             },
         )));
     }
@@ -1754,6 +1796,9 @@ impl ClientShellState {
             KeyCode::Right | KeyCode::Down | KeyCode::Tab | KeyCode::Char('l' | 'j') => {
                 move_highlight(overlay, 1)
             }
+            KeyCode::Char(digit @ '1'..='9') if key.modifiers.is_empty() => {
+                flip_option(overlay, usize::from(digit as u8 - b'1'));
+            }
             KeyCode::Enter => {
                 let index = overlay.highlighted;
                 self.confirm_work_item_choice(index, outcome);
@@ -1774,27 +1819,46 @@ impl ClientShellState {
         };
         outcome.repaint = true;
         let checklist = overlay.checklist();
-        if let Some(index) = self
-            .hits
-            .overlay_choice_rows
-            .iter()
-            .find(|(rect, _)| super::contains(*rect, point))
-            .map(|(_, index)| *index)
-            .filter(|_| !checklist)
-        {
-            self.confirm_work_item_choice(index, outcome);
+        let highlighted = overlay.highlighted;
+        let hit = |rows: &[(Rect, usize)]| {
+            rows.iter()
+                .find(|(rect, _)| super::contains(*rect, point))
+                .map(|(_, index)| *index)
+                .filter(|_| !checklist)
+        };
+        if let Some(index) = hit(&self.hits.overlay_option_rows) {
+            if let Some(ClientShellOverlay::WorkItem(overlay)) = self.overlay.as_mut() {
+                flip_option(overlay, index);
+            }
+        } else if let Some(index) = hit(&self.hits.overlay_choice_rows) {
+            self.click_work_item_choice(index, outcome);
         } else if super::contains(self.hits.overlay_primary, point) {
             if checklist {
                 self.open_work_item_workspace(outcome);
             } else {
-                let index = overlay.highlighted;
-                self.confirm_work_item_choice(index, outcome);
+                self.confirm_work_item_choice(highlighted, outcome);
             }
         } else if checklist && super::contains(self.hits.overlay_cancel, point) {
             self.leave_work_item_checklist(outcome);
         } else {
             self.overlay = None;
         }
+    }
+
+    /// A click on a choice runs it. A choice with switches that is not highlighted yet is
+    /// highlighted instead, so its switches show and can be set before a second click runs it.
+    fn click_work_item_choice(&mut self, index: usize, outcome: &mut ClientShellInput) {
+        if let Some(ClientShellOverlay::WorkItem(overlay)) = self.overlay.as_mut() {
+            let has_switches = overlay.item.choices.get(index).is_some_and(|choice| {
+                !choice.options.is_empty() && choice.disabled_reason.is_none()
+            });
+            if has_switches && overlay.highlighted != index {
+                overlay.highlighted = index;
+                overlay.confirming = None;
+                return;
+            }
+        }
+        self.confirm_work_item_choice(index, outcome);
     }
 
     fn confirm_work_item_choice(&mut self, index: usize, outcome: &mut ClientShellInput) {
@@ -1822,6 +1886,7 @@ impl ClientShellState {
         let method = Method::WorkItemChoose(WorkItemChooseParams {
             item_id: overlay.item.item_id.clone(),
             choice_id: choice.choice_id.clone(),
+            options: overlay.chosen_options(&choice),
         });
         match choice.action {
             WorkItemChoiceAction::OpenUrl { url } => {
@@ -1944,4 +2009,25 @@ fn move_highlight(overlay: &mut ClientWorkItemOverlay, step: isize) {
             return;
         }
     }
+}
+
+/// Flips option `index` of the highlighted choice between on and off.
+fn flip_option(overlay: &mut ClientWorkItemOverlay, index: usize) {
+    let Some(choice) = overlay
+        .item
+        .choices
+        .get(overlay.highlighted)
+        .filter(|choice| choice.disabled_reason.is_none())
+    else {
+        return;
+    };
+    let Some(option) = choice.options.get(index) else {
+        return;
+    };
+    let flipped = (choice.choice_id.clone(), option.option_id.clone());
+    if !overlay.flipped.remove(&flipped) {
+        overlay.flipped.insert(flipped);
+    }
+    // What would run has changed, so a second confirm has to start over.
+    overlay.confirming = None;
 }

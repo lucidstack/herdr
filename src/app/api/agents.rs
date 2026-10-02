@@ -105,6 +105,50 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    /// `agent.dismiss`: the agent's finished turn counts as dealt with, as if you had typed to
+    /// its pane after it, so the `finished` attention for it clears. A blocked agent has to be
+    /// answered instead. An agent whose turn does not need you yet, because it works, ended
+    /// its turn within the quiet period, or was dealt with already, is left as it is.
+    pub(super) fn handle_agent_dismiss(&mut self, id: String, target: AgentTarget) -> String {
+        let resolved = match self.resolve_agent_target(&target.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(resolved.ws_idx)
+            .and_then(|workspace| workspace.terminal_id(resolved.pane_id))
+            .cloned()
+        else {
+            return agent_not_found(id, &target.target);
+        };
+        let Some(state) = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .map(|terminal| terminal.state)
+        else {
+            return agent_not_found(id, &target.target);
+        };
+        if state == crate::detect::AgentState::Blocked {
+            return encode_error(
+                id,
+                "agent_blocked",
+                format!("agent {} is blocked and must be answered", target.target),
+            );
+        }
+        let now = std::time::Instant::now();
+        if self.agent_turn_needs_you(resolved.ws_idx, resolved.pane_id, &terminal_id, now) {
+            if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                terminal.dismiss_finished_turn();
+            }
+            self.attention_schedule.mark_dirty();
+            self.sync_work_item_events();
+        }
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
         let agent = match self.focus_agent_target(&target.target) {
             Ok(agent) => agent,

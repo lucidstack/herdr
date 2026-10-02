@@ -531,14 +531,104 @@ fn work_item_choose_request_round_trips() {
     let json = serde_json::json!({
         "id": "x",
         "method": "work_item.choose",
-        "params": {"item_id": "github:o/r#1", "choice_id": "github"}
+        "params": {"item_id": "github:o/r#1", "choice_id": "merge_squash"}
     });
     let request: Request = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(
         request.method,
         Method::WorkItemChoose(WorkItemChooseParams {
             item_id: "github:o/r#1".into(),
-            choice_id: "github".into(),
+            choice_id: "merge_squash".into(),
+            options: None,
+        })
+    );
+    assert_eq!(serde_json::to_value(request).unwrap(), json);
+}
+
+#[test]
+fn work_item_choose_options_tell_none_from_all_off() {
+    let request = |options: serde_json::Value| {
+        serde_json::json!({
+            "id": "x",
+            "method": "work_item.choose",
+            "params": {"item_id": "github:o/r#1", "choice_id": "review", "options": options}
+        })
+    };
+    for (options, expected) in [
+        (
+            serde_json::json!(["worktree", "post"]),
+            vec!["worktree", "post"],
+        ),
+        // Switching every option off is not the same as naming none.
+        (serde_json::json!([]), Vec::new()),
+    ] {
+        let json = request(options);
+        let parsed: Request = serde_json::from_value(json.clone()).unwrap();
+        let Method::WorkItemChoose(params) = &parsed.method else {
+            panic!("wrong method parsed");
+        };
+        assert_eq!(
+            params.options,
+            Some(expected.into_iter().map(str::to_string).collect())
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), json);
+    }
+}
+
+#[test]
+fn work_item_choice_options_are_omitted_when_empty() {
+    let with_options = serde_json::json!({
+        "choice_id": "review",
+        "label": "Review",
+        "action": {"type": "provision_workspace"},
+        "options": [
+            {"option_id": "worktree", "label": "Create worktree", "description": "A checkout", "default": true},
+            {"option_id": "post", "label": "Post to GitHub", "default": false}
+        ]
+    });
+    let choice: WorkItemChoiceInfo = serde_json::from_value(with_options.clone()).unwrap();
+    assert_eq!(choice.options.len(), 2);
+    assert!(choice.options[0].default && !choice.options[1].default);
+    assert_eq!(choice.options[0].description.as_deref(), Some("A checkout"));
+    assert_eq!(choice.options[1].description, None);
+    assert_eq!(serde_json::to_value(&choice).unwrap(), with_options);
+
+    let plain = serde_json::json!({
+        "choice_id": "jira",
+        "label": "Open in Jira",
+        "action": {"type": "open_url", "url": "https://example.atlassian.net/browse/APP-1"}
+    });
+    let choice: WorkItemChoiceInfo = serde_json::from_value(plain.clone()).unwrap();
+    assert!(choice.options.is_empty());
+    assert_eq!(serde_json::to_value(&choice).unwrap(), plain);
+}
+
+#[test]
+fn provisioning_finish_time_is_optional_on_the_wire() {
+    let finished: WorkItemProvisioningInfo = serde_json::from_value(
+        serde_json::json!({"steps": [], "finished": true, "finished_at": 1_700_000_000}),
+    )
+    .unwrap();
+    assert_eq!(finished.finished_at, Some(1_700_000_000));
+
+    let running = serde_json::json!({"steps": [], "finished": false});
+    let progress: WorkItemProvisioningInfo = serde_json::from_value(running.clone()).unwrap();
+    assert_eq!(progress.finished_at, None);
+    assert_eq!(serde_json::to_value(&progress).unwrap(), running);
+}
+
+#[test]
+fn agent_dismiss_request_takes_the_agent_last_message_params() {
+    let json = serde_json::json!({
+        "id": "d",
+        "method": "agent.dismiss",
+        "params": {"target": "w1:p1"}
+    });
+    let request: Request = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        request.method,
+        Method::AgentDismiss(AgentTarget {
+            target: "w1:p1".into()
         })
     );
     assert_eq!(serde_json::to_value(request).unwrap(), json);

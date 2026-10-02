@@ -1162,6 +1162,7 @@ impl App {
                     "agent.activity is handled by the api server",
                 );
             }
+            Method::AgentDismiss(target) => return self.handle_agent_dismiss(request.id, target),
             Method::AgentNotesTake(target) => {
                 return self.handle_agent_notes_take(request.id, target);
             }

@@ -250,10 +250,6 @@ pub struct ReviewRequestedConfig {
     pub on_resolved: OnResolvedConfig,
     /// Delete the local review branch when its worktree is removed. Default: true.
     pub delete_branch: bool,
-    /// Pull requests with at most this many changed lines default to reviewing on GitHub. Default: 20.
-    pub small_diff_lines: u64,
-    /// Regexes matched against changed paths; documentation-only pull requests default to reviewing on GitHub.
-    pub docs_patterns: Vec<String>,
     /// Agent started in the first tab. Empty disables the agent-led choices. Default: "claude".
     pub agent: String,
     /// Extra arguments for the agent, e.g. ["--model", "opus", "--effort", "high"] for Claude Code. Default: [].
@@ -270,11 +266,6 @@ impl Default for ReviewRequestedConfig {
             repos: Vec::new(),
             on_resolved: OnResolvedConfig::Keep,
             delete_branch: true,
-            small_diff_lines: 20,
-            docs_patterns: vec![
-                r"\.(md|mdx|markdown|rst|txt|adoc)$".into(),
-                r"^docs/".into(),
-            ],
             agent: "claude".into(),
             agent_args: Vec::new(),
             tabs: default_review_tabs(),

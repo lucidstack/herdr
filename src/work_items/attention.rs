@@ -38,6 +38,8 @@ pub(crate) struct AgentSignal<'a> {
     /// What the agent reported while blocked, e.g. its permission prompt.
     pub blocked_message: Option<&'a str>,
     pub turn_finished_at: Option<Instant>,
+    /// The `turn_finished_at` of a turn the user dismissed rather than typed to the pane.
+    pub dismissed_turn: Option<Instant>,
     pub last_input_at: Option<Instant>,
 }
 
@@ -46,14 +48,25 @@ pub(crate) struct AgentSignal<'a> {
 pub(crate) struct AgentVerdict {
     pub need: Option<Need>,
     pub working: bool,
+    /// When the agent's latest turn ended, while it sits idle after one, whether or not you
+    /// dealt with it since.
+    pub turn_finished_at: Option<Instant>,
     /// When the verdict may change without any new signal: a finished turn's quiet period
     /// ending.
     pub recheck_at: Option<Instant>,
 }
 
+impl AgentVerdict {
+    /// Whether an agent finished a turn after `at`, a moment on the same monotonic clock as
+    /// turn ends. The same moment is not after.
+    pub(crate) fn took_turn_after(&self, at: Instant) -> bool {
+        self.turn_finished_at.is_some_and(|ended| ended > at)
+    }
+}
+
 /// Blocked: needs you. Idle after a turn: needs you once the pane was left alone for
-/// `FINISHED_QUIET_PERIOD` since the turn ended; input after the turn ended means you
-/// already dealt with it.
+/// `FINISHED_QUIET_PERIOD` since the turn ended; input after the turn ended, or dismissing
+/// the turn, means you already dealt with it.
 pub(crate) fn agent_verdict(signal: &AgentSignal<'_>, now: Instant) -> AgentVerdict {
     match signal.state {
         AgentState::Blocked => {
@@ -81,17 +94,23 @@ pub(crate) fn agent_verdict(signal: &AgentSignal<'_>, now: Instant) -> AgentVerd
             let Some(finished_at) = signal.turn_finished_at else {
                 return AgentVerdict::default();
             };
-            if signal
-                .last_input_at
-                .is_some_and(|input| input > finished_at)
-            {
-                return AgentVerdict::default();
+            // Whatever you do about the turn, it was taken.
+            let turn = AgentVerdict {
+                turn_finished_at: Some(finished_at),
+                ..AgentVerdict::default()
+            };
+            let dealt_with = signal.dismissed_turn == Some(finished_at)
+                || signal
+                    .last_input_at
+                    .is_some_and(|input| input > finished_at);
+            if dealt_with {
+                return turn;
             }
             let due = finished_at + FINISHED_QUIET_PERIOD;
             if now < due {
                 return AgentVerdict {
                     recheck_at: Some(due),
-                    ..AgentVerdict::default()
+                    ..turn
                 };
             }
             AgentVerdict {
@@ -100,15 +119,15 @@ pub(crate) fn agent_verdict(signal: &AgentSignal<'_>, now: Instant) -> AgentVerd
                     reason: format!("{} finished its turn", signal.agent),
                     pane_id: Some(signal.pane_id.clone()),
                 }),
-                ..AgentVerdict::default()
+                ..turn
             }
         }
         AgentState::Unknown => AgentVerdict::default(),
     }
 }
 
-/// Every agent of one workspace folded together: the most urgent need, and whether any
-/// agent is working.
+/// Every agent of one workspace folded together: the most urgent need, whether any agent is
+/// working, and the latest turn any of them finished.
 pub(crate) fn fold_verdicts(verdicts: impl IntoIterator<Item = AgentVerdict>) -> AgentVerdict {
     verdicts
         .into_iter()
@@ -116,6 +135,7 @@ pub(crate) fn fold_verdicts(verdicts: impl IntoIterator<Item = AgentVerdict>) ->
             folded.working |= verdict.working;
             folded.recheck_at = earliest(folded.recheck_at, verdict.recheck_at);
             folded.need = most_urgent(folded.need.take(), verdict.need);
+            folded.turn_finished_at = folded.turn_finished_at.max(verdict.turn_finished_at);
             folded
         })
 }
@@ -330,6 +350,7 @@ mod tests {
             state,
             blocked_message: None,
             turn_finished_at: None,
+            dismissed_turn: None,
             last_input_at: None,
         }
     }
@@ -380,13 +401,95 @@ mod tests {
 
         idle.last_input_at = Some(finished_at + Duration::from_secs(30));
         let touched = agent_verdict(&idle, finished_at + Duration::from_secs(600));
-        assert_eq!(touched, AgentVerdict::default());
+        assert_eq!(touched.need, None);
+        assert_eq!(touched.recheck_at, None);
     }
 
     #[test]
     fn idle_agent_that_never_finished_a_turn_does_not_need_you() {
         let verdict = agent_verdict(&signal(AgentState::Idle), Instant::now());
         assert_eq!(verdict, AgentVerdict::default());
+    }
+
+    #[test]
+    fn dismissing_a_finished_turn_deals_with_it_as_input_after_it_would() {
+        let finished_at = Instant::now();
+        let mut idle = signal(AgentState::Idle);
+        idle.turn_finished_at = Some(finished_at);
+        let late = finished_at + FINISHED_QUIET_PERIOD + Duration::from_secs(1);
+        assert_eq!(
+            agent_verdict(&idle, late).need.map(|need| need.kind),
+            Some(AttentionKind::Finished)
+        );
+
+        idle.dismissed_turn = Some(finished_at);
+        let dismissed = agent_verdict(&idle, late);
+        assert_eq!(dismissed.need, None);
+        assert_eq!(dismissed.recheck_at, None);
+
+        // The next turn is its own: the earlier dismissal does not cover it.
+        let next = finished_at + Duration::from_secs(300);
+        idle.turn_finished_at = Some(next);
+        assert_eq!(
+            agent_verdict(&idle, next + FINISHED_QUIET_PERIOD)
+                .need
+                .map(|need| need.kind),
+            Some(AttentionKind::Finished)
+        );
+    }
+
+    #[test]
+    fn a_turn_stays_taken_whether_or_not_it_needs_you() {
+        let finished_at = Instant::now();
+        let seconds = Duration::from_secs;
+        let turn = |signal: &AgentSignal<'_>, now| agent_verdict(signal, now).turn_finished_at;
+        let mut idle = signal(AgentState::Idle);
+        idle.turn_finished_at = Some(finished_at);
+
+        // Within the quiet period, once it is due, and after you dealt with it.
+        assert_eq!(turn(&idle, finished_at + seconds(10)), Some(finished_at));
+        assert_eq!(turn(&idle, finished_at + seconds(300)), Some(finished_at));
+        idle.last_input_at = Some(finished_at + seconds(1));
+        assert_eq!(turn(&idle, finished_at + seconds(300)), Some(finished_at));
+
+        // A working agent is on a turn, not after one, whatever turn it finished before.
+        let mut working = signal(AgentState::Working);
+        working.turn_finished_at = Some(finished_at);
+        assert_eq!(turn(&working, finished_at + seconds(300)), None);
+    }
+
+    #[test]
+    fn a_turn_is_after_a_moment_only_when_it_ended_later() {
+        // Ahead of now, so moments before it are safe to make.
+        let failed_at = Instant::now() + Duration::from_secs(60);
+        let ended = |at: Instant| AgentVerdict {
+            turn_finished_at: Some(at),
+            ..AgentVerdict::default()
+        };
+        assert!(ended(failed_at + Duration::from_millis(1)).took_turn_after(failed_at));
+        assert!(
+            !ended(failed_at).took_turn_after(failed_at),
+            "the same moment is not after"
+        );
+        assert!(!ended(failed_at - Duration::from_secs(1)).took_turn_after(failed_at));
+        assert!(!AgentVerdict::default().took_turn_after(failed_at));
+    }
+
+    #[test]
+    fn workspace_remembers_its_latest_turn() {
+        let now = Instant::now();
+        let ended = |at| AgentVerdict {
+            turn_finished_at: Some(at),
+            ..AgentVerdict::default()
+        };
+        let latest = now + Duration::from_secs(70);
+        let folded = fold_verdicts([
+            ended(now),
+            ended(latest),
+            AgentVerdict::default(),
+            ended(now + Duration::from_secs(5)),
+        ]);
+        assert_eq!(folded.turn_finished_at, Some(latest));
     }
 
     #[test]

@@ -68,7 +68,7 @@ pub enum ToastDelivery {
     System,
 }
 
-/// Where a client opens web links: pane links, and work items' "Open on GitHub".
+/// Where a client opens web links: pane links, and the links of a work item's menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OpenLinksConfig {

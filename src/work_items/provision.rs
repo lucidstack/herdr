@@ -134,6 +134,7 @@ pub(crate) fn initial_progress(plan: &ProvisionPlan) -> WorkItemProvisioningInfo
             agent_brief,
         ],
         finished: false,
+        finished_at: None,
     };
     refresh_finished(&mut progress);
     progress
@@ -197,6 +198,13 @@ pub(crate) fn has_failure(progress: &WorkItemProvisioningInfo) -> bool {
         .any(|info| info.status == WorkItemStepStatus::Failed)
 }
 
+/// Whether the agent brief failed, whatever else did.
+pub(crate) fn has_failed_brief(progress: &WorkItemProvisioningInfo) -> bool {
+    progress.steps.iter().any(|info| {
+        info.step == WorkItemStep::AgentBrief && info.status == WorkItemStepStatus::Failed
+    })
+}
+
 fn is_terminal(status: WorkItemStepStatus) -> bool {
     matches!(
         status,
@@ -206,6 +214,12 @@ fn is_terminal(status: WorkItemStepStatus) -> bool {
 
 fn refresh_finished(progress: &mut WorkItemProvisioningInfo) {
     progress.finished = progress.steps.iter().all(|info| is_terminal(info.status));
+    progress.finished_at = match (progress.finished, progress.finished_at) {
+        // A later refresh keeps the moment it first finished.
+        (true, Some(at)) => Some(at),
+        (true, None) => Some(super::unix_now()),
+        (false, _) => None,
+    };
 }
 
 fn git_output(
@@ -590,6 +604,39 @@ mod tests {
             None,
         );
         assert!(progress.finished);
+    }
+
+    #[test]
+    fn finish_time_is_set_when_the_last_step_ends_and_kept_after() {
+        let mut progress = initial_progress(&plan("claude"));
+        assert_eq!(progress.finished_at, None);
+        set_step(
+            &mut progress,
+            WorkItemStep::Checkout,
+            WorkItemStepStatus::Done,
+            None,
+        );
+        assert_eq!(progress.finished_at, None, "a step is still to go");
+
+        let before = crate::work_items::unix_now();
+        set_step(
+            &mut progress,
+            WorkItemStep::AgentBrief,
+            WorkItemStepStatus::Failed,
+            Some("agent still idle".into()),
+        );
+        let finished_at = progress.finished_at.expect("finished");
+        assert!(before <= finished_at && finished_at <= crate::work_items::unix_now());
+
+        // Touching a step again does not move the moment it finished.
+        progress.finished_at = Some(finished_at - 100);
+        set_step(
+            &mut progress,
+            WorkItemStep::AgentBrief,
+            WorkItemStepStatus::Failed,
+            Some("still idle".into()),
+        );
+        assert_eq!(progress.finished_at, Some(finished_at - 100));
     }
 
     #[test]

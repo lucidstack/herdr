@@ -27,14 +27,14 @@ path = "~/src/app"
 
 ### Repositories you have not mapped
 
-Work for a repository that has no `repos` entry can only be opened on GitHub, or handled by the agent without a checkout. When your clones live in one directory, name it as `clone_root` and Herdr can map such repositories as they come in, for example from your phone:
+Work for a repository that has no `repos` entry can only be handled by the agent without a checkout, such as a review of the downloaded diff. When your clones live in one directory, name it as `clone_root` and Herdr can map such repositories as they come in, for example from your phone:
 
 ```toml
 [work_items.github]
 clone_root = "~/projects"
 ```
 
-The item then offers **Link or clone acme/api** first. Herdr looks through the directories directly inside `clone_root` for a clone with a remote pointing at the repository, trying the one named after it first, and links it with that remote; worktrees are skipped, so the main checkout is the one linked. When there is none, it clones the repository there with `gh repo clone`, into `~/projects/api`, or `~/projects/acme-api` when `api` is taken. Nothing outside `clone_root` is touched, and a failed clone leaves no directory behind. Once linked, the local choices are available, and the clone is listed under **repositories**.
+The item then offers **Link or clone acme/api** first. Herdr looks through the directories directly inside `clone_root` for a clone with a remote pointing at the repository, trying the one named after it first, and links it with that remote; worktrees are skipped, so the main checkout is the one linked. When there is none, it clones the repository there with `gh repo clone`, into `~/projects/api`, or `~/projects/acme-api` when `api` is taken. Nothing outside `clone_root` is touched, and a failed clone leaves no directory behind. Once linked, the repository counts as mapped: the choices that need a checkout are available, a review offers **Create worktree**, and the clone is listed under **repositories**.
 
 Linked clones are remembered in `work-items.json` and work exactly like `repos` entries, which win for the same repository. To change one, add a `repos` entry for it.
 
@@ -42,12 +42,12 @@ Every poll runs one GitHub search per event. The defaults:
 
 | Event | Default query | What you can do |
 | --- | --- | --- |
-| `review_requested` | `is:pr is:open review-requested:@me archived:false` | Review locally, have the agent review first, have the agent review and report back or post a comment, or open it on GitHub |
+| `review_requested` | `is:pr is:open review-requested:@me archived:false` | **Review** it with the agent, in a worktree or from a downloaded diff, and optionally have the agent post its review on GitHub |
 | `changes_requested` | `is:pr is:open author:@me review:changes_requested archived:false` | Work on the feedback locally, have the agent address it, then have the agent push and reply |
 | `ci_failing` | `is:pr is:open author:@me status:failure archived:false` | Diagnose the failures locally, have the agent fix them, then have the agent push the fix |
 | `assigned` | `is:issue is:open assignee:@me archived:false` | Plan it locally, or have the agent implement it |
 | `mentioned` | off | Have the agent read the thread and draft a reply |
-| `ready_to_merge` | `is:pr is:open author:@me draft:false archived:false`, keeping those approved | Merge it, with any method the repository allows, or open it on GitHub |
+| `ready_to_merge` | `is:pr is:open author:@me draft:false archived:false`, keeping those approved | Merge it, with any method the repository allows |
 
 Change a query, or switch an event off with an empty string, under `[work_items.github.queries]`:
 
@@ -63,10 +63,25 @@ Every pull request in the inbox shows where it stands on a line of its own, look
 
 ### Branches
 
-- **Review requests** get a local branch `review/pr-<number>` from the pull request head. A branch you kept from an earlier review is continued on `review/pr-<number>-2`.
+- **Review requests** reviewed in a worktree get a local branch `review/pr-<number>` from the pull request head. A branch you kept from an earlier review is continued on `review/pr-<number>-2`.
 - **Your own pull requests** (changes requested, failing checks) use the pull request's head branch. An existing worktree of that branch is reopened, and an existing local branch is reused as it is. Otherwise a new branch tracks the remote one, so `git push` works. Pull requests from forks start from GitHub's copy of the head instead, so pushing needs the fork as a remote.
 - **Assigned issues** get a new branch `issue/<number>-<title words>` from the repository's default branch. It does not track anything, so a push cannot land on the default branch by accident.
-- **Mentions** and agent reviews without a checkout download the thread or diff into a scratch directory instead.
+- **Mentions** and reviews without a worktree download the thread or diff into a scratch directory instead.
+
+### Reviewing a pull request
+
+A review request offers one choice, **Review**. The agent always reviews: it reads the change and reports its findings in its pane. Two switches decide the rest:
+
+| Create worktree | Post to GitHub | What happens |
+| --- | --- | --- |
+| on | off | A worktree on the pull request head with your tools; the agent reviews it and reports back. It does not change files or commit. |
+| on | on | The same, and the agent then shows you its findings and posts them as one review comment. |
+| off | off | No checkout: the agent reviews a downloaded diff with `gh` and reports back. |
+| off | on | The same, and the agent then posts its review as one comment. |
+
+**Create worktree** is on by default, and only offered for a repository with a local clone, from `[work_items.github] repos` or linked through `clone_root`; without one the agent works from the diff. **Post to GitHub** is off by default, since a comment on GitHub is visible to everyone. The comment is only ever a comment: the agent is told never to approve or request changes. Herdr writes nothing to GitHub itself, so you approve the `gh pr review` command in the agent's own permission prompt. In a worktree, the agent writes the comment to a file outside it, so the worktree stays clean and can be removed. **Review** is highlighted when the dialog opens, even below **Link or clone**, unless no agent is configured for the repository: it is then unavailable, and the item has no default choice.
+
+GitHub items offer no choice that only opens them in the browser. What you do on GitHub reaches Herdr through the pull request's own events, so the item updates anyway. To read the pull request there, use **Open #12 on GitHub** in the item's right-click menu.
 
 ### Sending feedback back to reviewers
 
@@ -94,7 +109,6 @@ Each event has workflow blocks. The first block whose `repos` list includes the 
 [[work_items.github.review_requested]]
 repos = ["acme/app"]
 on_resolved = "remove"      # remove the worktree once the review is done
-small_diff_lines = 40       # small changes default to reviewing on GitHub
 
 [[work_items.github.changes_requested]]
 agent = "codex"
@@ -160,8 +174,9 @@ When a pull request's title starts with a Jira issue key, bare or in brackets (`
 
 ## Using the inbox
 
-- **●** marks a new item, **·** one you have seen, and **✓** one that no longer needs you but still has a workspace. A spinner means Herdr is waiting: for you to finish on GitHub, or for a workspace to be prepared.
+- **●** marks a new item, **·** one you have seen, and **✓** one that no longer needs you but still has a workspace. A spinner means Herdr is waiting: for you to finish in the browser, or for a workspace to be prepared.
 - **Click** an item to choose what to do. The dialog highlights a sensible default; use the arrow keys and Enter, or click a choice. Once an item has a workspace, clicking the item goes to it. The item stands for its workspace: its agent's status shows at the right end of its first row, and the workspace is not listed again in the spaces list.
+- A choice with switches shows them below the list while it is highlighted, such as **Create worktree** and **Post to GitHub** for **Review**, each with a number. Press that number or click the switch to flip it, then press Enter. Clicking a choice that has switches highlights it first, so you can set them; click it again to run it. The right-click menu runs such a choice with its switches at their defaults.
 - While a workspace is being prepared, the dialog shows each step: the worktree, then the agent brief. The brief counts as delivered only once the agent starts working. If the agent first asks you something, such as whether to trust the folder, the brief waits for your answer.
 - **Right-click** an item for what to do next. The menu leads with the item's likely next steps, its default first, such as **Squash and merge** or **Move APP-7 to Done**, with **More choices...** for the rest; the workspace an item already has is not listed, since a click goes there. Then the item opens in the browser, each link naming where it goes (**Open APP-7 in Jira**, **Open #12 on GitHub**). Then you can **link it to the current workspace** when you already started the work somewhere Herdr did not detect, snooze it for an hour or a day, dismiss it or show it again. Closing the workspace or removing its worktree comes last. Closing a linked workspace unlinks the item again.
 - A dismissed item stays hidden until it is requested again. A snoozed item comes back as new when the snooze ends, even across restarts.
@@ -198,12 +213,16 @@ The `herdr work-item` command drives the inbox from scripts and agents:
 
 ```bash
 herdr work-item list
-herdr work-item choose 'github:acme/app#42' local
+herdr work-item choose 'github:acme/app#42' review
 herdr work-item snooze 'github:acme/app#42' --for 2h
 herdr work-item dismiss 'jira:APP-7'
 herdr work-item unhide 'jira:APP-7'
 herdr work-item link 'jira:APP-7' w3
 ```
+
+`herdr work-item choose` runs a choice with its options at their defaults. `work_item.list` shows each choice's options as `{ "option_id", "label", "description", "default" }`, and `work_item.choose` takes `options`, the ids to switch on: leave it out for the defaults, or send `[]` to switch every option off. The review choice has the options `worktree` and `post`. An id the choice does not offer fails with `unknown_option`, and nothing runs.
+
+Preparing a workspace is reported as the item's `provisioning`: its `steps`, whether they are `finished` and, once they are, `finished_at`, the Unix time in seconds at which the last one ended.
 
 ### What needs you
 
@@ -212,8 +231,8 @@ Herdr works out whether each item needs you, and why, and reports it as the item
 | Kind | When |
 |---|---|
 | `blocked` | An agent in the item's workspace waits on you. The reason is the prompt the agent reported, when its integration reports one. |
-| `failed` | Setting up the workspace or carrying out a choice failed, or the workspace could not be removed. |
-| `finished` | An agent in the item's workspace finished its turn and its pane got no input for two minutes since. Typing, pasting or prompting it after the turn ended counts as dealing with it. |
+| `failed` | Setting up the workspace or carrying out a choice failed, or the workspace could not be removed. A failed agent brief stops counting once an agent in the item's workspace has finished a turn after it: the agent worked, so it was ready after all. The step stays failed in `provisioning`. |
+| `finished` | An agent in the item's workspace finished its turn and its pane got no input for two minutes since. Typing, pasting or prompting it after the turn ended, or dismissing it with `agent.dismiss`, counts as dealing with it. |
 | `changes_requested`, `checks_failing`, `ready_to_merge` | What the tracker asks of your pull request, including the one linked to a ticket. |
 | `ready_to_close` | The pull request linked to a Jira ticket is merged, but the ticket is still open. |
 | `new` | A review request, assignment, mention or Jira ticket you have not made a choice for yet. |
@@ -223,6 +242,8 @@ While an agent in the item's workspace is working, or Herdr is setting up the wo
 `attention.changed` is published when an item starts or stops needing you, or needs you for another kind of reason, and never again while the kind stays the same. It carries `item_id`, `workspace_id`, a `title` and the new `attention` (absent once it no longer needs you). Needs found at start-up are recorded without events.
 
 Agents in panes outside every item's workspace are covered too, so none goes unnoticed: `herdr work-item list` returns them under `agents`, each with its pane, workspace, status and `attention` (`blocked` or `finished`, by the same rules), and `attention.changed` reports them with a `pane_id` instead of an `item_id`.
+
+`agent.dismiss` counts an agent's finished turn as dealt with, so its `finished` attention clears, for agents inside an item's workspace and outside alike. It takes the agent's pane as `target`. A `blocked` agent has to be answered instead and fails with `agent_blocked`. An agent whose turn does not need you yet, because it is working, ended its turn less than two minutes ago, or was dealt with already, is left as it is.
 
 ### Read, search and add tickets on demand
 

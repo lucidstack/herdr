@@ -122,41 +122,63 @@ impl App {
         }
     }
 
+    /// What the agent in the pane `pane_id` of workspace `ws_idx`, attached to `terminal_id`,
+    /// means for you; `None` when no agent runs there.
+    fn agent_signal(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+    ) -> Option<AgentSignal<'_>> {
+        let terminal = self.state.terminals.get(terminal_id)?;
+        let agent = terminal.effective_agent_label()?;
+        let public_pane_id = self.public_pane_id(ws_idx, pane_id)?;
+        Some(AgentSignal {
+            pane_id: public_pane_id,
+            agent,
+            state: terminal.state,
+            blocked_message: terminal
+                .hook_authority
+                .as_ref()
+                .filter(|authority| authority.state == crate::detect::AgentState::Blocked)
+                .and_then(|authority| authority.message.as_deref()),
+            turn_finished_at: terminal.turn_finished_at,
+            dismissed_turn: terminal.dismissed_turn_at,
+            last_input_at: self
+                .terminal_runtimes
+                .get(terminal_id)
+                .and_then(|runtime| runtime.last_user_input_at()),
+        })
+    }
+
     /// Every pane of workspace `ws_idx` running a detected agent.
     fn agent_signals(&self, ws_idx: usize) -> Vec<AgentSignal<'_>> {
         let Some(ws) = self.state.workspaces.get(ws_idx) else {
             return Vec::new();
         };
-        let mut signals = Vec::new();
-        for tab in &ws.tabs {
-            for (pane_id, pane) in &tab.panes {
-                let Some(terminal) = self.state.terminals.get(&pane.attached_terminal_id) else {
-                    continue;
-                };
-                let Some(agent) = terminal.effective_agent_label() else {
-                    continue;
-                };
-                let Some(public_pane_id) = self.public_pane_id(ws_idx, *pane_id) else {
-                    continue;
-                };
-                signals.push(AgentSignal {
-                    pane_id: public_pane_id,
-                    agent,
-                    state: terminal.state,
-                    blocked_message: terminal
-                        .hook_authority
-                        .as_ref()
-                        .filter(|authority| authority.state == crate::detect::AgentState::Blocked)
-                        .and_then(|authority| authority.message.as_deref()),
-                    turn_finished_at: terminal.turn_finished_at,
-                    last_input_at: self
-                        .terminal_runtimes
-                        .get(&pane.attached_terminal_id)
-                        .and_then(|runtime| runtime.last_user_input_at()),
-                });
-            }
-        }
-        signals
+        ws.tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|(pane_id, pane)| {
+                self.agent_signal(ws_idx, *pane_id, &pane.attached_terminal_id)
+            })
+            .collect()
+    }
+
+    /// Whether the agent in the pane `pane_id` of workspace `ws_idx`, attached to
+    /// `terminal_id`, has a finished turn that needs you at `now`: the turn `agent.dismiss`
+    /// deals with. Not while the agent works or waits on you, within the quiet period after
+    /// its turn, nor once the turn was dealt with.
+    pub(super) fn agent_turn_needs_you(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        terminal_id: &crate::terminal::TerminalId,
+        now: Instant,
+    ) -> bool {
+        self.agent_signal(ws_idx, pane_id, terminal_id)
+            .and_then(|signal| attention::agent_verdict(&signal, now).need)
+            .is_some_and(|need| need.kind == crate::api::schema::AttentionKind::Finished)
     }
 
     /// Agents in panes outside every item's workspace, with what they need from you.
@@ -208,8 +230,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::api::schema::{
-        AttentionKind, EmptyParams, EventData, Method, PaneAgentState, PaneReportAgentParams,
-        Request, ResponseResult, SuccessResponse, WorkItemLinkParams,
+        AgentTarget, AttentionKind, EmptyParams, ErrorResponse, EventData, Method, PaneAgentState,
+        PaneReportAgentParams, Request, ResponseResult, SuccessResponse, WorkItemLinkParams,
     };
     use crate::app::{App, AppPolicy};
     use crate::work_items::test_support::{source_item, FakeSource};
@@ -375,5 +397,136 @@ mod tests {
                 (None, pane_public, None),
             ]
         );
+    }
+
+    /// Reports that the agent of workspace `ws_idx` finished a turn `minutes` minutes ago, so
+    /// the turn already needs you.
+    fn finish_turn_minutes_ago(app: &mut App, ws_idx: usize, minutes: u64) {
+        report(app, ws_idx, PaneAgentState::Working, None);
+        report(app, ws_idx, PaneAgentState::Idle, None);
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .turn_finished_at = Instant::now().checked_sub(Duration::from_secs(minutes * 60));
+        app.attention_schedule.mark_dirty();
+        app.sync_work_item_events();
+    }
+
+    fn dismiss(app: &mut App, ws_idx: usize) -> String {
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        let target = app.public_pane_id(ws_idx, pane_id).expect("pane");
+        app.handle_api_request(request(Method::AgentDismiss(AgentTarget { target })))
+    }
+
+    fn is_ok(response: &str) -> bool {
+        serde_json::from_str::<SuccessResponse>(response)
+            .is_ok_and(|success| success.result == ResponseResult::Ok {})
+    }
+
+    fn error_code(response: &str) -> Option<String> {
+        serde_json::from_str::<ErrorResponse>(response)
+            .ok()
+            .map(|error| error.error.code)
+    }
+
+    #[test]
+    fn dismissing_a_finished_turn_clears_the_attention_of_an_agent_in_an_items_workspace() {
+        let (mut app, hub) = app_with_item();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        app.handle_api_request(request(Method::WorkItemLink(WorkItemLinkParams {
+            item_id: "fake:a".into(),
+            workspace_id,
+        })));
+        finish_turn_minutes_ago(&mut app, 0, 5);
+        let kind = |app: &mut App| {
+            list(app).0[0]
+                .attention
+                .as_ref()
+                .map(|attention| attention.kind)
+        };
+        assert_eq!(kind(&mut app), Some(AttentionKind::Finished));
+
+        assert!(is_ok(&dismiss(&mut app, 0)));
+        assert_eq!(kind(&mut app), None);
+        assert_eq!(
+            attention_events(&hub).last(),
+            Some(&(Some("fake:a".to_string()), None, None))
+        );
+    }
+
+    #[test]
+    fn dismissing_a_finished_turn_clears_the_attention_of_an_agent_outside_every_item() {
+        let (mut app, hub) = app_with_item();
+        finish_turn_minutes_ago(&mut app, 1, 5);
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let pane = app.public_pane_id(1, pane_id);
+        let kind = |app: &mut App| {
+            list(app).1[0]
+                .attention
+                .as_ref()
+                .map(|attention| attention.kind)
+        };
+        assert_eq!(kind(&mut app), Some(AttentionKind::Finished));
+
+        assert!(is_ok(&dismiss(&mut app, 1)));
+        assert_eq!(kind(&mut app), None);
+        assert_eq!(attention_events(&hub).last(), Some(&(None, pane, None)));
+    }
+
+    #[test]
+    fn a_blocked_agent_cannot_be_dismissed_because_it_must_be_answered() {
+        let (mut app, _hub) = app_with_item();
+        report(&mut app, 1, PaneAgentState::Blocked, Some("Allow?"));
+
+        assert_eq!(
+            error_code(&dismiss(&mut app, 1)).as_deref(),
+            Some("agent_blocked")
+        );
+        let attention = list(&mut app).1[0]
+            .attention
+            .clone()
+            .expect("still blocked");
+        assert_eq!(attention.kind, AttentionKind::Blocked);
+    }
+
+    #[test]
+    fn dismissing_a_working_agent_changes_nothing() {
+        let (mut app, _hub) = app_with_item();
+        // Working: there is no finished turn yet, and the one it is on is not dismissed ahead.
+        report(&mut app, 1, PaneAgentState::Working, None);
+        assert!(is_ok(&dismiss(&mut app, 1)));
+        finish_turn_minutes_ago(&mut app, 1, 5);
+        let attention = list(&mut app).1[0].attention.clone().expect("finished");
+        assert_eq!(attention.kind, AttentionKind::Finished);
+    }
+
+    #[test]
+    fn dismissing_a_turn_that_does_not_need_you_yet_changes_nothing() {
+        let (mut app, _hub) = app_with_item();
+        // The turn just ended: it needs you only once the pane was left alone for the quiet
+        // period, so there is nothing to deal with yet.
+        finish_turn_minutes_ago(&mut app, 1, 0);
+        assert_eq!(list(&mut app).1[0].attention, None);
+        assert!(is_ok(&dismiss(&mut app, 1)));
+
+        // Nothing was dismissed, so the turn needs you once that period is over.
+        let quiet_period = crate::work_items::attention::FINISHED_QUIET_PERIOD;
+        app.update_attention(Instant::now() + quiet_period + Duration::from_secs(1));
+        let attention = list(&mut app).1[0].attention.clone().expect("finished");
+        assert_eq!(attention.kind, AttentionKind::Finished);
+    }
+
+    #[test]
+    fn dismissing_an_unknown_pane_is_not_found() {
+        let (mut app, _hub) = app_with_item();
+        let unknown = app.handle_api_request(request(Method::AgentDismiss(AgentTarget {
+            target: "w9:p9".into(),
+        })));
+        assert_eq!(error_code(&unknown).as_deref(), Some("agent_not_found"));
     }
 }

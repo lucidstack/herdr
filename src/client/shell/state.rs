@@ -121,6 +121,7 @@ pub(super) struct ShellHitMap {
     pub(super) work_items: Vec<super::work_items::WorkItemHit>,
     pub(super) inbox: super::work_items::InboxHits,
     pub(super) overlay_choice_rows: Vec<(Rect, usize)>,
+    pub(super) overlay_option_rows: Vec<(Rect, usize)>,
     pub(super) overlay_area: Rect,
     pub(super) context_menu_rows: Vec<(Rect, usize)>,
     pub(super) overlay_primary: Rect,

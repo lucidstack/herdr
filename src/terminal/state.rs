@@ -181,6 +181,9 @@ pub struct TerminalState {
     /// When the agent last went idle after working or waiting on you; cleared while it is
     /// not idle.
     pub turn_finished_at: Option<Instant>,
+    /// The `turn_finished_at` of a finished turn the user dismissed: it counts as dealt with,
+    /// as if they had typed to the pane after it. A later turn has its own `turn_finished_at`.
+    pub dismissed_turn_at: Option<Instant>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -224,6 +227,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
             turn_finished_at: None,
+            dismissed_turn_at: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2454,6 +2458,7 @@ impl TerminalState {
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
         self.turn_finished_at = None;
+        self.dismissed_turn_at = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2464,6 +2469,14 @@ impl TerminalState {
 
     pub fn is_agent_terminal(&self) -> bool {
         self.agent_name.is_some() || self.effective_agent_label().is_some()
+    }
+
+    /// Counts the agent's finished turn as dealt with, as if the user had typed to the pane
+    /// after it. Nothing is recorded while no turn has finished.
+    pub fn dismiss_finished_turn(&mut self) {
+        if let Some(finished_at) = self.turn_finished_at {
+            self.dismissed_turn_at = Some(finished_at);
+        }
     }
 
     fn reconcile_agent_name_owner(

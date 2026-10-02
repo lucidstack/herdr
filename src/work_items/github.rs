@@ -6,11 +6,10 @@ use std::path::Path;
 use std::process::Output;
 use std::time::Duration;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
+use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo};
 use crate::config::{
     BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
     ReviewRequestedConfig,
@@ -34,7 +33,6 @@ const MAX_POLL_SECONDS: u64 = 3600;
 /// GitHub's search page size and per-query result limits.
 const SEARCH_PAGE_SIZE: usize = 100;
 const MAX_SEARCH_RESULTS: usize = 1000;
-const GITHUB_CHOICE_ID: &str = "github";
 const PUSH_REPLY_CHOICE_ID: &str = "push_reply";
 const PUSH_FIX_CHOICE_ID: &str = "push_fix";
 const MAX_WORKSPACE_LABEL_CHARS: usize = 40;
@@ -141,12 +139,7 @@ impl Event {
 
     fn modes(self) -> &'static [ReviewMode] {
         match self {
-            Self::ReviewRequested => &[
-                ReviewMode::Local,
-                ReviewMode::LocalAgentReview,
-                ReviewMode::AgentReport,
-                ReviewMode::AgentPost,
-            ],
+            Self::ReviewRequested => &[ReviewMode::Review],
             Self::ChangesRequested => &[ReviewMode::Address, ReviewMode::AddressAgent],
             Self::CiFailing => &[ReviewMode::FixChecks, ReviewMode::FixChecksAgent],
             Self::Assigned => &[ReviewMode::StartIssue, ReviewMode::StartIssueAgent],
@@ -159,20 +152,13 @@ impl Event {
 
 pub(crate) struct GithubSource {
     config: GithubWorkItemsConfig,
-    /// Review-request blocks with compiled patterns, in configuration order.
-    review_requested: Vec<Workflow>,
+    /// Review-request blocks, in configuration order.
+    review_requested: Vec<ReviewRequestedConfig>,
     /// Defaults used when no block matches a repository.
-    fallback: Workflow,
+    fallback: ReviewRequestedConfig,
     branch_fallback: BranchWorkflowConfig,
-    build_error: Option<String>,
     /// Your GitHub login, to tell whether an issue is assigned to you.
     viewer: std::sync::Mutex<Option<String>>,
-}
-
-/// One `[[work_items.github.review_requested]]` block, ready for matching.
-struct Workflow {
-    config: ReviewRequestedConfig,
-    docs: Vec<Regex>,
 }
 
 /// The workflow settings that apply to one item.
@@ -490,42 +476,22 @@ fn find_clone(root: &Path, repo: &str) -> Result<Option<(std::path::PathBuf, Str
         .find_map(|path| remote_serving(&path, repo).map(|remote| (path, remote))))
 }
 
-fn compile_patterns(patterns: &[String], key: &str) -> Result<Vec<Regex>, String> {
-    patterns
-        .iter()
-        .map(|pattern| {
-            Regex::new(pattern).map_err(|err| format!("invalid {key} pattern {pattern:?}: {err}"))
-        })
-        .collect()
-}
-
 impl GithubSource {
     pub(crate) fn new(config: GithubWorkItemsConfig) -> Self {
-        let mut build_error = None;
-        let mut compile = |block: &ReviewRequestedConfig| Workflow {
-            config: block.clone(),
-            docs: compile_patterns(&block.docs_patterns, "docs_patterns").unwrap_or_else(|err| {
-                build_error.get_or_insert(err);
-                Vec::new()
-            }),
-        };
-        let review_requested = config.review_requested.iter().map(&mut compile).collect();
-        let fallback = compile(&ReviewRequestedConfig::default());
         Self {
-            config,
-            review_requested,
-            fallback,
+            review_requested: config.review_requested.clone(),
+            fallback: ReviewRequestedConfig::default(),
             branch_fallback: BranchWorkflowConfig::default(),
-            build_error,
+            config,
             viewer: std::sync::Mutex::new(None),
         }
     }
 
     /// The review-request workflow for `repo`: the first matching block, else the defaults.
-    fn workflow(&self, repo: &str) -> &Workflow {
+    fn workflow(&self, repo: &str) -> &ReviewRequestedConfig {
         self.review_requested
             .iter()
-            .find(|workflow| workflow.config.applies_to(repo))
+            .find(|block| block.applies_to(repo))
             .unwrap_or(&self.fallback)
     }
 
@@ -546,7 +512,7 @@ impl GithubSource {
 
     fn settings(&self, event: Event, repo: &str) -> Settings<'_> {
         if event == Event::ReviewRequested {
-            let config = &self.workflow(repo).config;
+            let config = self.workflow(repo);
             return Settings {
                 agent: &config.agent,
                 agent_args: &config.agent_args,
@@ -592,15 +558,17 @@ impl GithubSource {
         command
     }
 
-    /// Why `mode` cannot be offered for `repo`, if it cannot.
+    /// Why `mode` cannot be offered for `repo`, if it cannot. `switches` are the ones the
+    /// review choice runs with.
     fn mode_unavailable(
         &self,
         mode: ReviewMode,
+        switches: ReviewSwitches,
         event: Event,
         repo: &str,
         mapped: bool,
     ) -> Option<String> {
-        if mode.checks_out() && !mapped {
+        if mode.checks_out(switches) && !mapped {
             return Some(if self.config.clone_root.trim().is_empty() {
                 format!("No local checkout configured for {repo}")
             } else {
@@ -682,9 +650,14 @@ impl GithubSource {
 
     /// Offered while `repo` has no clone but could get one in the clone root.
     fn link_choice(&self, event: Event, repo: &str, mapped: bool) -> Option<WorkItemChoiceInfo> {
+        // A review checks the pull request out once its worktree is switched on.
+        let worktree = ReviewSwitches {
+            worktree: true,
+            post: false,
+        };
         if mapped
             || self.clone_root().is_none()
-            || !event.modes().iter().any(|mode| mode.checks_out())
+            || !event.modes().iter().any(|mode| mode.checks_out(worktree))
         {
             return None;
         }
@@ -698,6 +671,7 @@ impl GithubSource {
             action: WorkItemChoiceAction::Perform,
             disabled_reason: None,
             confirm: None,
+            options: Vec::new(),
         })
     }
 
@@ -1134,36 +1108,17 @@ fn item_detail<T: serde::de::DeserializeOwned>(item: &WorkItem) -> Option<T> {
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
-/// Heuristic default: small or documentation-only changes are quicker to review on GitHub;
-/// your own work is done locally whenever there is a checkout; mentions open on GitHub.
-fn default_choice(
-    event: Event,
-    detail: Option<&GithubDetail>,
-    mapped: bool,
-    small_diff_lines: u64,
-    docs: &[Regex],
-) -> &'static str {
+/// The choice the dialog highlights: a review is done by the agent, and your own work is done
+/// locally whenever there is a checkout. Mentions have none, and the default of a pull request
+/// that is ready to merge is decided by `merge_choices`.
+fn default_choice(event: Event, mapped: bool) -> Option<&'static str> {
     match event {
-        // Ready-to-merge defaults are decided by `merge_choices`.
-        Event::Mentioned | Event::ReadyToMerge => return GITHUB_CHOICE_ID,
-        _ if !mapped => return GITHUB_CHOICE_ID,
-        Event::ChangesRequested => return ReviewMode::Address.choice_id(),
-        Event::CiFailing => return ReviewMode::FixChecks.choice_id(),
-        Event::Assigned => return ReviewMode::StartIssue.choice_id(),
-        Event::ReviewRequested => {}
-    }
-    let Some(detail) = detail else {
-        return ReviewMode::Local.choice_id();
-    };
-    let docs_only = !detail.files.is_empty()
-        && detail
-            .files
-            .iter()
-            .all(|file| docs.iter().any(|pattern| pattern.is_match(&file.path)));
-    if docs_only || detail.additions + detail.deletions <= small_diff_lines {
-        GITHUB_CHOICE_ID
-    } else {
-        ReviewMode::Local.choice_id()
+        Event::ReviewRequested => Some(ReviewMode::Review.choice_id()),
+        Event::Mentioned | Event::ReadyToMerge => None,
+        _ if !mapped => None,
+        Event::ChangesRequested => Some(ReviewMode::Address.choice_id()),
+        Event::CiFailing => Some(ReviewMode::FixChecks.choice_id()),
+        Event::Assigned => Some(ReviewMode::StartIssue.choice_id()),
     }
 }
 
@@ -1179,14 +1134,9 @@ pub(super) fn truncate_chars(text: &str, max: usize) -> String {
 /// How an item is worked on once the user picks a provisioning choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReviewMode {
-    /// Worktree checkout; the agent is briefed and waits.
-    Local,
-    /// Worktree checkout; the agent reviews straight away and reports back.
-    LocalAgentReview,
-    /// No checkout; the agent reviews through gh and reports back.
-    AgentReport,
-    /// No checkout; the agent reviews through gh and posts a review comment.
-    AgentPost,
+    /// The agent reviews the pull request and reports back. The choice's switches decide how:
+    /// see `ReviewSwitches`.
+    Review,
     /// Worktree on the pull request branch; the agent summarises the feedback and waits.
     Address,
     /// Worktree on the pull request branch; the agent addresses the feedback.
@@ -1203,12 +1153,36 @@ enum ReviewMode {
     ThreadAgent,
 }
 
+/// Id of the review choice's switch that checks the pull request out in a worktree.
+const WORKTREE_OPTION_ID: &str = "worktree";
+/// Id of the review choice's switch that has the agent post its review on GitHub.
+const POST_OPTION_ID: &str = "post";
+
+/// The switches of the review choice, which make it one of four ways to review a pull
+/// request. Both are off for every other choice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReviewSwitches {
+    /// The agent works in a worktree of the pull request head, with the user's tools, rather
+    /// than from a downloaded diff.
+    worktree: bool,
+    /// The agent posts its review on GitHub as a comment, after showing it to the user.
+    post: bool,
+}
+
+impl ReviewSwitches {
+    /// The switches `options`, the ids switched on, name.
+    fn from_options(options: &[String]) -> Self {
+        let on = |id: &str| options.iter().any(|option| option == id);
+        Self {
+            worktree: on(WORKTREE_OPTION_ID),
+            post: on(POST_OPTION_ID),
+        }
+    }
+}
+
 impl ReviewMode {
-    const ALL: [Self; 11] = [
-        Self::Local,
-        Self::LocalAgentReview,
-        Self::AgentReport,
-        Self::AgentPost,
+    const ALL: [Self; 8] = [
+        Self::Review,
         Self::Address,
         Self::AddressAgent,
         Self::FixChecks,
@@ -1220,10 +1194,7 @@ impl ReviewMode {
 
     fn choice_id(self) -> &'static str {
         match self {
-            Self::Local => "local",
-            Self::LocalAgentReview => "local_agent",
-            Self::AgentReport => "agent_report",
-            Self::AgentPost => "agent_post",
+            Self::Review => "review",
             Self::Address => "address",
             Self::AddressAgent => "address_agent",
             Self::FixChecks => "fix_checks",
@@ -1242,10 +1213,7 @@ impl ReviewMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Local => "Review locally",
-            Self::LocalAgentReview => "Review locally, ask agent to review first",
-            Self::AgentReport => "Ask agent to review and report back",
-            Self::AgentPost => "Ask agent to review and comment on GitHub",
+            Self::Review => "Review",
             Self::Address | Self::FixChecks | Self::StartIssue => "Work on it locally",
             Self::AddressAgent => "Ask agent to address the feedback",
             Self::FixChecksAgent => "Ask agent to fix the checks",
@@ -1256,10 +1224,7 @@ impl ReviewMode {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Local => "Worktree and tools; the agent gets the context and waits",
-            Self::LocalAgentReview => "Worktree and tools; the agent starts reviewing",
-            Self::AgentReport => "No checkout; the agent reviews with gh and reports here",
-            Self::AgentPost => "No checkout; the agent reviews and comments on the PR",
+            Self::Review => "The agent reviews the pull request and reports back to you",
             Self::Address => "Worktree on the PR branch; the agent sums up the feedback and waits",
             Self::AddressAgent => {
                 "Worktree on the PR branch; the agent makes the changes, no commit or push"
@@ -1278,18 +1243,52 @@ impl ReviewMode {
         }
     }
 
-    fn checks_out(self) -> bool {
-        !matches!(
-            self,
-            Self::AgentReport | Self::AgentPost | Self::ThreadAgent
-        )
+    /// The switches the user sets before running the choice. A worktree is only on offer for
+    /// a repository that has a local clone (`mapped`), and then on unless switched off, as
+    /// the choice that review defaulted to before the switches always had one. Posting on
+    /// GitHub is visible to others, so it is off unless switched on.
+    fn options(self, mapped: bool) -> Vec<WorkItemChoiceOptionInfo> {
+        if self != Self::Review {
+            return Vec::new();
+        }
+        let mut options = Vec::new();
+        if mapped {
+            options.push(WorkItemChoiceOptionInfo {
+                option_id: WORKTREE_OPTION_ID.into(),
+                label: "Create worktree".into(),
+                description: Some(
+                    "Check the pull request out in a worktree, with your tools open. Off: the \
+                     agent reads a downloaded diff."
+                        .into(),
+                ),
+                default: true,
+            });
+        }
+        options.push(WorkItemChoiceOptionInfo {
+            option_id: POST_OPTION_ID.into(),
+            label: "Post to GitHub".into(),
+            description: Some(
+                "The agent shows you its review, then comments it on the pull request. It never \
+                 approves or requests changes."
+                    .into(),
+            ),
+            default: false,
+        });
+        options
+    }
+
+    /// Whether the agent works in a checkout of the repository. Only the review choice's
+    /// worktree switch makes that a choice.
+    fn checks_out(self, switches: ReviewSwitches) -> bool {
+        match self {
+            Self::Review => switches.worktree,
+            Self::ThreadAgent => false,
+            _ => true,
+        }
     }
 
     fn needs_agent(self) -> bool {
-        !matches!(
-            self,
-            Self::Local | Self::Address | Self::FixChecks | Self::StartIssue
-        )
+        !matches!(self, Self::Address | Self::FixChecks | Self::StartIssue)
     }
 }
 
@@ -1755,7 +1754,13 @@ fn issue_branch(number: u64, title: &str) -> String {
     }
 }
 
-fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -> String {
+fn brief(
+    repo: &str,
+    item: &WorkItem,
+    detail: &GithubDetail,
+    mode: ReviewMode,
+    switches: ReviewSwitches,
+) -> String {
     let author = item.author.as_deref().unwrap_or("unknown");
     let head: String = detail.head_ref_oid.chars().take(8).collect();
     let body = if detail.body.trim().is_empty() {
@@ -1775,27 +1780,34 @@ fn brief(repo: &str, item: &WorkItem, detail: &GithubDetail, mode: ReviewMode) -
     let review = "Review the change for correctness, security, missing tests and design problems. \
                   Order your findings by severity and cite file:line for each.";
     let instructions = match mode {
-        ReviewMode::Local => format!(
-            "This directory is a worktree checked out at the pull request head.\n\
-             Inspect the change with git (for example `git diff origin/{base}...HEAD`), summarise it and wait for my instructions before changing anything."
-        ),
-        ReviewMode::LocalAgentReview => format!(
-            "This directory is a worktree checked out at the pull request head.\n\
-             Start reviewing now: read the diff (`git diff origin/{base}...HEAD`) and the surrounding code. {review}\n\
-             Report the findings to me here. Do not modify files, commit, or post anything to GitHub."
-        ),
-        ReviewMode::AgentReport => format!(
-            "{gh_context}\n\
-             Start reviewing now. {review}\n\
-             Report the findings to me here. Do not post anything to GitHub."
-        ),
-        ReviewMode::AgentPost => format!(
-            "{gh_context}\n\
-             Start reviewing now. {review}\n\
-             When you are done, show me the findings and post them as one review comment with \
-             `gh pr review {number} --repo {repo} --comment --body-file <file>`. \
-             Only comment: never approve or request changes."
-        ),
+        ReviewMode::Review => match (switches.worktree, switches.post) {
+            (true, false) => format!(
+                "This directory is a worktree checked out at the pull request head.\n\
+                 Start reviewing now: read the diff (`git diff origin/{base}...HEAD`) and the surrounding code. {review}\n\
+                 Report the findings to me here. Do not modify files, commit, or post anything to GitHub."
+            ),
+            (true, true) => format!(
+                "This directory is a worktree checked out at the pull request head.\n\
+                 Start reviewing now: read the diff (`git diff origin/{base}...HEAD`) and the surrounding code. {review}\n\
+                 When you are done, show me the findings and post them as one review comment with \
+                 `gh pr review {number} --repo {repo} --comment --body-file <file>`. Write that \
+                 file outside this worktree, for example under the system temp directory \
+                 (`mktemp`), so the worktree stays clean and can be removed. \
+                 Only comment: never approve or request changes. Do not modify files or commit."
+            ),
+            (false, false) => format!(
+                "{gh_context}\n\
+                 Start reviewing now. {review}\n\
+                 Report the findings to me here. Do not post anything to GitHub."
+            ),
+            (false, true) => format!(
+                "{gh_context}\n\
+                 Start reviewing now. {review}\n\
+                 When you are done, show me the findings and post them as one review comment with \
+                 `gh pr review {number} --repo {repo} --comment --body-file <file>`. \
+                 Only comment: never approve or request changes."
+            ),
+        },
         ReviewMode::Address | ReviewMode::AddressAgent => {
             return changes_brief(repo, item, detail, mode)
         }
@@ -2034,9 +2046,6 @@ impl WorkItemSource for GithubSource {
     }
 
     fn poll(&self) -> Result<Vec<SourceItem>, String> {
-        if let Some(error) = &self.build_error {
-            return Err(error.clone());
-        }
         let mut items = Vec::new();
         for event in Event::ALL {
             let query = self.query(event);
@@ -2187,8 +2196,16 @@ impl WorkItemSource for GithubSource {
                 label: mode.label().into(),
                 description: Some(mode.description().into()),
                 action: WorkItemChoiceAction::ProvisionWorkspace,
-                disabled_reason: self.mode_unavailable(mode, event, repo, mapped),
+                // Whether a worktree is needed depends on the switches, checked when it runs.
+                disabled_reason: self.mode_unavailable(
+                    mode,
+                    ReviewSwitches::default(),
+                    event,
+                    repo,
+                    mapped,
+                ),
                 confirm: None,
+                options: mode.options(mapped),
             })
             .collect();
         if let Some(link) = self.link_choice(event, repo, mapped) {
@@ -2225,47 +2242,25 @@ impl WorkItemSource for GithubSource {
                     .is_none()
                     .then(|| "Work on it locally first".into()),
                 confirm: None,
+                options: Vec::new(),
             });
         }
         if event == Event::ReadyToMerge {
-            return merge_choices(item, item_detail::<GithubDetail>(item).as_ref(), choices);
+            return merge_choices(item_detail::<GithubDetail>(item).as_ref(), choices);
         }
-        let (label, url) = match event {
-            Event::ReviewRequested => ("Review on GitHub", item.url.clone()),
-            Event::CiFailing => ("Open the checks on GitHub", format!("{}/checks", item.url)),
-            _ => ("Open on GitHub", item.url.clone()),
-        };
-        choices.push(WorkItemChoiceInfo {
-            choice_id: GITHUB_CHOICE_ID.into(),
-            label: label.into(),
-            description: Some("Open it in the browser".into()),
-            action: WorkItemChoiceAction::OpenUrl { url },
-            disabled_reason: None,
-            confirm: None,
-        });
-        let workflow = self.workflow(repo);
-        let pull_detail = event
-            .is_pull_request_event()
-            .then(|| item_detail::<GithubDetail>(item))
-            .flatten();
-        let default = default_choice(
-            event,
-            pull_detail.as_ref(),
-            mapped,
-            workflow.config.small_diff_lines,
-            &workflow.docs,
-        );
-        // A start mode the pull request took away leaves opening the issue as the default.
-        let default = if ReviewMode::from_choice_id(default)
-            .is_some_and(|mode| superseded_by_pull_request(item, mode))
-        {
-            GITHUB_CHOICE_ID
-        } else {
-            default
-        };
+        // The default is a choice that is offered and can run. A review without an agent
+        // configured, a start mode the pull request took away, or an item with nothing worth
+        // defaulting to has none.
+        let default_choice_id = default_choice(event, mapped)
+            .filter(|default| {
+                choices
+                    .iter()
+                    .any(|choice| choice.choice_id == *default && choice.disabled_reason.is_none())
+            })
+            .map(str::to_string);
         ItemChoices {
             choices,
-            default_choice_id: Some(default.into()),
+            default_choice_id,
         }
     }
 
@@ -2273,16 +2268,20 @@ impl WorkItemSource for GithubSource {
         &self,
         item: &WorkItem,
         choice_id: &str,
+        options: &[String],
         worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String> {
         let event = Event::of(&item.external_id);
         let mode = ReviewMode::from_choice_id(choice_id)
             .filter(|mode| event.modes().contains(mode))
             .ok_or_else(|| format!("choice {choice_id} does not provision a workspace"))?;
+        let switches = ReviewSwitches::from_options(options);
         let (repo_name, number) = parse_external_id(&item.external_id)
             .ok_or_else(|| format!("unrecognised GitHub id {}", item.external_id))?;
         let mapped = self.repo(repo_name);
-        if let Some(reason) = self.mode_unavailable(mode, event, repo_name, mapped.is_some()) {
+        if let Some(reason) =
+            self.mode_unavailable(mode, switches, event, repo_name, mapped.is_some())
+        {
             return Err(reason);
         }
         let not_ready = || "details are not available yet; try again shortly".to_string();
@@ -2305,7 +2304,7 @@ impl WorkItemSource for GithubSource {
             tabs: settings.tabs.to_vec(),
             diff_command: settings.diff_command.to_string(),
         };
-        let checkout = mapped.filter(|_| mode.checks_out());
+        let checkout = mapped.filter(|_| mode.checks_out(switches));
         let (source, brief) = if event.is_pull_request_event() {
             let detail = item_detail::<GithubDetail>(item).ok_or_else(not_ready)?;
             let source = match (checkout, event) {
@@ -2347,7 +2346,7 @@ impl WorkItemSource for GithubSource {
                     file_name: diff_file_name(number),
                 }),
             };
-            (source, brief(repo_name, item, &detail, mode))
+            (source, brief(repo_name, item, &detail, mode, switches))
         } else {
             let detail = item_detail::<GithubIssueDetail>(item).ok_or_else(not_ready)?;
             match checkout {
@@ -2421,6 +2420,7 @@ impl WorkItemSource for GithubSource {
                 action: WorkItemChoiceAction::Perform,
                 disabled_reason: None,
                 confirm: None,
+                options: Vec::new(),
             },
         })
     }
@@ -2630,9 +2630,6 @@ impl WorkItemSource for GithubSource {
     }
 
     fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String> {
-        if let Some(error) = &self.build_error {
-            return Err(error.clone());
-        }
         let limit = self
             .config
             .max_results
@@ -2659,9 +2656,6 @@ impl WorkItemSource for GithubSource {
     }
 
     fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String> {
-        if let Some(error) = &self.build_error {
-            return Err(error.clone());
-        }
         let Some((repo, number)) = parse_external_id(key) else {
             return Err(format!(
                 "unrecognised GitHub ticket key {key}; use owner/repo#number"
@@ -2740,9 +2734,6 @@ impl WorkItemSource for GithubSource {
         context: &str,
         worktree_directory: &Path,
     ) -> Result<ProvisionPlan, String> {
-        if let Some(error) = &self.build_error {
-            return Err(error.clone());
-        }
         // The agent you work issues with; the first mapped repo picks the block.
         let first_repo = self
             .config
@@ -2847,18 +2838,13 @@ fn merge_summary(detail: &GithubDetail, pr_author: Option<&str>) -> String {
 }
 
 /// Merge choices: your default method first, then `work` on the review (the agent's
-/// follow-ups before working on it by hand), then the other merge methods, then opening
-/// it on GitHub.
-fn merge_choices(
-    item: &WorkItem,
-    detail: Option<&GithubDetail>,
-    mut work: Vec<WorkItemChoiceInfo>,
-) -> ItemChoices {
+/// follow-ups before working on it by hand), then the other merge methods. With every method
+/// blocked there is no default.
+fn merge_choices(detail: Option<&GithubDetail>, mut work: Vec<WorkItemChoiceInfo>) -> ItemChoices {
     let Some(detail) = detail else {
-        work.push(open_on_github(item, "Open on GitHub"));
         return ItemChoices {
             choices: work,
-            default_choice_id: Some(GITHUB_CHOICE_ID.into()),
+            default_choice_id: None,
         };
     };
     let blocker = merge_blocker(detail);
@@ -2877,14 +2863,13 @@ fn merge_choices(
             confirm: Some(format!(
                 "Merge #{number} into {base}? This cannot be undone. Press ↵ again to merge."
             )),
+            options: Vec::new(),
         })
         .collect();
     let default = methods
         .iter()
         .find(|choice| choice.disabled_reason.is_none())
-        .map_or(GITHUB_CHOICE_ID.to_string(), |choice| {
-            choice.choice_id.clone()
-        });
+        .map(|choice| choice.choice_id.clone());
     let other_methods = methods.split_off(methods.len().min(1));
     // The modes list working on it by hand first; once it is approved, handing the
     // comments to the agent is the likelier next step.
@@ -2892,23 +2877,9 @@ fn merge_choices(
     let mut choices = methods;
     choices.append(&mut work);
     choices.extend(other_methods);
-    choices.push(open_on_github(item, "Open on GitHub"));
     ItemChoices {
         choices,
-        default_choice_id: Some(default),
-    }
-}
-
-fn open_on_github(item: &WorkItem, label: &str) -> WorkItemChoiceInfo {
-    WorkItemChoiceInfo {
-        choice_id: GITHUB_CHOICE_ID.into(),
-        label: label.into(),
-        description: Some("Open it in the browser".into()),
-        action: WorkItemChoiceAction::OpenUrl {
-            url: item.url.clone(),
-        },
-        disabled_reason: None,
-        confirm: None,
+        default_choice_id: default,
     }
 }
 
@@ -3613,6 +3584,8 @@ mod tests {
             is_pick_next: false,
             start_reminder_muted: false,
             phase_before_action: None,
+            brief_failure_outdated: false,
+            brief_failed_at: None,
         }
     }
 
@@ -3638,16 +3611,73 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_repository_defaults_to_github_and_disables_local_review() {
+    fn review_requests_offer_one_review_choice_with_a_worktree_and_a_post_switch() {
+        let source = mapped_source(repo_config());
+        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
+        let choices = source.choices(&item);
+        let ids: Vec<&str> = choices
+            .choices
+            .iter()
+            .map(|choice| choice.choice_id.as_str())
+            .collect();
+        assert_eq!(ids, ["review"]);
+
+        let review = &choices.choices[0];
+        assert_eq!(review.label, "Review");
+        assert_eq!(review.action, WorkItemChoiceAction::ProvisionWorkspace);
+        assert_eq!(review.disabled_reason, None);
+        // A worktree unless switched off, as the choice this replaces always made one; a
+        // comment on GitHub is visible to everyone, so only when asked for.
+        let switches: Vec<(&str, &str, bool)> = review
+            .options
+            .iter()
+            .map(|option| {
+                (
+                    option.option_id.as_str(),
+                    option.label.as_str(),
+                    option.default,
+                )
+            })
+            .collect();
+        assert_eq!(
+            switches,
+            [
+                ("worktree", "Create worktree", true),
+                ("post", "Post to GitHub", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unmapped_review_request_defaults_to_review_rather_than_linking() {
+        // Linking is listed first, but a review of the diff can start straight away.
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            clone_root: "~/projects".into(),
+            ..GithubWorkItemsConfig::default()
+        });
+        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)])));
+        assert_eq!(
+            source.choices(&item).default_choice_id.as_deref(),
+            Some("review")
+        );
+    }
+
+    #[test]
+    fn an_unmapped_repository_offers_no_worktree_switch() {
+        // Without a local clone there is nothing to check out, so only posting is a switch.
         let source = GithubSource::new(GithubWorkItemsConfig::default());
         let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
-        assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
-        let local = &choices.choices[0];
-        assert_eq!(local.choice_id, "local");
-        assert_eq!(
-            local.disabled_reason.as_deref(),
-            Some("No local checkout configured for o/r")
-        );
+        let review = choices
+            .choices
+            .iter()
+            .find(|choice| choice.choice_id == "review")
+            .expect("review offered");
+        let switches: Vec<&str> = review
+            .options
+            .iter()
+            .map(|option| option.option_id.as_str())
+            .collect();
+        assert_eq!(switches, ["post"]);
     }
 
     #[test]
@@ -3661,15 +3691,6 @@ mod tests {
         assert_eq!(link.choice_id, LINK_CLONE_CHOICE_ID);
         assert_eq!(link.action, WorkItemChoiceAction::Perform);
         assert_eq!(link.disabled_reason, None);
-        let local = choices
-            .choices
-            .iter()
-            .find(|choice| choice.choice_id == "local")
-            .expect("local review offered");
-        assert_eq!(
-            local.disabled_reason.as_deref(),
-            Some("Link or clone o/r first")
-        );
     }
 
     #[test]
@@ -3769,38 +3790,14 @@ mod tests {
     }
 
     #[test]
-    fn documentation_only_change_defaults_to_github() {
-        let source = mapped_source(repo_config());
-        let docs = detail(&[("README.md", 300, 10), ("docs/guide/setup.txt", 200, 0)]);
-        assert_eq!(default_for(&source, &docs).as_deref(), Some("github"));
-    }
-
-    #[test]
-    fn small_change_defaults_to_github() {
-        let source = mapped_source(repo_config());
-        assert_eq!(
-            default_for(&source, &detail(&[("src/a.rs", 15, 5)])).as_deref(),
-            Some("github")
-        );
-    }
-
-    #[test]
-    fn large_code_change_defaults_to_local_review() {
-        let source = mapped_source(repo_config());
-        assert_eq!(
-            default_for(&source, &detail(&[("src/a.rs", 15, 6)])).as_deref(),
-            Some("local")
-        );
-    }
-
-    #[test]
-    fn local_review_plans_a_review_branch_from_the_fetched_pull_request() {
+    fn reviewing_in_a_worktree_plans_a_review_branch_from_the_fetched_pull_request() {
         let source = mapped_source(repo_config());
         let change = detail(&[("src/a.rs", 40, 2), ("src/b.rs", 1, 1)]);
         let plan = source
             .provision_plan(
                 &work_item("o/r", Some(&change)),
-                "local",
+                "review",
+                &options(&["worktree"]),
                 Path::new("/worktrees"),
             )
             .expect("plan");
@@ -3854,7 +3851,12 @@ mod tests {
         });
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
         let plan = source
-            .provision_plan(&item, "local", Path::new("/worktrees"))
+            .provision_plan(
+                &item,
+                "review",
+                &options(&["worktree"]),
+                Path::new("/worktrees"),
+            )
             .expect("plan");
         assert!(!plan.delete_branch);
         assert_eq!(plan.layout.tabs[0].command, "hx .");
@@ -3864,55 +3866,83 @@ mod tests {
         assert!(!source.remove_on_resolved(&work_item("x/y", None)));
     }
 
+    fn options(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
     #[test]
-    fn agent_review_needs_no_checkout_and_downloads_the_diff_with_gh() {
+    fn reviewing_without_a_worktree_downloads_the_diff_with_gh() {
         let source = GithubSource::new(GithubWorkItemsConfig::default());
         let change = detail(&[("src/a.rs", 40, 2)]);
         let item = work_item("o/r", Some(&change));
         let choices = source.choices(&item);
-        let report = choices
-            .choices
-            .iter()
-            .find(|choice| choice.choice_id == "agent_report")
-            .expect("agent review offered");
-        assert_eq!(report.disabled_reason, None);
+        assert_eq!(choices.choices[0].choice_id, "review");
+        assert_eq!(
+            choices.choices[0].disabled_reason, None,
+            "the agent needs no clone to review a diff"
+        );
         let plan = source
-            .provision_plan(&item, "agent_report", Path::new("/worktrees"))
+            .provision_plan(&item, "review", &[], Path::new("/worktrees"))
             .expect("plan");
         let WorkspaceSource::Download(download) = &plan.source else {
-            panic!("agent review downloads the diff");
+            panic!("a review without a worktree downloads the diff");
         };
         assert_eq!(download.directory, Path::new("/worktrees/r/pr-5-agent"));
         assert_eq!(download.program, "gh");
         assert_eq!(download.args[..5], ["pr", "diff", "5", "--repo", "o/r"]);
         assert_eq!(download.file_name, "pr-5.diff");
         assert!(plan.brief.contains("./pr-5.diff"));
-        assert!(plan.brief.contains("Do not post anything to GitHub"));
     }
 
     #[test]
-    fn posting_agent_review_asks_for_a_comment_only_review() {
-        let source = GithubSource::new(GithubWorkItemsConfig::default());
-        let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
-        let plan = source
-            .provision_plan(&item, "agent_post", Path::new("/worktrees"))
-            .expect("plan");
-        assert!(plan
-            .brief
-            .contains("gh pr review 5 --repo o/r --comment --body-file"));
-        assert!(plan.brief.contains("never approve or request changes"));
-    }
-
-    #[test]
-    fn local_agent_review_briefs_the_agent_to_start_reviewing() {
+    fn the_review_switches_make_four_ways_to_review() {
         let source = mapped_source(repo_config());
         let item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
-        let plan = source
-            .provision_plan(&item, "local_agent", Path::new("/worktrees"))
-            .expect("plan");
-        assert!(matches!(plan.source, WorkspaceSource::Worktree(_)));
-        assert!(plan.brief.contains("Start reviewing now"));
-        assert!(!plan.brief.contains("wait for my instructions"));
+        let plan = |on: &[&str]| {
+            source
+                .provision_plan(&item, "review", &options(on), Path::new("/worktrees"))
+                .expect("plan")
+        };
+        let post = "gh pr review 5 --repo o/r --comment --body-file";
+        let worktree = "This directory is a worktree checked out at the pull request head";
+
+        // Neither: a downloaded diff, the findings reported back, nothing posted.
+        let report = plan(&[]);
+        assert!(matches!(report.source, WorkspaceSource::Download(_)));
+        assert!(report.brief.contains("./pr-5.diff"));
+        assert!(report.brief.contains("Start reviewing now"));
+        assert!(report.brief.contains("Do not post anything to GitHub"));
+        assert!(!report.brief.contains(post));
+
+        // Posting alone: the same diff, and one review that only comments.
+        let comment = plan(&["post"]);
+        assert!(matches!(comment.source, WorkspaceSource::Download(_)));
+        assert!(comment.brief.contains("./pr-5.diff"));
+        assert!(comment.brief.contains(post));
+        assert!(comment.brief.contains("never approve or request changes"));
+        assert!(!comment.brief.contains("Do not post anything to GitHub"));
+
+        // A worktree alone: the agent reviews in it, and nothing changes or is posted.
+        let local = plan(&["worktree"]);
+        assert!(matches!(local.source, WorkspaceSource::Worktree(_)));
+        assert!(local.brief.contains(worktree));
+        assert!(local.brief.contains("Start reviewing now"));
+        assert!(local
+            .brief
+            .contains("Do not modify files, commit, or post anything to GitHub"));
+        assert!(!local.brief.contains(post));
+
+        // Both: reviewed in the worktree, then posted as a comment.
+        let both = plan(&["worktree", "post"]);
+        assert!(matches!(both.source, WorkspaceSource::Worktree(_)));
+        assert!(both.brief.contains(worktree));
+        assert!(both.brief.contains("Start reviewing now"));
+        assert!(both.brief.contains(post));
+        assert!(both.brief.contains("never approve or request changes"));
+        assert!(both.brief.contains("Do not modify files or commit"));
+        assert!(both.brief.contains("outside this worktree"));
+        assert!(!both.brief.contains("./pr-5.diff"));
+        assert!(!both.brief.contains("Do not post anything to GitHub"));
     }
 
     #[test]
@@ -3933,27 +3963,30 @@ mod tests {
             .filter(|choice| choice.disabled_reason.is_some())
             .map(|choice| choice.choice_id.as_str())
             .collect();
-        assert_eq!(disabled, vec!["local_agent", "agent_report", "agent_post"]);
+        // The agent always reviews, so there is no review without one.
+        assert_eq!(disabled, vec!["review"]);
         assert!(source
-            .provision_plan(&item, "agent_report", Path::new("/worktrees"))
+            .provision_plan(&item, "review", &[], Path::new("/worktrees"))
             .is_err());
     }
 
     #[test]
-    fn invalid_pattern_is_surfaced_by_poll() {
-        let source = GithubSource::new(GithubWorkItemsConfig {
-            gh_path: "/nonexistent/gh".into(),
+    fn a_review_that_cannot_run_leaves_no_default() {
+        let without_agent = GithubSource::new(GithubWorkItemsConfig {
+            repos: vec![repo_config()],
             review_requested: vec![ReviewRequestedConfig {
-                docs_patterns: vec!["(".into()],
+                agent: String::new(),
                 ..ReviewRequestedConfig::default()
             }],
             ..GithubWorkItemsConfig::default()
         });
-        let error = source.poll().expect_err("poll fails");
-        assert!(
-            error.starts_with("invalid docs_patterns pattern"),
-            "{error}"
+        let large = detail(&[("src/a.rs", 40, 2)]);
+        // Reviewing is the default while it can run, and nothing is once it cannot.
+        assert_eq!(
+            default_for(&mapped_source(repo_config()), &large).as_deref(),
+            Some("review")
         );
+        assert_eq!(default_for(&without_agent, &large), None);
     }
 
     fn changes_item(detail: Option<&GithubDetail>) -> WorkItem {
@@ -4118,15 +4151,13 @@ mod tests {
             .iter()
             .map(|choice| choice.choice_id.as_str())
             .collect();
-        assert_eq!(
-            ids,
-            vec!["address", "address_agent", "push_reply", "github"]
-        );
+        assert_eq!(ids, vec!["address", "address_agent", "push_reply"]);
         assert_eq!(choices.default_choice_id.as_deref(), Some("address"));
         assert!(source
             .provision_plan(
                 &changes_item(Some(&feedback_detail())),
-                "local",
+                "review",
+                &[],
                 Path::new("/worktrees")
             )
             .is_err());
@@ -4139,6 +4170,7 @@ mod tests {
             .provision_plan(
                 &changes_item(Some(&feedback_detail())),
                 "address_agent",
+                &[],
                 Path::new("/worktrees"),
             )
             .expect("plan");
@@ -4231,7 +4263,7 @@ mod tests {
             ..feedback_detail()
         };
         let plan = source
-            .provision_plan(&changes_item(Some(&fork)), "address", Path::new("/w"))
+            .provision_plan(&changes_item(Some(&fork)), "address", &[], Path::new("/w"))
             .expect("plan");
         let WorkspaceSource::Worktree(spec) = plan.source else {
             panic!("worktree");
@@ -4332,15 +4364,8 @@ mod tests {
         let item = event_item(CI_PREFIX, serde_json::to_value(&detail).unwrap());
         let choices = source.choices(&item);
         assert_eq!(choices.default_choice_id.as_deref(), Some("fix_checks"));
-        let github = choices.choices.last().expect("github choice");
-        assert_eq!(
-            github.action,
-            WorkItemChoiceAction::OpenUrl {
-                url: "https://github.com/o/r/pull/5/checks".into()
-            }
-        );
         let plan = source
-            .provision_plan(&item, "fix_checks_agent", Path::new("/w"))
+            .provision_plan(&item, "fix_checks_agent", &[], Path::new("/w"))
             .expect("plan");
         let WorkspaceSource::Worktree(spec) = &plan.source else {
             panic!("worktree");
@@ -4367,7 +4392,7 @@ mod tests {
             Some("start_issue")
         );
         let plan = source
-            .provision_plan(&item, "start_issue", Path::new("/w"))
+            .provision_plan(&item, "start_issue", &[], Path::new("/w"))
             .expect("plan");
         assert_eq!(
             plan.source,
@@ -4390,7 +4415,7 @@ mod tests {
             serde_json::to_value(issue_detail("")).unwrap(),
         );
         assert!(source
-            .provision_plan(&unknown_base, "start_issue", Path::new("/w"))
+            .provision_plan(&unknown_base, "start_issue", &[], Path::new("/w"))
             .is_err());
     }
 
@@ -4424,12 +4449,12 @@ mod tests {
 
         // A new issue branch would be a second attempt at work that is under review.
         let (ids, default) = offered(&with_pull_request("approved"));
-        assert_eq!(ids, ["github"]);
-        assert_eq!(default.as_deref(), Some("github"));
+        assert!(ids.is_empty(), "{ids:?}");
+        assert_eq!(default, None);
 
         // Once it is merged, the issue can be worked on again.
         let (ids, default) = offered(&with_pull_request("merged"));
-        assert_eq!(ids, ["start_issue", "start_issue_agent", "github"]);
+        assert_eq!(ids, ["start_issue", "start_issue_agent"]);
         assert_eq!(default.as_deref(), Some("start_issue"));
     }
 
@@ -4445,9 +4470,9 @@ mod tests {
             .unwrap(),
         );
         let choices = source.choices(&item);
-        assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
+        assert_eq!(choices.default_choice_id, None);
         let plan = source
-            .provision_plan(&item, "thread_agent", Path::new("/w"))
+            .provision_plan(&item, "thread_agent", &[], Path::new("/w"))
             .expect("plan");
         let WorkspaceSource::Download(download) = &plan.source else {
             panic!("download");
@@ -4659,8 +4684,7 @@ esac
                 "push_reply",
                 "address_agent",
                 "address",
-                "merge_commit",
-                "github"
+                "merge_commit"
             ]
         );
         assert_eq!(choices.default_choice_id.as_deref(), Some("merge_squash"));
@@ -4706,14 +4730,14 @@ esac
     }
 
     #[test]
-    fn blocked_merge_is_disabled_with_the_reason_and_defaults_to_github() {
+    fn blocked_merge_is_disabled_with_the_reason_and_leaves_no_default() {
         let source = GithubSource::new(GithubWorkItemsConfig::default());
         let choices = source.choices(&merge_item(&merge_detail("BEHIND")));
         assert_eq!(
             choices.choices[0].disabled_reason.as_deref(),
             Some("Behind main; update the branch first")
         );
-        assert_eq!(choices.default_choice_id.as_deref(), Some("github"));
+        assert_eq!(choices.default_choice_id, None);
         assert!(source
             .perform(&merge_item(&merge_detail("BEHIND")), "merge_squash")
             .is_err());

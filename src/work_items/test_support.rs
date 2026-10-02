@@ -7,7 +7,9 @@ use std::time::Duration;
 use super::source::{ItemChoices, TicketDetail};
 use super::state::WorkItem;
 use super::{PreparedItem, ProvisionPlan, SourceItem, WorkItemSource};
-use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemTicketInfo};
+use crate::api::schema::{
+    WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo, WorkItemTicketInfo,
+};
 
 /// Scripted source: each poll returns the current `items`.
 #[derive(Default)]
@@ -58,6 +60,10 @@ pub(crate) struct FakeSource {
     pub brief_disabled: Mutex<Option<String>>,
     /// Every (item key, choice id) `perform` was asked to carry out, in call order.
     pub performed: Mutex<Vec<(String, String)>>,
+    /// Options the "local" choice offers.
+    pub local_options: Mutex<Vec<WorkItemChoiceOptionInfo>>,
+    /// The options each `provision_plan` call was asked for, in call order.
+    pub provisioned_with: Mutex<Vec<Vec<String>>>,
 }
 
 impl FakeSource {
@@ -96,6 +102,8 @@ impl FakeSource {
             default_choice: Mutex::new(None),
             brief_disabled: Mutex::new(None),
             performed: Mutex::new(Vec::new()),
+            local_options: Mutex::new(Vec::new()),
+            provisioned_with: Mutex::new(Vec::new()),
         }
     }
 
@@ -158,6 +166,7 @@ impl WorkItemSource for FakeSource {
                 action: WorkItemChoiceAction::Perform,
                 disabled_reason: None,
                 confirm: None,
+                options: Vec::new(),
             },
         })
     }
@@ -181,6 +190,7 @@ impl WorkItemSource for FakeSource {
                     action: WorkItemChoiceAction::Perform,
                     disabled_reason: None,
                     confirm: None,
+                    options: Vec::new(),
                 },
             })
     }
@@ -206,6 +216,7 @@ impl WorkItemSource for FakeSource {
                     action: WorkItemChoiceAction::ProvisionWorkspace,
                     disabled_reason: None,
                     confirm: None,
+                    options: self.local_options.lock().expect("fake source lock").clone(),
                 },
                 WorkItemChoiceInfo {
                     choice_id: "web".into(),
@@ -216,6 +227,7 @@ impl WorkItemSource for FakeSource {
                     },
                     disabled_reason: None,
                     confirm: None,
+                    options: Vec::new(),
                 },
                 WorkItemChoiceInfo {
                     choice_id: "do".into(),
@@ -224,6 +236,7 @@ impl WorkItemSource for FakeSource {
                     action: WorkItemChoiceAction::Perform,
                     disabled_reason: None,
                     confirm: Some("Sure?".into()),
+                    options: Vec::new(),
                 },
                 WorkItemChoiceInfo {
                     choice_id: "brief".into(),
@@ -236,6 +249,7 @@ impl WorkItemSource for FakeSource {
                         .expect("fake source lock")
                         .clone(),
                     confirm: None,
+                    options: Vec::new(),
                 },
             ],
             default_choice_id: Some(
@@ -252,8 +266,13 @@ impl WorkItemSource for FakeSource {
         &self,
         _item: &WorkItem,
         _choice_id: &str,
+        options: &[String],
         _worktree_directory: &std::path::Path,
     ) -> Result<ProvisionPlan, String> {
+        self.provisioned_with
+            .lock()
+            .expect("fake source lock")
+            .push(options.to_vec());
         self.plan
             .lock()
             .expect("fake source lock")

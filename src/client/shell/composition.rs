@@ -677,6 +677,7 @@ impl ClientShellState {
                 self.hits.overlay_area = rendered.area;
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_choice_rows = rendered.menu_rows;
+                self.hits.overlay_option_rows = rendered.option_rows;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
                 self.hits.navigator_popup = rendered.navigator_popup;

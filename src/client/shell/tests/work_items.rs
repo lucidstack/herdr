@@ -1,7 +1,7 @@
 use super::*;
 use crate::api::schema::{
-    Method, WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemInfo, WorkItemPhase,
-    WorkItemProvisioningInfo, WorkItemSourceInfo, WorkItemStep, WorkItemStepInfo,
+    Method, WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo, WorkItemInfo,
+    WorkItemPhase, WorkItemProvisioningInfo, WorkItemSourceInfo, WorkItemStep, WorkItemStepInfo,
     WorkItemStepStatus,
 };
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -25,25 +25,27 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         snoozed_until: None,
         choices: vec![
             WorkItemChoiceInfo {
-                choice_id: "local".into(),
-                label: "Review locally".into(),
+                choice_id: "review".into(),
+                label: "Review".into(),
                 description: None,
                 action: WorkItemChoiceAction::ProvisionWorkspace,
                 disabled_reason: None,
                 confirm: None,
+                options: Vec::new(),
             },
             WorkItemChoiceInfo {
-                choice_id: "github".into(),
-                label: "Review on GitHub".into(),
+                choice_id: "open".into(),
+                label: "Open in the browser".into(),
                 description: None,
                 action: WorkItemChoiceAction::OpenUrl {
                     url: format!("https://github.com/o/r/pull/{id}"),
                 },
                 disabled_reason: None,
                 confirm: None,
+                options: Vec::new(),
             },
         ],
-        default_choice_id: Some("github".into()),
+        default_choice_id: Some("open".into()),
         provisioning: None,
         is_pick_next: false,
         start_reminder: None,
@@ -276,10 +278,7 @@ fn clicking_unseen_item_marks_it_seen_and_opens_dialog_on_default_choice() {
     let Some(ClientShellOverlay::WorkItem(overlay)) = state.overlay.as_ref() else {
         panic!("work item dialog should open");
     };
-    assert_eq!(
-        overlay.item.choices[overlay.highlighted].choice_id,
-        "github"
-    );
+    assert_eq!(overlay.item.choices[overlay.highlighted].choice_id, "open");
 }
 
 #[test]
@@ -289,33 +288,28 @@ fn dialog_lists_choices_and_arrow_keys_skip_disabled_ones() {
     blocked.choices.insert(
         1,
         WorkItemChoiceInfo {
-            choice_id: "agent_post".into(),
-            label: "Ask agent to review and comment on GitHub".into(),
+            choice_id: "push_reply".into(),
+            label: "Ask agent to push and reply".into(),
             description: None,
             action: WorkItemChoiceAction::ProvisionWorkspace,
-            disabled_reason: Some("No agent configured".into()),
+            disabled_reason: Some("Work on it locally first".into()),
             confirm: None,
+            options: Vec::new(),
         },
     );
-    blocked.default_choice_id = Some("local".into());
+    blocked.default_choice_id = Some("review".into());
     let mut state = shell_with(vec![blocked]);
     state.compose(106, 30).expect("frame");
     click_item(&mut state, 0);
     let text = screen_text(&mut state);
-    assert!(text.contains("Review locally"), "{text}");
-    assert!(
-        text.contains("Ask agent to review and comment on GitHub"),
-        "{text}"
-    );
-    assert!(text.contains("Review on GitHub"), "{text}");
+    assert!(text.contains("Review"), "{text}");
+    assert!(text.contains("Ask agent to push and reply"), "{text}");
+    assert!(text.contains("Open in the browser"), "{text}");
     state.handle_input_bytes(b"\x1b[B");
     let Some(ClientShellOverlay::WorkItem(overlay)) = state.overlay.as_ref() else {
         panic!("dialog stays open");
     };
-    assert_eq!(
-        overlay.item.choices[overlay.highlighted].choice_id,
-        "github"
-    );
+    assert_eq!(overlay.item.choices[overlay.highlighted].choice_id, "open");
 }
 
 #[test]
@@ -333,7 +327,7 @@ fn confirming_external_choice_opens_url_and_reports_the_choice() {
     assert!(matches!(
         endpoint_methods(&input)[..],
         [Method::WorkItemChoose(params)]
-            if params.item_id == "github:o/r#7" && params.choice_id == "github"
+            if params.item_id == "github:o/r#7" && params.choice_id == "open"
     ));
     assert!(state.overlay.is_none());
 }
@@ -372,10 +366,10 @@ fn remote_viewer_gets_the_link_to_copy_instead_of_a_browser_on_the_host() {
 
     let input = state.handle_input_bytes(b"\r");
     assert!(!opens_locally(&input));
-    // The source still hears about the choice, so the item waits on GitHub.
+    // The source still hears about the choice, so the item waits for you to finish there.
     assert!(matches!(
         endpoint_methods(&input)[..],
-        [Method::WorkItemChoose(params)] if params.choice_id == "github"
+        [Method::WorkItemChoose(params)] if params.choice_id == "open"
     ));
     let screen = screen_text(&mut state);
     assert!(screen.contains("https://github.com/o/r/pull/7"));
@@ -487,6 +481,7 @@ fn provisioning_item(workspace_id: Option<&str>) -> WorkItemInfo {
             detail: None,
         }],
         finished: false,
+        finished_at: None,
     });
     provisioning
 }
@@ -522,6 +517,70 @@ fn checklist_enter_focuses_the_provisioned_workspace() {
         endpoint_methods(&input)[..],
         [Method::WorkspaceFocus(target)] if target.workspace_id == "ws_2"
     ));
+}
+
+/// A finished provisioning whose agent brief failed, as the server projects it. `attention` is
+/// what the item needs you for: the failure, until an agent took a turn after it.
+fn brief_failed_item(attention: Option<crate::api::schema::AttentionKind>) -> WorkItemInfo {
+    let step = |step, label: &str, status, detail: Option<&str>| WorkItemStepInfo {
+        step,
+        label: label.into(),
+        status,
+        detail: detail.map(str::to_owned),
+    };
+    let mut failed = provisioning_item(Some("ws_2"));
+    failed.provisioning = Some(WorkItemProvisioningInfo {
+        steps: vec![
+            step(
+                WorkItemStep::Checkout,
+                "Worktree created",
+                WorkItemStepStatus::Done,
+                None,
+            ),
+            step(
+                WorkItemStep::AgentBrief,
+                "Agent briefed",
+                WorkItemStepStatus::Failed,
+                Some("agent still idle 15 s after the brief"),
+            ),
+        ],
+        finished: true,
+        finished_at: Some(1_000),
+    });
+    failed.attention = attention.map(|kind| crate::api::schema::AttentionInfo {
+        kind,
+        reason: "agent still idle 15 s after the brief".into(),
+        pane_id: None,
+        since: 1_000,
+    });
+    failed
+}
+
+/// The line of the screen that names item 7, its sidebar row.
+fn row_of_item_7(state: &mut ClientShellState) -> String {
+    let text = screen_text(state);
+    text.lines()
+        .find(|line| line.contains("o/r #7"))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("the item is listed: {text}"))
+}
+
+#[test]
+fn a_failed_provisioning_marks_its_row_only_while_the_failure_needs_you() {
+    use crate::api::schema::AttentionKind;
+
+    let mut state = shell_with(vec![brief_failed_item(Some(AttentionKind::Failed))]);
+    let row = row_of_item_7(&mut state);
+    assert!(row.contains('✗'), "{row}");
+
+    // An agent took a turn after the failure: the step stays failed, but nothing needs you
+    // now, so the row shows the agent's status like that of any item that needs nothing.
+    state.set_endpoint_work_items(
+        &ClientEndpointId::Local,
+        projection(2, vec![brief_failed_item(None)]),
+    );
+    let row = row_of_item_7(&mut state);
+    assert!(!row.contains('✗'), "{row}");
 }
 
 fn mouse(
@@ -803,7 +862,7 @@ fn ticket_shows_a_status_line_per_service_and_its_pull_request_folds_in() {
         .iter()
         .position(|label| label == "o/r #8")
         .expect("pull request header");
-    assert_eq!(labels[header + 1], "Review locally", "{labels:?}");
+    assert_eq!(labels[header + 1], "Review", "{labels:?}");
     assert!(
         labels.contains(&"Open #8 on GitHub".to_string()),
         "{labels:?}"
@@ -820,7 +879,7 @@ fn ticket_shows_a_status_line_per_service_and_its_pull_request_folds_in() {
         endpoint_methods(&chosen).iter().any(|method| matches!(
             method,
             Method::WorkItemChoose(params)
-                if params.item_id == "github:o/r#8" && params.choice_id == "local"
+                if params.item_id == "github:o/r#8" && params.choice_id == "review"
         )),
         "the pull request's choice runs, not the ticket's"
     );
@@ -840,6 +899,7 @@ fn item_menu_leads_with_a_started_items_tracker_fix() {
             action: WorkItemChoiceAction::Perform,
             disabled_reason: None,
             confirm: None,
+            options: Vec::new(),
         },
     );
     started.default_choice_id = Some("start_work".into());
@@ -858,7 +918,7 @@ fn item_menu_leads_with_a_started_items_tracker_fix() {
     let items = menu.items();
     assert_eq!(items[menu.highlighted].label, "Assign to me");
     // A left click already opens the workspace, so the menu does not offer it again.
-    assert!(items.iter().all(|entry| entry.label != "Review locally"));
+    assert!(items.iter().all(|entry| entry.label != "Review"));
     state.compose(106, 30).expect("frame");
     let (row, _) = state.hits.context_menu_rows[menu_index(&state, "Assign to me")];
     let chosen = mouse(
@@ -921,6 +981,7 @@ fn irreversible_choice_runs_only_after_a_second_confirm() {
             action: WorkItemChoiceAction::Perform,
             disabled_reason: None,
             confirm: Some("Merge #7 into main? This cannot be undone.".into()),
+            options: Vec::new(),
         },
     );
     ready.default_choice_id = Some("merge_squash".into());
@@ -965,6 +1026,7 @@ fn performed_choice_shows_its_outcome_and_retries_only_after_failure() {
             action: WorkItemChoiceAction::Perform,
             disabled_reason: None,
             confirm: None,
+            options: Vec::new(),
         },
     );
     started.default_choice_id = Some("start_work".into());
@@ -1031,6 +1093,7 @@ fn briefing_the_agent_closes_the_dialog_and_asks_the_server() {
             action: WorkItemChoiceAction::BriefAgent,
             disabled_reason: None,
             confirm: None,
+            options: Vec::new(),
         },
     );
     local.default_choice_id = Some("push_reply".into());
@@ -1054,6 +1117,7 @@ fn choice(id: &str, label: &str, action: WorkItemChoiceAction) -> WorkItemChoice
         action,
         disabled_reason: None,
         confirm: None,
+        options: Vec::new(),
     }
 }
 
@@ -1132,11 +1196,6 @@ fn ticket_with_folded_pull_request() -> (WorkItemInfo, WorkItemInfo) {
             "merge_commit",
             "Create a merge commit",
             WorkItemChoiceAction::Perform,
-        ),
-        choice(
-            "github",
-            "Open on GitHub",
-            open_url("https://github.com/o/r/pull/11938"),
         ),
     ];
     pull.default_choice_id = Some("merge_squash".into());
@@ -1253,8 +1312,234 @@ fn an_items_menu_leaves_out_the_choice_that_would_start_the_workspace_it_already
     let state = state_with_item_menu(vec![worked]);
 
     let (labels, _) = menu_labels(&state);
+    assert!(!labels.contains(&"Review".to_string()), "{labels:?}");
+}
+
+/// A review request as the server projects it: one Review choice with its two switches. The
+/// server offers nothing that only opens the pull request in the browser; the menu's link does.
+fn review_item(id: &str) -> WorkItemInfo {
+    let mut review = item(id);
+    review.seen = true;
+    review.choices = vec![WorkItemChoiceInfo {
+        options: vec![
+            switch("worktree", "Create worktree", true),
+            switch("post", "Post to GitHub", false),
+        ],
+        ..choice("review", "Review", WorkItemChoiceAction::ProvisionWorkspace)
+    }];
+    review.default_choice_id = Some("review".into());
+    review
+}
+
+/// A review request whose default is another choice, so Review is not highlighted when the
+/// dialog opens.
+fn review_item_defaulting_to_open(id: &str) -> WorkItemInfo {
+    let mut review = review_item(id);
+    review.choices.push(choice(
+        "open",
+        "Open in the browser",
+        open_url(&format!("https://github.com/o/r/pull/{id}")),
+    ));
+    review.default_choice_id = Some("open".into());
+    review
+}
+
+fn switch(id: &str, label: &str, default: bool) -> WorkItemChoiceOptionInfo {
+    WorkItemChoiceOptionInfo {
+        option_id: id.into(),
+        label: label.into(),
+        description: None,
+        default,
+    }
+}
+
+/// The dialog of `item`, open on its default choice.
+fn dialog_for(item: WorkItemInfo) -> ClientShellState {
+    let mut state = shell_with(vec![item]);
+    state.compose(106, 30).expect("frame");
+    click_item(&mut state, 0);
     assert!(
-        !labels.contains(&"Review locally".to_string()),
-        "{labels:?}"
+        matches!(state.overlay, Some(ClientShellOverlay::WorkItem(_))),
+        "the dialog opens"
     );
+    state
+}
+
+/// The `options` of the one `work_item.choose` request in `input`.
+fn chosen_options(input: &ClientShellInput) -> Option<Vec<String>> {
+    let methods = endpoint_methods(input);
+    let [Method::WorkItemChoose(params)] = methods[..] else {
+        panic!("expected one choose request, got {methods:?}");
+    };
+    params.options.clone()
+}
+
+#[test]
+fn dialog_shows_the_highlighted_choices_switches_and_numbers_flip_them() {
+    let mut state = dialog_for(review_item("7"));
+    let text = screen_text(&mut state);
+    assert!(text.contains("1 [x] Create worktree"), "{text}");
+    assert!(text.contains("2 [ ] Post to GitHub"), "{text}");
+    assert!(text.contains("1-2 toggle"), "{text}");
+
+    state.handle_input_bytes(b"2");
+    state.handle_input_bytes(b"1");
+    let text = screen_text(&mut state);
+    assert!(text.contains("1 [ ] Create worktree"), "{text}");
+    assert!(text.contains("2 [x] Post to GitHub"), "{text}");
+
+    let input = state.handle_input_bytes(b"\r");
+    assert_eq!(chosen_options(&input), Some(vec!["post".to_string()]));
+}
+
+#[test]
+fn switches_left_alone_or_put_back_leave_the_defaults_to_the_server() {
+    for keys in ["", "11"] {
+        let mut state = dialog_for(review_item("7"));
+        if !keys.is_empty() {
+            state.handle_input_bytes(keys.as_bytes());
+        }
+        let input = state.handle_input_bytes(b"\r");
+        assert_eq!(chosen_options(&input), None, "after pressing {keys:?}");
+    }
+}
+
+#[test]
+fn switching_every_option_off_sends_an_empty_list_rather_than_none() {
+    let mut state = dialog_for(review_item("7"));
+    state.handle_input_bytes(b"1");
+    let input = state.handle_input_bytes(b"\r");
+    assert_eq!(chosen_options(&input), Some(Vec::new()));
+}
+
+#[test]
+fn a_choice_with_switches_takes_two_clicks() {
+    // Another choice is the default, so the first click on Review only highlights it.
+    let mut state = dialog_for(review_item_defaulting_to_open("7"));
+    state.compose(106, 30).expect("frame");
+    let (review_row, _) = state.hits.overlay_choice_rows[0];
+    let first = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        review_row.x + 2,
+        review_row.y,
+    );
+    assert!(
+        endpoint_methods(&first).is_empty(),
+        "the first click only highlights the choice"
+    );
+
+    state.compose(106, 30).expect("frame");
+    let (review_row, _) = state.hits.overlay_choice_rows[0];
+    let second = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        review_row.x + 2,
+        review_row.y,
+    );
+    assert!(matches!(
+        endpoint_methods(&second)[..],
+        [Method::WorkItemChoose(params)] if params.choice_id == "review"
+    ));
+}
+
+#[test]
+fn clicking_a_switch_flips_it() {
+    let mut state = dialog_for(review_item("7"));
+    state.compose(106, 30).expect("frame");
+    let (post_row, _) = state.hits.overlay_option_rows[1];
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        post_row.x + 2,
+        post_row.y,
+    );
+    let input = state.handle_input_bytes(b"\r");
+    assert_eq!(
+        chosen_options(&input),
+        Some(vec!["worktree".to_string(), "post".to_string()])
+    );
+}
+
+#[test]
+fn switches_belong_to_the_highlighted_choice_only() {
+    let mut state = dialog_for(review_item_defaulting_to_open("7"));
+    let text = screen_text(&mut state);
+    assert!(
+        !text.contains("Create worktree") && !text.contains("toggle"),
+        "{text}"
+    );
+
+    // A number means nothing to a choice without switches, and flips nothing behind its back.
+    state.handle_input_bytes(b"1");
+    state.handle_input_bytes(b"\x1b[A");
+    let text = screen_text(&mut state);
+    assert!(text.contains("1 [x] Create worktree"), "{text}");
+}
+
+#[test]
+fn a_review_request_is_still_opened_in_the_browser_from_its_menu() {
+    // The server offers no choice that only opens a pull request; the menu's link does.
+    let mut state = state_with_item_menu(vec![review_item("7")]);
+    let (labels, _) = menu_labels(&state);
+    let index = labels
+        .iter()
+        .position(|label| label == "Open #7 on GitHub")
+        .unwrap_or_else(|| panic!("the pull request's link is listed: {labels:?}"));
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[index];
+    let input = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(
+        input.actions.iter().any(|action| matches!(
+            action,
+            ClientShellAction::OpenSafeWebUrl(url) if url == "https://github.com/o/r/pull/7"
+        )),
+        "the link opens the pull request"
+    );
+}
+
+#[test]
+fn a_choice_that_cannot_run_shows_no_switches() {
+    let mut review = review_item("7");
+    review.choices[0].disabled_reason = Some("No agent configured for o/r review requests".into());
+    let mut state = dialog_for(review);
+    let text = screen_text(&mut state);
+    assert!(text.contains("No agent configured"), "{text}");
+    assert!(!text.contains("Create worktree"), "{text}");
+}
+
+#[test]
+fn flipped_switches_survive_a_fresh_projection_under_the_open_dialog() {
+    let mut state = dialog_for(review_item("7"));
+    state.handle_input_bytes(b"2");
+    state.set_endpoint_work_items(
+        &ClientEndpointId::Local,
+        projection(2, vec![review_item("7")]),
+    );
+    let text = screen_text(&mut state);
+    assert!(text.contains("2 [x] Post to GitHub"), "{text}");
+}
+
+#[test]
+fn right_click_menu_runs_a_choice_with_its_switches_at_their_defaults() {
+    let mut state = state_with_item_menu(vec![review_item("7")]);
+    let (labels, _) = menu_labels(&state);
+    let index = labels
+        .iter()
+        .position(|label| label == "Review")
+        .expect("Review is listed");
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[index];
+    let input = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert_eq!(chosen_options(&input), None);
 }
