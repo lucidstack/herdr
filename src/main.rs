@@ -393,6 +393,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # path = "sounds/notification.mp3"   # one mp3 file for all sound notifications
 # done_path = "sounds/done.mp3"      # overrides only finished notifications
 # request_path = "sounds/request.mp3" # overrides only needs-attention notifications
+# inbox_path = "sounds/inbox.mp3"     # work-item inbox notices; falls back to the request sound
+# inbox_enabled = true                # false silences inbox notices but keeps agent sounds
 
 # Per-agent overrides: default | on | off
 # By default, droid is muted.
