@@ -25,10 +25,11 @@ use crate::api::schema::{
     AttentionInfo, AttentionKind, WorkItemActionOutcome, WorkItemInfo, WorkItemPhase,
     WorkItemProvisioningInfo, WorkItemSourceInfo,
 };
-use crate::config::WorkItemsConfig;
+use crate::config::{GithubRepoConfig, WorkItemsConfig};
 
 pub(crate) use changes::{ItemChange, ItemChanges};
 use provision::ProvisionJob;
+use source::LinkedClone;
 pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, TicketDetail, WorkItemSource};
 use state::{NotFound, WorkItem, WorkItemsState};
 use store::StoreWriter;
@@ -59,6 +60,11 @@ pub(crate) enum WorkItemsEvent {
     Performed {
         key: String,
         result: Result<String, String>,
+    },
+    /// A link-clone choice finished on its background thread.
+    CloneLinked {
+        key: String,
+        result: Result<(LinkedClone, String), String>,
     },
     /// A `work_item.add` fetch finished; the item is inserted only now that it succeeded,
     /// so its API response carries the resulting item.
@@ -234,6 +240,8 @@ pub(crate) struct WorkItems {
     /// Follow-up briefs sent to an item's agent, waiting for the `agent.prompt` response.
     follow_ups: Vec<(String, std::sync::mpsc::Receiver<String>)>,
     pick_next: PickNextState,
+    /// Clones linked from items, used like those mapped in the config.
+    linked_clones: Vec<LinkedClone>,
     /// Work items moved focus to a workspace outside an API request, e.g. a new
     /// "Pick next" workspace; the server moves its shell clients there too.
     focus_requested: bool,
@@ -271,6 +279,31 @@ pub(crate) struct StorePolicy {
     pub path: PathBuf,
     pub load: bool,
     pub persist: bool,
+}
+
+/// `config` with the clones linked from items added to their sources' mappings. A
+/// repository the config maps keeps that mapping.
+fn with_linked_clones(config: &WorkItemsConfig, linked: &[LinkedClone]) -> WorkItemsConfig {
+    let mut config = config.clone();
+    if let Some(github) = config.github.as_mut() {
+        for clone in linked
+            .iter()
+            .filter(|clone| clone.source_id == github::SOURCE_ID)
+        {
+            if !github
+                .repos
+                .iter()
+                .any(|repo| repo.name.eq_ignore_ascii_case(&clone.name))
+            {
+                github.repos.push(GithubRepoConfig {
+                    name: clone.name.clone(),
+                    path: clone.path.to_string_lossy().into_owned(),
+                    remote: clone.remote.clone(),
+                });
+            }
+        }
+    }
+    config
 }
 
 fn build_sources(config: &WorkItemsConfig) -> Vec<Arc<dyn WorkItemSource>> {
@@ -338,6 +371,7 @@ impl WorkItems {
             removals: Vec::new(),
             follow_ups: Vec::new(),
             pick_next: PickNextState::default(),
+            linked_clones: Vec::new(),
             focus_requested: false,
             repositories: Vec::new(),
             pull_request_lookup: LookupSchedule::new(Instant::now()),
@@ -354,8 +388,7 @@ impl WorkItems {
     ) -> Self {
         let mut items = Self::disabled();
         items.config = config.clone();
-        items.sources = build_sources(config);
-        items.repositories = build_repositories(config);
+        items.rebuild_sources();
         if items.sources.is_empty() {
             return items;
         }
@@ -376,6 +409,10 @@ impl WorkItems {
                 self.state = WorkItemsState::from_items(stored.items);
                 self.owned_worktrees = stored.worktrees;
                 self.pick_next = stored.pick_next;
+                self.linked_clones = stored.linked_clones;
+                if !self.linked_clones.is_empty() {
+                    self.rebuild_sources();
+                }
             }
             if store.persist {
                 self.store = StoreWriter::spawn(store.path.clone());
@@ -385,6 +422,23 @@ impl WorkItems {
         self.retain_configured_sources();
         self.schedule_all(now);
         self.revision = self.revision.max(1);
+    }
+
+    /// Sources and repositories for the config with the linked clones added.
+    fn rebuild_sources(&mut self) {
+        let config = with_linked_clones(&self.config, &self.linked_clones);
+        self.sources = build_sources(&config);
+        self.repositories = build_repositories(&config);
+    }
+
+    /// Remembers a clone linked from an item, replacing an earlier link of its repository.
+    fn add_linked_clone(&mut self, clone: LinkedClone) {
+        self.linked_clones.retain(|linked| {
+            linked.source_id != clone.source_id || !linked.name.eq_ignore_ascii_case(&clone.name)
+        });
+        self.linked_clones.push(clone);
+        self.rebuild_sources();
+        self.changed();
     }
 
     fn retain_configured_sources(&mut self) -> bool {
@@ -412,8 +466,7 @@ impl WorkItems {
             return;
         }
         self.config = config.clone();
-        self.sources = build_sources(config);
-        self.repositories = build_repositories(config);
+        self.rebuild_sources();
         self.polls_in_flight.clear();
         if self.sources.is_empty() {
             self.next_poll.clear();
@@ -586,6 +639,15 @@ impl WorkItems {
             // Provisioning results need the app and are handled by its driver.
             WorkItemsEvent::CheckoutFinished { .. } => (false, Vec::new()),
             WorkItemsEvent::Performed { key, result } => {
+                let notices: Vec<WorkItemNotice> =
+                    self.finish_action(&key, result, now).into_iter().collect();
+                (!notices.is_empty(), notices)
+            }
+            WorkItemsEvent::CloneLinked { key, result } => {
+                let result = result.map(|(clone, message)| {
+                    self.add_linked_clone(clone);
+                    message
+                });
                 let notices: Vec<WorkItemNotice> =
                     self.finish_action(&key, result, now).into_iter().collect();
                 (!notices.is_empty(), notices)
@@ -947,10 +1009,14 @@ impl WorkItems {
             Ok(message) => {
                 // Work in its own workspace carries on (e.g. after updating the tracker), and
                 // so does a ticket whose pull request item took the choice: that item leaves
-                // once its source agrees (e.g. a merge), the ticket does not. Anything else
-                // waits for the source to drop the item.
+                // once its source agrees (e.g. a merge), the ticket does not. A linked clone
+                // leaves the item to be worked on locally. Anything else waits for the source
+                // to drop the item.
                 let carried = source::carried_original_id(&choice_id).map(str::to_string);
-                if before == Some(WorkItemPhase::Local) || carried.is_some() {
+                if before == Some(WorkItemPhase::Local)
+                    || carried.is_some()
+                    || choice_id == source::LINK_CLONE_CHOICE_ID
+                {
                     item.phase = before.unwrap_or(WorkItemPhase::Pending);
                 }
                 item.action_outcome = Some(WorkItemActionOutcome {
@@ -1718,7 +1784,12 @@ impl WorkItems {
     fn changed(&mut self) {
         self.revision += 1;
         if let Some(store) = &self.store {
-            store.save(self.state.items(), &self.owned_worktrees, &self.pick_next);
+            store.save(
+                self.state.items(),
+                &self.owned_worktrees,
+                &self.pick_next,
+                &self.linked_clones,
+            );
         }
     }
 
@@ -2511,5 +2582,122 @@ projects = [
                 .as_deref(),
             Some("pull_request_open")
         );
+    }
+
+    fn github_with_clone_root() -> WorkItemsConfig {
+        WorkItemsConfig {
+            github: Some(crate::config::GithubWorkItemsConfig {
+                clone_root: "/projects".into(),
+                ..crate::config::GithubWorkItemsConfig::default()
+            }),
+            jira: None,
+        }
+    }
+
+    fn review_request(items: &mut WorkItems) -> String {
+        items.apply_event(
+            WorkItemsEvent::Polled {
+                source_id: "github".into(),
+                result: Ok(vec![SourceItem {
+                    external_id: "o/r#5".into(),
+                    title: "Add the thing".into(),
+                    context: "o/r #5".into(),
+                    author: None,
+                    url: "https://github.com/o/r/pull/5".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    tracker_state: None,
+                }]),
+            },
+            Instant::now(),
+        );
+        items.state.items()[0].key.clone()
+    }
+
+    fn local_review_reason(items: &WorkItems, key: &str) -> Option<String> {
+        items
+            .item_info(key)
+            .expect("item")
+            .choices
+            .into_iter()
+            .find(|choice| choice.choice_id == "local")
+            .expect("local review offered")
+            .disabled_reason
+    }
+
+    fn store_policy(name: &str, load: bool) -> StorePolicy {
+        StorePolicy {
+            path: std::env::temp_dir()
+                .join(format!("herdr-linked-clones-{}-{name}", std::process::id()))
+                .join("work-items.json"),
+            load,
+            persist: false,
+        }
+    }
+
+    #[test]
+    fn a_linked_clone_maps_its_repository_and_leaves_the_item_to_work_on() {
+        let now = Instant::now();
+        let mut items = WorkItems::from_config(
+            &github_with_clone_root(),
+            store_policy("link", false),
+            &HashSet::new(),
+            now,
+        );
+        let key = review_request(&mut items);
+        items
+            .begin_action(&key, source::LINK_CLONE_CHOICE_ID)
+            .expect("starts");
+        items.apply_event(
+            WorkItemsEvent::CloneLinked {
+                key: key.clone(),
+                result: Ok((
+                    LinkedClone {
+                        source_id: "github".into(),
+                        name: "o/r".into(),
+                        path: "/projects/r".into(),
+                        remote: "origin".into(),
+                    },
+                    "Linked o/r to /projects/r".into(),
+                )),
+            },
+            now,
+        );
+
+        assert_eq!(local_review_reason(&items, &key), None);
+        assert_eq!(
+            items.state.get(&key).expect("item").phase,
+            WorkItemPhase::Pending
+        );
+        assert_eq!(
+            items
+                .repositories
+                .iter()
+                .map(|repository| repository.info.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/projects/r"]
+        );
+    }
+
+    #[test]
+    fn clones_linked_before_a_restart_stay_linked() {
+        let policy = store_policy("restart", true);
+        let parent = policy.path.parent().expect("parent").to_path_buf();
+        std::fs::create_dir_all(&parent).expect("creates");
+        std::fs::write(
+            &policy.path,
+            r#"{"version":1,"items":[],"linked_clones":[
+                {"source_id":"github","name":"o/r","path":"/projects/r","remote":"origin"}]}"#,
+        )
+        .expect("writes");
+        let mut items = WorkItems::from_config(
+            &github_with_clone_root(),
+            policy,
+            &HashSet::new(),
+            Instant::now(),
+        );
+        let _ = std::fs::remove_dir_all(parent);
+        let key = review_request(&mut items);
+
+        assert_eq!(local_review_reason(&items, &key), None);
     }
 }

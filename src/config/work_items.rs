@@ -152,6 +152,8 @@ pub struct GithubWorkItemsConfig {
     pub queries: GithubQueriesConfig,
     /// Local clones of repositories that can be reviewed in a worktree.
     pub repos: Vec<GithubRepoConfig>,
+    /// Directory holding your clones, e.g. "~/projects". An item of a repository without a `repos` entry then offers to link its clone there, cloning it there first when there is none. Empty disables this. Default: "".
+    pub clone_root: String,
     /// Workflows for review requests; the first block whose repos match applies.
     pub review_requested: Vec<ReviewRequestedConfig>,
     /// Workflows for your pull requests with changes requested; the first block whose repos match applies.
@@ -173,6 +175,7 @@ impl Default for GithubWorkItemsConfig {
             max_results: 200,
             queries: GithubQueriesConfig::default(),
             repos: Vec::new(),
+            clone_root: String::new(),
             review_requested: Vec::new(),
             changes_requested: Vec::new(),
             ci_failing: Vec::new(),

@@ -1535,6 +1535,12 @@
           "description": "Most results kept per search, fetched in pages of 100 (GitHub serves at most 1000)."
         },
         {
+          "key": "work_items.github.clone_root",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Directory holding your clones, e.g. \"~/projects\". An item of a repository without a [[work_items.github.repos]] entry then offers Link or clone, which links the clone of that repository directly inside this directory, or clones it there with gh when there is none. Linked clones are kept in work-items.json. Empty disables this."
+        },
+        {
           "key": "work_items.github.queries.review_requested",
           "type": "string",
           "default": "\"is:pr is:open review-requested:@me archived:false\"",

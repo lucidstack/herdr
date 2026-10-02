@@ -132,6 +132,23 @@ pub(crate) const PULL_REQUEST_OPEN_CHOICE_ID: &str = "pull_request_open";
 /// Moves an item's ticket to a done status once its linked pull request is merged. Its
 /// action is `Perform`, carried out by the item's source.
 pub(crate) const CLOSE_TICKET_CHOICE_ID: &str = "close_ticket";
+/// Links an item's repository, mapped to no local clone, to its clone inside the source's
+/// clone root, cloning it there first when there is none. Its action is `Perform`, carried
+/// out by Herdr through the item's source with [`WorkItemSource::link_clone`].
+pub(crate) const LINK_CLONE_CHOICE_ID: &str = "link_clone";
+
+/// A local clone linked from an item at runtime. Kept in `work-items.json` and used by its
+/// source like a clone mapped in the config, which wins for the same repository.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LinkedClone {
+    pub source_id: String,
+    /// The repository it is a clone of, e.g. "owner/name".
+    pub name: String,
+    pub path: PathBuf,
+    /// Git remote that serves the repository.
+    pub remote: String,
+}
+
 /// Starts the id of a choice carried onto a ticket from the pull request item folded into it:
 /// the rest is the folded item's own id for it. Shared with clients through the API schema.
 pub(crate) const PULL_REQUEST_CHOICE_PREFIX: &str =
@@ -210,6 +227,12 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// and returns a one-line result for the user.
     fn perform(&self, _item: &WorkItem, choice_id: &str) -> Result<String, String> {
         Err(format!("choice {choice_id} cannot be carried out here"))
+    }
+    /// Blocking; background thread only. The clone of `item`'s repository inside the clone
+    /// root, cloned there first when there is none, for [`LINK_CLONE_CHOICE_ID`]; with a
+    /// one-line result for the user.
+    fn link_clone(&self, _item: &WorkItem) -> Result<(LinkedClone, String), String> {
+        Err("this source cannot link clones".into())
     }
     /// Pure: whether the tracker lags behind work started on `item`. Only asked for items
     /// with a workspace whose reminder is not muted.

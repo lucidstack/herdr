@@ -618,12 +618,23 @@ impl App {
         let key = key.to_string();
         let choice_id = choice_id.to_string();
         std::thread::spawn(move || {
-            let result = match (carried, pull_request) {
-                (Some(carried), _) => carried.source.perform(&carried.item, &carried.choice_id),
-                (None, Some((host, pull_request))) => host.mark_pull_request_ready(&pull_request),
-                (None, None) => source.perform(&item, &choice_id),
+            let (source, item, choice_id) = match carried {
+                Some(carried) => (carried.source, carried.item, carried.choice_id),
+                None => (source, item, choice_id),
             };
-            send_event(&event_tx, WorkItemsEvent::Performed { key, result });
+            let event = if choice_id == crate::work_items::source::LINK_CLONE_CHOICE_ID {
+                WorkItemsEvent::CloneLinked {
+                    key,
+                    result: source.link_clone(&item),
+                }
+            } else {
+                let result = match pull_request {
+                    Some((host, pull_request)) => host.mark_pull_request_ready(&pull_request),
+                    None => source.perform(&item, &choice_id),
+                };
+                WorkItemsEvent::Performed { key, result }
+            };
+            send_event(&event_tx, event);
         });
         self.request_work_items_render();
         Ok(())

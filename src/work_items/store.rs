@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use super::source::LinkedClone;
 use super::state::WorkItem;
 use super::{OwnedWorktree, PickNextState};
 
@@ -20,6 +21,9 @@ struct StoreFile {
     worktrees: Vec<OwnedWorktree>,
     #[serde(default)]
     pick_next: PickNextState,
+    /// Clones linked from items, used like those mapped in the config.
+    #[serde(default)]
+    linked_clones: Vec<LinkedClone>,
 }
 
 #[derive(Serialize)]
@@ -28,6 +32,7 @@ struct StoreFileRef<'a> {
     items: &'a [WorkItem],
     worktrees: &'a [OwnedWorktree],
     pick_next: &'a PickNextState,
+    linked_clones: &'a [LinkedClone],
 }
 
 /// Persisted work-item state.
@@ -36,6 +41,7 @@ pub(crate) struct Stored {
     pub items: Vec<WorkItem>,
     pub worktrees: Vec<OwnedWorktree>,
     pub pick_next: PickNextState,
+    pub linked_clones: Vec<LinkedClone>,
 }
 
 pub(crate) fn load(path: &Path) -> Stored {
@@ -52,6 +58,7 @@ pub(crate) fn load(path: &Path) -> Stored {
             items: file.items,
             worktrees: file.worktrees,
             pick_next: file.pick_next,
+            linked_clones: file.linked_clones,
         },
         Ok(file) => {
             warn!(
@@ -103,12 +110,14 @@ impl StoreWriter {
         items: &[WorkItem],
         worktrees: &[OwnedWorktree],
         pick_next: &PickNextState,
+        linked_clones: &[LinkedClone],
     ) {
         match serde_json::to_string(&StoreFileRef {
             version: STORE_VERSION,
             items,
             worktrees,
             pick_next,
+            linked_clones,
         }) {
             Ok(json) => {
                 let _ = self.tx.send(json);
@@ -191,6 +200,15 @@ mod tests {
         }
     }
 
+    fn linked_clone() -> LinkedClone {
+        LinkedClone {
+            source_id: "gh".into(),
+            name: "o/r".into(),
+            path: "/projects/r".into(),
+            remote: "upstream".into(),
+        }
+    }
+
     #[test]
     fn round_trip_keeps_persisted_fields_and_drops_transient_ones() {
         let path = temp_path("round-trip");
@@ -208,6 +226,7 @@ mod tests {
                 items: std::slice::from_ref(&original),
                 worktrees: &[worktree()],
                 pick_next: &pick_next,
+                linked_clones: &[linked_clone()],
             })
             .expect("serialises"),
         )
@@ -230,6 +249,7 @@ mod tests {
                 items: vec![expected],
                 worktrees: vec![worktree()],
                 pick_next,
+                linked_clones: vec![linked_clone()],
             }
         );
     }
@@ -244,6 +264,7 @@ mod tests {
                 items: &[item()],
                 worktrees: &[],
                 pick_next: &PickNextState::default(),
+                linked_clones: &[],
             })
             .expect("serialises"),
         )

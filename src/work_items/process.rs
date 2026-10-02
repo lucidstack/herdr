@@ -98,6 +98,15 @@ pub(crate) fn last_line(bytes: &[u8]) -> String {
     line.chars().take(MAX_DETAIL_CHARS).collect()
 }
 
+/// First non-empty line of process output, trimmed and bounded for display.
+pub(crate) fn first_line(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(MAX_DETAIL_CHARS).collect())
+}
+
 /// Error detail for a finished process: its last stderr line, else stdout, else the exit status.
 pub(crate) fn failure_detail(output: &Output) -> String {
     let stderr = last_line(&output.stderr);

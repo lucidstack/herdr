@@ -18,15 +18,17 @@ use crate::config::{
 
 use super::process::{failure_detail, run_with_timeout};
 use super::source::{
-    DownloadSpec, ItemChoices, PreparedItem, ProvisionPlan, SourceItem, StartReminder,
+    DownloadSpec, ItemChoices, LinkedClone, PreparedItem, ProvisionPlan, SourceItem, StartReminder,
     TicketDetail, WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
-    START_WORK_CHOICE_ID,
+    LINK_CLONE_CHOICE_ID, START_WORK_CHOICE_ID,
 };
 use super::state::WorkItem;
 
-const SOURCE_ID: &str = "github";
+pub(crate) const SOURCE_ID: &str = "github";
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+/// Cloning a large repository over a slow link takes a while.
+const CLONE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MIN_POLL_SECONDS: u64 = 30;
 const MAX_POLL_SECONDS: u64 = 3600;
 /// GitHub's search page size and per-query result limits.
@@ -418,6 +420,76 @@ fn parse_external_id(external_id: &str) -> Option<(&str, u64)> {
     Some((repo, number.parse().ok()?))
 }
 
+/// A directory name a repository owner or name can safely become: no separators, no
+/// parent references.
+fn is_path_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Whether a Git remote URL points at `repo` (owner/name), whatever the host or protocol:
+/// `git@github.com:o/r.git`, `https://github.com/o/r`, `ssh://git@host/o/r.git`.
+fn remote_url_names(url: &str, repo: &str) -> bool {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let mut segments = url.rsplit(['/', ':']);
+    let (Some(name), Some(owner)) = (segments.next(), segments.next()) else {
+        return false;
+    };
+    repo.split_once('/').is_some_and(|(want_owner, want_name)| {
+        owner.eq_ignore_ascii_case(want_owner) && name.eq_ignore_ascii_case(want_name)
+    })
+}
+
+/// The remote of the clone at `path` that serves `repo`, if one does.
+fn remote_serving(path: &Path, repo: &str) -> Option<String> {
+    let mut command = crate::noninteractive_process::command("git");
+    command
+        .arg("-C")
+        .arg(path)
+        .args(["config", "--get-regexp", r"^remote\..*\.url$"]);
+    let output = run_with_timeout(command, GH_TIMEOUT).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, url)| remote_url_names(url, repo))
+        .and_then(|(key, _)| key.strip_prefix("remote.")?.strip_suffix(".url"))
+        .map(str::to_string)
+}
+
+/// The clone of `repo` among the directories directly inside `root`, with the remote that
+/// serves it. A directory named after the repository is tried first; worktrees, whose `.git`
+/// is a file, are skipped so the main checkout is the one linked.
+fn find_clone(root: &Path, repo: &str) -> Result<Option<(std::path::PathBuf, String)>, String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("cannot read {}: {err}", root.display())),
+    };
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    let mut clones: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.join(".git").is_dir())
+        .collect();
+    clones.sort_by_key(|path| {
+        let named = path
+            .file_name()
+            .is_some_and(|file| file.to_string_lossy().eq_ignore_ascii_case(name));
+        (!named, path.clone())
+    });
+    Ok(clones
+        .into_iter()
+        .find_map(|path| remote_serving(&path, repo).map(|remote| (path, remote))))
+}
+
 fn compile_patterns(patterns: &[String], key: &str) -> Result<Vec<Regex>, String> {
     patterns
         .iter()
@@ -529,7 +601,11 @@ impl GithubSource {
         mapped: bool,
     ) -> Option<String> {
         if mode.checks_out() && !mapped {
-            return Some(format!("No local checkout configured for {repo}"));
+            return Some(if self.config.clone_root.trim().is_empty() {
+                format!("No local checkout configured for {repo}")
+            } else {
+                format!("Link or clone {repo} first")
+            });
         }
         if mode.needs_agent() && self.settings(event, repo).agent.is_empty() {
             return Some(format!("No agent configured for {repo} {}", event.name()));
@@ -596,6 +672,73 @@ impl GithubSource {
             Ok(output) => Err(failure_detail(&output)),
             Err(err) => Err(err.to_string()),
         }
+    }
+
+    /// `clone_root`, expanded; `None` while linking is off.
+    fn clone_root(&self) -> Option<std::path::PathBuf> {
+        let root = self.config.clone_root.trim();
+        (!root.is_empty()).then(|| crate::worktree::expand_tilde_absolute_path(root))
+    }
+
+    /// Offered while `repo` has no clone but could get one in the clone root.
+    fn link_choice(&self, event: Event, repo: &str, mapped: bool) -> Option<WorkItemChoiceInfo> {
+        if mapped
+            || self.clone_root().is_none()
+            || !event.modes().iter().any(|mode| mode.checks_out())
+        {
+            return None;
+        }
+        Some(WorkItemChoiceInfo {
+            choice_id: LINK_CLONE_CHOICE_ID.into(),
+            label: format!("Link or clone {repo}"),
+            description: Some(format!(
+                "Uses its clone in {}, cloning it there if there is none",
+                self.config.clone_root.trim()
+            )),
+            action: WorkItemChoiceAction::Perform,
+            disabled_reason: None,
+            confirm: None,
+        })
+    }
+
+    /// Clones `repo` into a free directory of `root` named after it.
+    fn clone_into(&self, root: &Path, repo: &str) -> Result<std::path::PathBuf, String> {
+        let (owner, name) = repo
+            .split_once('/')
+            .filter(|(owner, name)| is_path_segment(owner) && is_path_segment(name))
+            .ok_or_else(|| format!("{repo} is not a repository name Herdr can clone"))?;
+        let candidates = [root.join(name), root.join(format!("{owner}-{name}"))];
+        let Some(path) = candidates.iter().find(|path| !path.exists()) else {
+            return Err(format!(
+                "{} and {} exist but are not clones of {repo}",
+                candidates[0].display(),
+                candidates[1].display()
+            ));
+        };
+        let mut command = self.gh();
+        command
+            .args(["repo", "clone", repo])
+            .arg(path)
+            .args(["--", "--quiet"])
+            .env("GIT_TERMINAL_PROMPT", "0");
+        let failure = match run_with_timeout(command, CLONE_TIMEOUT) {
+            Ok(output) if output.status.success() => return Ok(path.clone()),
+            // gh ends with "failed to run git"; git's first complaint names the cause, e.g.
+            // "Permission denied (publickey)".
+            Ok(output) => super::process::first_line(&output.stderr)
+                .unwrap_or_else(|| failure_detail(&output)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                "GitHub CLI not found; install gh or set work_items.github.gh_path".into()
+            }
+            Err(err) => err.to_string(),
+        };
+        // Only what this clone created: the directory did not exist before it.
+        if path.exists() {
+            if let Err(err) = std::fs::remove_dir_all(path) {
+                warn!(path = %path.display(), %err, "failed to remove a partial clone");
+            }
+        }
+        Err(format!("Cloning {repo} failed: {failure}"))
     }
 }
 
@@ -2048,6 +2191,9 @@ impl WorkItemSource for GithubSource {
                 confirm: None,
             })
             .collect();
+        if let Some(link) = self.link_choice(event, repo, mapped) {
+            choices.insert(0, link);
+        }
         let follow_up = match event {
             Event::ChangesRequested => Some((
                 PUSH_REPLY_CHOICE_ID,
@@ -2325,6 +2471,34 @@ impl WorkItemSource for GithubSource {
         }
         self.run_gh(&args)?;
         Ok(format!("Merged #{number} into {}", detail.base_ref_name))
+    }
+
+    fn link_clone(&self, item: &WorkItem) -> Result<(LinkedClone, String), String> {
+        let (repo, _) = parse_external_id(&item.external_id)
+            .ok_or_else(|| format!("unrecognised GitHub id {}", item.external_id))?;
+        if let Some(mapped) = self.repo(repo) {
+            return Err(format!("{repo} already has its clone at {}", mapped.path));
+        }
+        let root = self
+            .clone_root()
+            .ok_or("Set work_items.github.clone_root to link clones")?;
+        let linked = |path: std::path::PathBuf, remote: String| LinkedClone {
+            source_id: SOURCE_ID.into(),
+            name: repo.to_string(),
+            path,
+            remote,
+        };
+        if let Some((path, remote)) = find_clone(&root, repo)? {
+            let message = format!("Linked {repo} to {}", path.display());
+            return Ok((linked(path, remote), message));
+        }
+        std::fs::create_dir_all(&root)
+            .map_err(|err| format!("cannot create {}: {err}", root.display()))?;
+        let path = self.clone_into(&root, repo)?;
+        // gh names the cloned repository origin; a fork also gets its parent as upstream.
+        let remote = remote_serving(&path, repo).unwrap_or_else(|| "origin".into());
+        let message = format!("Cloned {repo} into {}", path.display());
+        Ok((linked(path, remote), message))
     }
 
     fn find_pull_request(
@@ -3474,6 +3648,124 @@ mod tests {
             local.disabled_reason.as_deref(),
             Some("No local checkout configured for o/r")
         );
+    }
+
+    #[test]
+    fn clone_root_offers_linking_an_unmapped_repository_first() {
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            clone_root: "~/projects".into(),
+            ..GithubWorkItemsConfig::default()
+        });
+        let choices = source.choices(&work_item("o/r", Some(&detail(&[("src/a.rs", 500, 0)]))));
+        let link = &choices.choices[0];
+        assert_eq!(link.choice_id, LINK_CLONE_CHOICE_ID);
+        assert_eq!(link.action, WorkItemChoiceAction::Perform);
+        assert_eq!(link.disabled_reason, None);
+        let local = choices
+            .choices
+            .iter()
+            .find(|choice| choice.choice_id == "local")
+            .expect("local review offered");
+        assert_eq!(
+            local.disabled_reason.as_deref(),
+            Some("Link or clone o/r first")
+        );
+    }
+
+    #[test]
+    fn mapped_repository_offers_no_linking() {
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            clone_root: "~/projects".into(),
+            repos: vec![repo_config()],
+            ..GithubWorkItemsConfig::default()
+        });
+        let choices = source.choices(&work_item("O/R", Some(&detail(&[("src/a.rs", 500, 0)]))));
+        assert!(choices
+            .choices
+            .iter()
+            .all(|choice| choice.choice_id != LINK_CLONE_CHOICE_ID));
+    }
+
+    #[test]
+    fn remote_urls_name_their_repository_whatever_the_protocol() {
+        for url in [
+            "git@github.com:o/r.git",
+            "https://github.com/O/R",
+            "https://github.com/o/r.git/",
+            "ssh://git@ghe.example.com/o/r.git",
+        ] {
+            assert!(remote_url_names(url, "o/r"), "{url}");
+        }
+        for url in ["git@github.com:o/rr.git", "https://github.com/me/r", "r"] {
+            assert!(!remote_url_names(url, "o/r"), "{url}");
+        }
+    }
+
+    #[test]
+    fn clone_directory_names_reject_path_tricks() {
+        assert!(is_path_segment(".github"));
+        assert!(is_path_segment("my-repo_2.0"));
+        for segment in ["", ".", "..", "a/b", "a\\b", "~"] {
+            assert!(!is_path_segment(segment), "{segment:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linking_finds_the_main_clone_whose_remote_serves_the_repository() {
+        let root = std::env::temp_dir().join(format!("herdr-link-clone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let git = |dir: &Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+                .status;
+            assert!(status.success(), "git {args:?}");
+        };
+        // Named after the repository, but a clone of another one.
+        let other = root.join("r");
+        // A fork: origin is yours, upstream serves the repository.
+        let fork = root.join("my-fork");
+        for dir in [&other, &fork] {
+            std::fs::create_dir_all(dir).expect("creates");
+            git(dir, &["init", "--quiet"]);
+        }
+        git(
+            &other,
+            &["remote", "add", "origin", "git@github.com:x/r.git"],
+        );
+        git(
+            &fork,
+            &["remote", "add", "origin", "git@github.com:me/r.git"],
+        );
+        git(
+            &fork,
+            &["remote", "add", "upstream", "https://github.com/o/r.git"],
+        );
+        // A worktree of the fork: its `.git` is a file.
+        let worktree = root.join("a-worktree");
+        std::fs::create_dir_all(&worktree).expect("creates");
+        std::fs::write(worktree.join(".git"), "gitdir: elsewhere\n").expect("writes");
+        let source = GithubSource::new(GithubWorkItemsConfig {
+            clone_root: root.display().to_string(),
+            ..GithubWorkItemsConfig::default()
+        });
+        let linked = source.link_clone(&work_item("o/r", None));
+        let _ = std::fs::remove_dir_all(&root);
+        let (clone, message) = linked.expect("links");
+        assert_eq!(
+            clone,
+            LinkedClone {
+                source_id: "github".into(),
+                name: "o/r".into(),
+                path: fork.clone(),
+                remote: "upstream".into(),
+            }
+        );
+        assert_eq!(message, format!("Linked o/r to {}", fork.display()));
     }
 
     #[test]

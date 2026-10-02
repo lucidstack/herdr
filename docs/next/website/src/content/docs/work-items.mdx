@@ -25,6 +25,19 @@ name = "acme/app"
 path = "~/src/app"
 ```
 
+### Repositories you have not mapped
+
+Work for a repository that has no `repos` entry can only be opened on GitHub, or handled by the agent without a checkout. When your clones live in one directory, name it as `clone_root` and Herdr can map such repositories as they come in, for example from your phone:
+
+```toml
+[work_items.github]
+clone_root = "~/projects"
+```
+
+The item then offers **Link or clone acme/api** first. Herdr looks through the directories directly inside `clone_root` for a clone with a remote pointing at the repository, trying the one named after it first, and links it with that remote; worktrees are skipped, so the main checkout is the one linked. When there is none, it clones the repository there with `gh repo clone`, into `~/projects/api`, or `~/projects/acme-api` when `api` is taken. Nothing outside `clone_root` is touched, and a failed clone leaves no directory behind. Once linked, the local choices are available, and the clone is listed under **repositories**.
+
+Linked clones are remembered in `work-items.json` and work exactly like `repos` entries, which win for the same repository. To change one, add a `repos` entry for it.
+
 Every poll runs one GitHub search per event. The defaults:
 
 | Event | Default query | What you can do |
