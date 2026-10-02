@@ -70,7 +70,7 @@ use terminal_geometry::{
 };
 use terminal_geometry::{
     host_cell_size_query_required, initial_terminal_geometry, query_host_cell_size,
-    query_host_terminal_theme, resize_poll_loop, should_query_host_terminal_theme,
+    query_host_terminal_theme, resize_poll_loop,
 };
 #[cfg(unix)]
 use terminal_geometry::{reported_cell_size_from_events, store_reported_cell_size};
@@ -128,7 +128,7 @@ use terminal_sessions::terminal_control_command_from_json;
 #[cfg(unix)]
 use std::collections::HashMap;
 use std::io::{self, Write as _};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::Mutex;
@@ -144,6 +144,16 @@ use crate::protocol::{self, ClientMessage, ServerMessage, MAX_GRAPHICS_FRAME_SIZ
 #[cfg(test)]
 use crate::protocol::{AttachScrollDirection, AttachScrollSource, NotifyKind};
 use crate::server::socket_paths::client_socket_path;
+
+/// The decoder for whichever optional surface encodings this connection negotiated.
+fn negotiated_surface_decoder(
+    negotiation: &endpoint::EndpointNegotiation,
+) -> Option<protocol::surface_reuse::Decoder> {
+    let reuse = negotiation.supports_capability(protocol::surface_reuse::CAPABILITY);
+    let delta = negotiation.supports_capability(protocol::surface_delta::CAPABILITY);
+    let scroll = negotiation.supports_capability(protocol::surface_scroll::CAPABILITY);
+    (reuse || delta || scroll).then(|| protocol::surface_reuse::Decoder::new(delta, scroll))
+}
 
 fn run_client_with_mode(
     attach_request: Option<(String, bool)>,
@@ -508,8 +518,9 @@ async fn run_client_loop(
     let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
 
     // Spawn the stdin reader thread.
-    let will_query_host_terminal_theme =
-        state.attach_escape.is_none() && should_query_host_terminal_theme();
+    let will_query_host_terminal_theme = state.attach_escape.is_none();
+    let host_theme_query_pending = Arc::new(AtomicU32::new(0));
+    let stdin_host_theme_query_pending = host_theme_query_pending.clone();
     // Terminals behind ConPTY report no pixel size through the ioctl, so ask the
     // host terminal directly instead of falling back to an assumed cell size.
     let will_query_host_cell_size = state.attach_escape.is_none()
@@ -531,6 +542,7 @@ async fn run_client_loop(
             stdin_tx,
             &stdin_quit,
             will_query_host_terminal_theme,
+            stdin_host_theme_query_pending,
             will_query_host_cell_size,
             stdin_mouse_capture_active,
             stdin_sgr_pixels_active,
@@ -543,9 +555,9 @@ async fn run_client_loop(
         );
     });
 
+    #[cfg(unix)]
     if will_query_host_terminal_theme {
         query_host_terminal_theme();
-        #[cfg(not(windows))]
         if state.shell.is_some() {
             query_host_terminal_appearance();
         }
@@ -586,10 +598,7 @@ async fn run_client_loop(
             handshake.endpoint_methods.unwrap_or_default(),
             handshake.endpoint_capabilities.unwrap_or_default(),
         );
-        let surface_reuse = negotiation.supports_capability(protocol::surface_reuse::CAPABILITY);
-        let surface_delta = negotiation.supports_capability(protocol::surface_delta::CAPABILITY);
-        let surface_decoder = (surface_reuse || surface_delta)
-            .then(|| protocol::surface_reuse::Decoder::new(surface_delta));
+        let surface_decoder = negotiated_surface_decoder(&negotiation);
         let transport = start_endpoint_transport(
             stream,
             (),
@@ -1170,6 +1179,31 @@ async fn run_client_loop(
                 }
                 // Direct terminal attach is Unix-only; every Windows client uses ClientShell.
             }
+            #[cfg(windows)]
+            ClientLoopEvent::NotificationActivated(target) => {
+                if let Some(shell) = state.shell.as_mut() {
+                    let outcome = shell.activate_system_notification(target);
+                    if !outcome.actions.is_empty() {
+                        crate::platform::foreground_desktop_notification_host();
+                    }
+                    let frame = outcome
+                        .repaint
+                        .then(|| shell.compose(state.reported_size.0, state.reported_size.1))
+                        .flatten();
+                    if finish_client_shell_input(
+                        &mut state,
+                        outcome,
+                        frame,
+                        &mut write_stream,
+                        &mut pending_activation,
+                        &mut endpoint_commands,
+                        &mut prefix_input_source,
+                        &mut scheduled_activation,
+                    )? {
+                        return Ok(());
+                    }
+                }
+            }
             ClientLoopEvent::TerminalUnavailable(err) => {
                 info!(err = %err, "client terminal unavailable; detaching");
                 let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
@@ -1182,6 +1216,13 @@ async fn run_client_loop(
                 cell_height_px,
                 pixel_geometry_exact,
             ) => {
+                // On Unix, palette changes may lack a color-scheme notification.
+                // Re-query on redraw, including SIGWINCH without a resize.
+                #[cfg(unix)]
+                if will_query_host_terminal_theme {
+                    host_theme_query_pending.fetch_add(1, Ordering::AcqRel);
+                    query_host_terminal_theme();
+                }
                 if !pixel_geometry_exact && host_sgr_pixels_active.load(Ordering::Acquire) {
                     set_mouse_capture(state.mouse_capture_active, false)
                         .map_err(ClientError::ConnectionFailed)?;
@@ -1276,10 +1317,7 @@ async fn run_client_loop(
                     ) {
                         continue;
                     }
-                    let surface_reuse =
-                        negotiation.supports_capability(protocol::surface_reuse::CAPABILITY);
-                    let surface_delta =
-                        negotiation.supports_capability(protocol::surface_delta::CAPABILITY);
+                    let surface_decoder = negotiated_surface_decoder(&negotiation);
                     let agent_view_projection_supported = negotiation.supports_capability(
                         crate::protocol::endpoint::AGENT_VIEW_PROJECTION_CAPABILITY,
                     );
@@ -1304,8 +1342,6 @@ async fn run_client_loop(
                     if let Some(frame) = frame {
                         state.present_frame(frame);
                     }
-                    let surface_decoder = (surface_reuse || surface_delta)
-                        .then(|| protocol::surface_reuse::Decoder::new(surface_delta));
                     let reader_tx = event_tx.clone();
                     std::thread::spawn(move || {
                         server_reader_thread(
@@ -1734,7 +1770,12 @@ async fn run_client_loop(
                                     .flatten();
                                 (effects, frame)
                             };
-                            handle_shell_notification_effects(effects, &state.sound_config);
+                            handle_shell_notification_effects(
+                                effects,
+                                &state.sound_config,
+                                #[cfg(windows)]
+                                &event_tx,
+                            );
                             if let Some(frame) = frame {
                                 state.present_frame(frame);
                             }
@@ -2291,7 +2332,12 @@ async fn run_client_loop(
                             .flatten();
                         (effects, outcome, frame)
                     };
-                    handle_shell_notification_effects(effects, &state.sound_config);
+                    handle_shell_notification_effects(
+                        effects,
+                        &state.sound_config,
+                        #[cfg(windows)]
+                        &event_tx,
+                    );
                     if finish_client_shell_input(
                         &mut state,
                         outcome,

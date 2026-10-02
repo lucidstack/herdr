@@ -24,7 +24,7 @@ mod config;
 mod copy_mode;
 mod detect;
 mod events;
-mod ghostty;
+use ghostty_vt as ghostty;
 mod handoff_runtime;
 mod input;
 mod integration;
@@ -35,7 +35,7 @@ mod logging;
 mod metadata_tokens;
 mod noninteractive_process;
 mod pane;
-mod pane_graphics_files;
+use ghostty_vt::pane_graphics_files;
 mod persist;
 mod platform;
 mod plugin_command;
@@ -522,6 +522,10 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    #[cfg(windows)]
+    if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
+        return result;
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }
