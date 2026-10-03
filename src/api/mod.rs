@@ -10,7 +10,9 @@ mod wait;
 
 pub use event_hub::EventHub;
 pub use server::ServerHandle;
-pub(crate) use server::{api_method_name, start_server_with_stop_control};
+pub(crate) use server::{
+    api_method_name, start_server_with_stop_control, MAX_INITIAL_REQUEST_BYTES,
+};
 pub use status::{read_runtime_status_at, RuntimeStatus};
 
 use std::path::PathBuf;

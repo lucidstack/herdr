@@ -189,6 +189,16 @@ pub(crate) fn forward_remote_bridge_stdio(
     Ok(())
 }
 
+pub(crate) fn forward_remote_bridge_stdio_filtered(
+    _stream: crate::ipc::LocalStream,
+    _allow: crate::remote::AllowList,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "remote-api-bridge --allow is not supported on Windows",
+    ))
+}
+
 fn copy_flush<R: std::io::Read, W: std::io::Write>(
     reader: &mut R,
     writer: &mut W,

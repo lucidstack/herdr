@@ -33,6 +33,17 @@ pub(crate) fn forward_remote_bridge_stdio(
 }
 
 #[cfg(not(unix))]
+pub(crate) fn forward_remote_bridge_stdio_filtered(
+    _stream: crate::ipc::LocalStream,
+    _allow: crate::remote::AllowList,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "remote-api-bridge --allow is not supported on this platform",
+    ))
+}
+
+#[cfg(not(unix))]
 pub(super) fn read_terminal_grid_size() -> std::io::Result<(u16, u16)> {
     crossterm::terminal::size()
 }

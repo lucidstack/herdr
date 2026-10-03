@@ -84,6 +84,34 @@ Requests and responses travel through the JSON API over non-interactive SSH; API
 
 Local pane IDs are not inherited by remote commands. Use explicit remote IDs; `--current` cannot refer to the caller's local pane. Remote worktree paths must be absolute, `~`, or start with `~/` (expanded on the server); plugin link paths must be absolute. The prefix targets one machine at a time; combined listings and routing through another TUI's connections are not included.
 
+## Remote API bridge
+
+```bash
+herdr remote-api-bridge
+herdr remote-api-bridge --check
+herdr remote-api-bridge --allow <method>[,<method>...]
+```
+
+`remote-api-bridge` pipes standard input and output to the session's JSON API socket. `--machine` and saved SSH machines run it over SSH for you; `--check` prints the bridge capability marker (`herdr-api-bridge-v1`) and exits.
+
+Add `--allow` when the bridge is a forced command for a key that should only reach part of the API, such as a phone key. The value is a comma-separated list of API method names, for example `agent.list` or `work_item.list`. List the names with `herdr api schema --json`. `plugin.action.invoke` may be given bare to allow any plugin action, or as `plugin.action.invoke:<plugin_id>/<action_id>` to allow only that action. Qualified requests must name `plugin_id` explicitly. An unknown method name or a malformed entry stops the bridge at startup with a usage error, so a typo never silently denies everything.
+
+With `--allow` the bridge reads each request line from the client and checks only its `id` and `method` (and, for qualified plugin actions, `params.plugin_id` and `params.action_id`). An allowed line reaches the API socket unchanged. Any other line is not forwarded; the bridge answers it on standard output instead:
+
+```json
+{"id":"req-7","error":{"code":"method_not_allowed","message":"server.stop isn't allowed for this key"}}
+```
+
+A line that isn't a JSON request with a `method`, or that is longer than the API's 1 MiB request limit, gets an `invalid_request` error with an empty `id` and is not forwarded. Responses and event streams from the server pass through unchanged, a whole line at a time. Without `--allow` the bridge is the same raw pipe as before. `--allow` is supported on Linux and macOS; on Windows the bridge refuses to start with it.
+
+Example `authorized_keys` line for a phone key that can list work items and agents, prompt an agent, and register for push notifications:
+
+```text
+restrict,command="herdr --session work remote-api-bridge --allow work_item.list,agent.list,agent.prompt,plugin.action.invoke:lucidstack.herdr-push/register" ecdsa-sha2-nistp256 AAAA… phone
+```
+
+The allow-list limits which API methods the key can call. It does not narrow what an allowed method can do: `agent.prompt` can still send any prompt to any agent.
+
 ## Shell completions
 
 ```bash
