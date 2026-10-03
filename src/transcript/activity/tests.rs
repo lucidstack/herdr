@@ -11,6 +11,7 @@ type Status = AgentActivityToolStatus;
 const CLAUDE: TranscriptFormat = TranscriptFormat::Claude;
 const OMP: TranscriptFormat = TranscriptFormat::Omp;
 
+mod images;
 mod paging;
 
 fn lines_of(text: &str, chunk: usize) -> ReverseLines<io::Cursor<Vec<u8>>> {

@@ -407,8 +407,9 @@ pub struct AgentActivityEntry {
     /// Present when `kind` is `tool`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<AgentActivityTool>,
-    /// How many images the prompt or tool result carried. The images themselves are not sent.
-    /// Absent when there were none.
+    /// How many images the prompt or tool result carried. They are not sent here: fetch each
+    /// with `agent.image`, by this entry's `id` and an `index` below the count. Absent when
+    /// there were none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<u32>,
 }
@@ -557,6 +558,62 @@ pub struct AgentHistoryInfo {
     pub reset: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentImageParams {
+    pub target: String,
+    /// The `id` of an `agent.activity` or `agent.history` entry that has `images`: a prompt's
+    /// or a tool call's. At most 256 bytes.
+    pub entry_id: String,
+    /// Which of the entry's images, from 0 (the default) to one below its `images`.
+    #[serde(default)]
+    pub index: u32,
+}
+
+/// Whether an image of an agent's transcript could be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentImageStatus {
+    /// `media_type`, `byte_count` and `data` hold the image.
+    Available,
+    /// The transcript has no entry with this id, the entry has no image at `index`, or the
+    /// file the transcript refers to for the image is gone.
+    NotFound,
+    /// The image is larger than 10 MiB; `byte_count` says how large, and no `data` is sent.
+    TooLarge,
+    /// The agent's integration has not reported a transcript for its current session.
+    NoTranscript,
+    /// Herdr has no reader for this agent's transcript format, or the transcript holds the
+    /// image in a form Herdr cannot read, such as a link.
+    UnsupportedFormat,
+    /// The transcript or the image's file could not be read.
+    Unreadable,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One image an agent's transcript holds, as it was sent to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentImageInfo {
+    pub pane_id: String,
+    /// The agent, e.g. "omp" or "claude".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: AgentImageStatus,
+    pub entry_id: String,
+    pub index: u32,
+    /// The image's type as the transcript records it, e.g. "image/png". Present when
+    /// `status` is `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// The image's size in bytes, decoded. Present when `status` is `available` or
+    /// `too_large`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_count: Option<u64>,
+    /// The image's bytes in standard base64. Present when `status` is `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// Something Herdr did outside the agent's session that the agent should know about, e.g.

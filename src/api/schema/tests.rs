@@ -355,6 +355,134 @@ fn agent_history_result_from_a_newer_server_still_decodes() {
 }
 
 #[test]
+fn agent_image_request_round_trips_and_index_defaults_to_zero() {
+    let request = Request {
+        id: "req_image".into(),
+        method: Method::AgentImage(AgentImageParams {
+            target: "w4:p1".into(),
+            entry_id: "toolu_01ABC".into(),
+            index: 2,
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "agent.image");
+    assert_eq!(
+        json["params"],
+        serde_json::json!({"target": "w4:p1", "entry_id": "toolu_01ABC", "index": 2})
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let bare: Request = serde_json::from_str(
+        r#"{"id":"1","method":"agent.image","params":{"target":"w4:p1","entry_id":"toolu_01ABC"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        bare.method,
+        Method::AgentImage(AgentImageParams {
+            target: "w4:p1".into(),
+            entry_id: "toolu_01ABC".into(),
+            index: 0,
+        })
+    );
+}
+
+#[test]
+fn agent_image_result_serialises_with_the_documented_keys() {
+    let available = SuccessResponse {
+        id: "req_1".into(),
+        result: ResponseResult::AgentImage {
+            image: AgentImageInfo {
+                pane_id: "w4:p1".into(),
+                agent: Some("claude".into()),
+                status: AgentImageStatus::Available,
+                entry_id: "toolu_01ABC".into(),
+                index: 0,
+                media_type: Some("image/png".into()),
+                byte_count: Some(8),
+                data: Some("iVBORw0KGgo=".into()),
+            },
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&available).unwrap(),
+        serde_json::json!({
+            "id": "req_1",
+            "result": {"type": "agent_image", "image": {
+                "pane_id": "w4:p1",
+                "agent": "claude",
+                "status": "available",
+                "entry_id": "toolu_01ABC",
+                "index": 0,
+                "media_type": "image/png",
+                "byte_count": 8,
+                "data": "iVBORw0KGgo=",
+            }},
+        })
+    );
+
+    let too_large = SuccessResponse {
+        id: "req_2".into(),
+        result: ResponseResult::AgentImage {
+            image: AgentImageInfo {
+                pane_id: "w4:p1".into(),
+                agent: None,
+                status: AgentImageStatus::TooLarge,
+                entry_id: "u1".into(),
+                index: 1,
+                media_type: None,
+                byte_count: Some(11_000_000),
+                data: None,
+            },
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&too_large).unwrap()["result"]["image"],
+        serde_json::json!({
+            "pane_id": "w4:p1",
+            "status": "too_large",
+            "entry_id": "u1",
+            "index": 1,
+            "byte_count": 11_000_000,
+        })
+    );
+}
+
+#[test]
+fn agent_image_statuses_are_snake_case_and_a_newer_one_decodes_as_unknown() {
+    for (status, wire) in [
+        (AgentImageStatus::Available, "available"),
+        (AgentImageStatus::NotFound, "not_found"),
+        (AgentImageStatus::TooLarge, "too_large"),
+        (AgentImageStatus::NoTranscript, "no_transcript"),
+        (AgentImageStatus::UnsupportedFormat, "unsupported_format"),
+        (AgentImageStatus::Unreadable, "unreadable"),
+    ] {
+        assert_eq!(serde_json::to_value(status).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<AgentImageStatus>(serde_json::json!(wire)).unwrap(),
+            status
+        );
+    }
+
+    let response: SuccessResponse = serde_json::from_value(serde_json::json!({
+        "id": "1",
+        "result": {"type": "agent_image", "image": {
+            "pane_id": "w4:p1",
+            "status": "not_yet_invented",
+            "entry_id": "u1",
+            "index": 0,
+        }},
+    }))
+    .unwrap();
+    let ResponseResult::AgentImage { image } = response.result else {
+        panic!("not an image result");
+    };
+    assert_eq!(image.status, AgentImageStatus::Unknown);
+    assert_eq!(image.data, None);
+}
+
+#[test]
 fn workspace_close_group_intent_defaults_false_and_round_trips() {
     let request: Request = serde_json::from_value(serde_json::json!({
         "id": "close",

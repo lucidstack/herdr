@@ -169,6 +169,8 @@ pub enum Method {
     AgentActivity(AgentActivityParams),
     #[serde(rename = "agent.history")]
     AgentHistory(AgentHistoryParams),
+    #[serde(rename = "agent.image")]
+    AgentImage(AgentImageParams),
     #[serde(rename = "agent.notes.take")]
     AgentNotesTake(AgentTarget),
     #[serde(rename = "agent.notes.add")]
