@@ -45,7 +45,7 @@ Every poll runs one GitHub search per event. The defaults:
 | `review_requested` | `is:pr is:open review-requested:@me archived:false` | **Review** it with the agent, in a worktree or from a downloaded diff, and optionally have the agent post its review on GitHub |
 | `changes_requested` | `is:pr is:open author:@me review:changes_requested archived:false` | Work on the feedback locally, have the agent address it, then have the agent push and reply |
 | `ci_failing` | `is:pr is:open author:@me status:failure archived:false` | Diagnose the failures locally, have the agent fix them, then have the agent push the fix |
-| `assigned` | `is:issue is:open assignee:@me archived:false` | Plan it locally, or have the agent implement it |
+| `assigned` | `is:issue is:open assignee:@me archived:false` | Plan it locally, or have the agent implement it and finish it the way the repository's agent instructions (`AGENTS.md`, `CLAUDE.md`) say; without such instructions it does not commit or push |
 | `mentioned` | off | Have the agent read the thread and draft a reply |
 | `ready_to_merge` | `is:pr is:open author:@me draft:false archived:false`, keeping those approved | Merge it, with any method the repository allows |
 
