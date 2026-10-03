@@ -5424,6 +5424,28 @@
           },
           "type": "object"
         },
+        "WorkspaceDiffParams": {
+          "properties": {
+            "path": {
+              "description": "Only this file, as `files[].path` (or `old_path`) names it, with a 2 MiB patch\nallowance instead of 128 KiB.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "summary_only": {
+              "description": "Leave out every patch, for the counts alone.",
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
         "WorkspaceMoveBlockParams": {
           "properties": {
             "before_workspace_id": {
@@ -5971,6 +5993,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.diff",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceDiffParams"
             }
           },
           "required": [
@@ -11386,6 +11424,22 @@
             },
             {
               "properties": {
+                "diff": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceDiffInfo"
+                },
+                "type": {
+                  "const": "workspace_diff",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "diff"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "source": {
                   "$ref": "#/schemas/success_response/$defs/WorktreeSourceInfo"
                 },
@@ -13511,6 +13565,231 @@
             "url"
           ],
           "type": "object"
+        },
+        "WorkspaceDiffBase": {
+          "description": "What `workspace.diff` compares the working tree with.",
+          "properties": {
+            "commit": {
+              "description": "The merge-base of `HEAD` with that branch.",
+              "type": "string"
+            },
+            "ref_name": {
+              "description": "The branch the base was found from, e.g. \"origin/main\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "commit"
+          ],
+          "type": "object"
+        },
+        "WorkspaceDiffFile": {
+          "properties": {
+            "additions": {
+              "description": "Lines added, absent for binary files.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "binary": {
+              "default": false,
+              "type": "boolean"
+            },
+            "deletions": {
+              "description": "Lines deleted, absent for binary files.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "old_path": {
+              "description": "Present when `status` is `renamed` or `copied`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "patch": {
+              "description": "The file's unified diff hunks, from its first `@@` line, without the `diff --git`,\n`index`, `---` and `+++` headers. Absent for binary files, with `summary_only`, and\nwhen left out for size, which `patch_truncated` says.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "patch_truncated": {
+              "default": false,
+              "description": "The patch was left out because it, or the reply's patches before it, were too large.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "Relative to `directory`.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/WorkspaceDiffFileStatus"
+            }
+          },
+          "required": [
+            "path",
+            "status"
+          ],
+          "type": "object"
+        },
+        "WorkspaceDiffFileStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "added",
+                "modified",
+                "deleted",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "renamed",
+              "description": "Moved, perhaps with changes; `old_path` names where it was.",
+              "type": "string"
+            },
+            {
+              "const": "copied",
+              "description": "`old_path` names the file it was copied from.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "Turned from a file into a symbolic link or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "untracked",
+              "description": "Not tracked by Git and not ignored.",
+              "type": "string"
+            }
+          ]
+        },
+        "WorkspaceDiffInfo": {
+          "description": "What changed in a workspace's checkout: the working tree, with committed, staged,\nunstaged and untracked changes, against `base`.",
+          "properties": {
+            "additions": {
+              "default": 0,
+              "description": "Lines added across the listed text files.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "base": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceDiffBase"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "`null` when no base branch was found: `files` then holds only the changes not yet\ncommitted."
+            },
+            "branch": {
+              "default": null,
+              "description": "The checked-out branch; `null` when `HEAD` is detached.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "deletions": {
+              "default": 0,
+              "description": "Lines deleted across the listed text files.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "directory": {
+              "description": "The checkout's top-level directory, which `files` paths are relative to. When the\nworkspace is not in a work tree, its own directory; absent when it has none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "description": "Git's message when `status` is `unreadable`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "files": {
+              "default": [],
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkspaceDiffFile"
+              },
+              "type": "array"
+            },
+            "head": {
+              "default": null,
+              "description": "The commit `HEAD` points at; `null` on a branch with no commit yet.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/WorkspaceDiffStatus"
+            },
+            "truncated": {
+              "default": false,
+              "description": "More files changed than are listed.",
+              "type": "boolean"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        "WorkspaceDiffStatus": {
+          "description": "Whether a workspace's changes could be read.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "`files` holds the changes.",
+              "type": "string"
+            },
+            {
+              "const": "no_directory",
+              "description": "The workspace has no directory.",
+              "type": "string"
+            },
+            {
+              "const": "not_a_repository",
+              "description": "The workspace's directory is not in a Git work tree.",
+              "type": "string"
+            },
+            {
+              "const": "unreadable",
+              "description": "Git failed or timed out; `error` carries its message.",
+              "type": "string"
+            }
+          ]
         },
         "WorkspaceInfo": {
           "properties": {

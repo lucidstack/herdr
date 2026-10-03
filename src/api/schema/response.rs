@@ -24,7 +24,7 @@ use super::work_items::{
     AgentAttentionInfo, WorkItemInfo, WorkItemPickNextInfo, WorkItemRepositoryInfo,
     WorkItemSourceInfo, WorkItemTicketComment, WorkItemTicketInfo,
 };
-use super::workspaces::WorkspaceInfo;
+use super::workspaces::{WorkspaceDiffInfo, WorkspaceInfo};
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -67,6 +67,9 @@ pub enum ResponseResult {
     },
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
+    },
+    WorkspaceDiff {
+        diff: WorkspaceDiffInfo,
     },
     WorktreeList {
         source: WorktreeSourceInfo,

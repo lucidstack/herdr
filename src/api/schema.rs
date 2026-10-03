@@ -83,6 +83,8 @@ pub enum Method {
     WorkspaceList(EmptyParams),
     #[serde(rename = "workspace.get")]
     WorkspaceGet(WorkspaceTarget),
+    #[serde(rename = "workspace.diff")]
+    WorkspaceDiff(WorkspaceDiffParams),
     #[serde(rename = "workspace.focus")]
     WorkspaceFocus(WorkspaceTarget),
     #[serde(rename = "workspace.rename")]

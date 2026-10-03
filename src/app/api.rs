@@ -11,6 +11,7 @@ pub(super) mod responses;
 mod session;
 mod tabs;
 mod work_items;
+mod workspace_diff;
 mod workspaces;
 mod worktrees;
 
@@ -1051,6 +1052,13 @@ impl App {
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
+            Method::WorkspaceDiff(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "workspace.diff is handled asynchronously by the app runtime",
+                );
+            }
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }
