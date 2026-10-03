@@ -2026,6 +2026,29 @@
           ],
           "type": "object"
         },
+        "AgentImageParams": {
+          "properties": {
+            "entry_id": {
+              "description": "The `id` of an `agent.activity` or `agent.history` entry that has `images`: a prompt's\nor a tool call's. At most 256 bytes.",
+              "type": "string"
+            },
+            "index": {
+              "default": 0,
+              "description": "Which of the entry's images, from 0 (the default) to one below its `images`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "entry_id"
+          ],
+          "type": "object"
+        },
         "AgentNotesAddParams": {
           "properties": {
             "target": {
@@ -6670,6 +6693,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.image",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentImageParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.notes.take",
               "type": "string"
             },
@@ -7813,7 +7852,7 @@
               "type": "string"
             },
             "images": {
-              "description": "How many images the prompt or tool result carried. The images themselves are not sent.\nAbsent when there were none.",
+              "description": "How many images the prompt or tool result carried. They are not sent here: fetch each\nwith `agent.image`, by this entry's `id` and an `index` below the count. Absent when\nthere were none.",
               "format": "uint32",
               "minimum": 0,
               "type": [
@@ -8324,6 +8363,103 @@
             "finished"
           ],
           "type": "object"
+        },
+        "AgentImageInfo": {
+          "description": "One image an agent's transcript holds, as it was sent to the model.",
+          "properties": {
+            "agent": {
+              "description": "The agent, e.g. \"omp\" or \"claude\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "byte_count": {
+              "description": "The image's size in bytes, decoded. Present when `status` is `available` or\n`too_large`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "data": {
+              "description": "The image's bytes in standard base64. Present when `status` is `available`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "entry_id": {
+              "type": "string"
+            },
+            "index": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "media_type": {
+              "description": "The image's type as the transcript records it, e.g. \"image/png\". Present when\n`status` is `available`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentImageStatus"
+            }
+          },
+          "required": [
+            "pane_id",
+            "status",
+            "entry_id",
+            "index"
+          ],
+          "type": "object"
+        },
+        "AgentImageStatus": {
+          "description": "Whether an image of an agent's transcript could be read.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "`media_type`, `byte_count` and `data` hold the image.",
+              "type": "string"
+            },
+            {
+              "const": "not_found",
+              "description": "The transcript has no entry with this id, the entry has no image at `index`, or the\nfile the transcript refers to for the image is gone.",
+              "type": "string"
+            },
+            {
+              "const": "too_large",
+              "description": "The image is larger than 10 MiB; `byte_count` says how large, and no `data` is sent.",
+              "type": "string"
+            },
+            {
+              "const": "no_transcript",
+              "description": "The agent's integration has not reported a transcript for its current session.",
+              "type": "string"
+            },
+            {
+              "const": "unsupported_format",
+              "description": "Herdr has no reader for this agent's transcript format, or the transcript holds the\nimage in a form Herdr cannot read, such as a link.",
+              "type": "string"
+            },
+            {
+              "const": "unreadable",
+              "description": "The transcript or the image's file could not be read.",
+              "type": "string"
+            }
+          ]
         },
         "AgentInfo": {
           "properties": {
@@ -11607,6 +11743,22 @@
               "required": [
                 "type",
                 "history"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "image": {
+                  "$ref": "#/schemas/success_response/$defs/AgentImageInfo"
+                },
+                "type": {
+                  "const": "agent_image",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "image"
               ],
               "type": "object"
             },

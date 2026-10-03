@@ -462,6 +462,10 @@ fn handle_connection_with_stop(
             let response = super::activity::agent_history(request_id.clone(), params, api_tx);
             finish_wait_response(&mut stream, Some(response), &request_id, method, changes_ui)
         }
+        Method::AgentImage(params) => {
+            let response = super::activity::agent_image(request_id.clone(), params, api_tx);
+            finish_wait_response(&mut stream, Some(response), &request_id, method, changes_ui)
+        }
         Method::PaneWaitForOutput(params) => {
             let response =
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?;
@@ -639,6 +643,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentDismiss(_) => "agent.dismiss",
         Method::AgentActivity(_) => "agent.activity",
         Method::AgentHistory(_) => "agent.history",
+        Method::AgentImage(_) => "agent.image",
         Method::AgentNotesTake(_) => "agent.notes.take",
         Method::AgentNotesAdd(_) => "agent.notes.add",
         Method::PaneSplit(_) => "pane.split",

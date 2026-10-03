@@ -6,10 +6,13 @@ use std::path::Path;
 
 use crate::api::schema::{
     AgentActivityInfo, AgentActivityParams, AgentActivityStatus, AgentHistoryInfo,
-    AgentHistoryParams, AgentInfo, ErrorBody, ErrorResponse, ResponseResult, SuccessResponse,
+    AgentHistoryParams, AgentImageInfo, AgentImageParams, AgentImageStatus, AgentInfo, ErrorBody,
+    ErrorResponse, ResponseResult, SuccessResponse,
 };
 use crate::api::ApiRequestSender;
-use crate::transcript::{TranscriptFormat, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS};
+use crate::transcript::{
+    ImageLookup, TranscriptFormat, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS,
+};
 
 use super::last_message::encode;
 
@@ -71,6 +74,35 @@ pub(super) fn agent_history(
                 turns,
                 params.include_thinking,
             ),
+        },
+    })
+}
+
+/// The longest entry id a request may name. Ids are UUIDs and tool call ids, far shorter.
+const MAX_ENTRY_ID_BYTES: usize = 256;
+
+pub(super) fn agent_image(
+    request_id: String,
+    params: AgentImageParams,
+    api_tx: &ApiRequestSender,
+) -> String {
+    if params.entry_id.is_empty() || params.entry_id.len() > MAX_ENTRY_ID_BYTES {
+        return encode(&ErrorResponse {
+            id: request_id,
+            error: ErrorBody {
+                code: "invalid_params".into(),
+                message: format!("entry_id must be between 1 and {MAX_ENTRY_ID_BYTES} bytes"),
+            },
+        });
+    }
+    let agent = match super::wait::agent_get(&request_id, &params.target, api_tx) {
+        Ok(agent) => agent,
+        Err(response) => return encode(&response),
+    };
+    encode(&SuccessResponse {
+        id: request_id,
+        result: ResponseResult::AgentImage {
+            image: read_image(agent, params.entry_id, params.index),
         },
     })
 }
@@ -201,6 +233,49 @@ fn read_history(
         Err(error) => {
             tracing::warn!(path, %error, "failed to read agent transcript");
             info.status = AgentActivityStatus::Unreadable;
+        }
+    }
+    info
+}
+
+fn read_image(agent: AgentInfo, entry_id: String, index: u32) -> AgentImageInfo {
+    let (session_agent, transcript_path) = session_of(&agent);
+    let mut info = AgentImageInfo {
+        pane_id: agent.pane_id,
+        agent: session_agent,
+        status: AgentImageStatus::NoTranscript,
+        entry_id,
+        index,
+        media_type: None,
+        byte_count: None,
+        data: None,
+    };
+    let (path, format) = match reader(transcript_path.as_deref(), info.agent.as_deref()) {
+        Ok(reader) => reader,
+        Err(status) => {
+            info.status = match status {
+                AgentActivityStatus::UnsupportedFormat => AgentImageStatus::UnsupportedFormat,
+                _ => AgentImageStatus::NoTranscript,
+            };
+            return info;
+        }
+    };
+    match crate::transcript::find_image(format, Path::new(path), &info.entry_id, index) {
+        Ok(ImageLookup::Found(image)) => {
+            info.status = AgentImageStatus::Available;
+            info.media_type = Some(image.media_type);
+            info.byte_count = Some(image.byte_count);
+            info.data = Some(image.data);
+        }
+        Ok(ImageLookup::TooLarge { byte_count }) => {
+            info.status = AgentImageStatus::TooLarge;
+            info.byte_count = Some(byte_count);
+        }
+        Ok(ImageLookup::NotFound) => info.status = AgentImageStatus::NotFound,
+        Ok(ImageLookup::Unsupported) => info.status = AgentImageStatus::UnsupportedFormat,
+        Err(error) => {
+            tracing::warn!(path, %error, "failed to read agent transcript image");
+            info.status = AgentImageStatus::Unreadable;
         }
     }
     info
@@ -479,5 +554,88 @@ mod tests {
         assert_eq!(info.agent.as_deref(), Some("claude"));
         let ids: Vec<_> = info.turns.iter().map(|turn| turn.id.as_str()).collect();
         assert_eq!(ids, ["u1", "u2"]);
+    }
+
+    fn claude_prompt_with_image() -> String {
+        let line = json!({"type": "user", "uuid": "u1", "timestamp": "t1",
+        "message": {"role": "user", "content": [
+            {"type": "text", "text": "Look"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                "data": "/9j/4A=="}},
+        ]}});
+        format!("{line}\n")
+    }
+
+    #[test]
+    fn invalid_entry_ids_are_rejected_before_the_agent_is_looked_up() {
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel();
+        for entry_id in [String::new(), "x".repeat(MAX_ENTRY_ID_BYTES + 1)] {
+            let response = agent_image(
+                "req_1".into(),
+                AgentImageParams {
+                    target: "w1:p1".into(),
+                    entry_id,
+                    index: 0,
+                },
+                &api_tx,
+            );
+
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.id, "req_1");
+            assert_eq!(error.error.code, "invalid_params");
+        }
+        assert!(api_rx.try_recv().is_err(), "the app was never asked");
+    }
+
+    #[test]
+    fn image_says_why_there_is_nothing_to_read() {
+        let codex = transcript_file("image-codex.jsonl", &claude_prompt_with_image());
+        let missing = std::env::temp_dir().join("herdr-api-image-missing.jsonl");
+        let cases = [
+            (
+                agent_info(Some("claude"), None),
+                AgentImageStatus::NoTranscript,
+            ),
+            (
+                agent_info(Some("claude"), Some(("claude", None))),
+                AgentImageStatus::NoTranscript,
+            ),
+            (
+                agent_info(Some("codex"), Some(("codex", codex.to_str()))),
+                AgentImageStatus::UnsupportedFormat,
+            ),
+            (
+                agent_info(Some("claude"), Some(("claude", missing.to_str()))),
+                AgentImageStatus::Unreadable,
+            ),
+        ];
+
+        for (agent, status) in cases {
+            let info = read_image(agent, "u1".into(), 0);
+
+            assert_eq!(info.status, status);
+            assert_eq!(info.data, None);
+        }
+    }
+
+    #[test]
+    fn image_is_read_in_the_sessions_format_and_echoes_the_request() {
+        let path = transcript_file("image-claude.jsonl", &claude_prompt_with_image());
+        // The pane may still be labelled as another agent; the session decides the format.
+        let agent = agent_info(Some("omp"), Some(("claude", path.to_str())));
+
+        let info = read_image(agent.clone(), "u1".into(), 0);
+
+        assert_eq!(info.status, AgentImageStatus::Available);
+        assert_eq!(info.pane_id, "w1:p1");
+        assert_eq!(info.agent.as_deref(), Some("claude"));
+        assert_eq!((info.entry_id.as_str(), info.index), ("u1", 0));
+        assert_eq!(info.media_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(info.byte_count, Some(4));
+        assert_eq!(info.data.as_deref(), Some("/9j/4A=="));
+
+        let past_the_end = read_image(agent, "u1".into(), 1);
+        assert_eq!(past_the_end.status, AgentImageStatus::NotFound);
+        assert_eq!(past_the_end.data, None);
     }
 }

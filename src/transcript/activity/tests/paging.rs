@@ -28,12 +28,12 @@ fn chain(lines: &[String], id_key: &str, parent_key: &str, start: Option<&str>) 
 }
 
 /// Claude Code lines in a row, each following the one before, the first following `start`.
-fn claude_chain(start: Option<&str>, lines: &[String]) -> Vec<String> {
+pub(super) fn claude_chain(start: Option<&str>, lines: &[String]) -> Vec<String> {
     chain(lines, "uuid", "parentUuid", start)
 }
 
 /// omp entries in a row, each following the one before.
-fn omp_chain(lines: &[String]) -> Vec<String> {
+pub(super) fn omp_chain(lines: &[String]) -> Vec<String> {
     chain(lines, "id", "parentId", None)
 }
 
@@ -160,7 +160,12 @@ fn page_of(
 }
 
 /// A page of the lines, which has turns.
-fn page(format: TranscriptFormat, lines: &[String], before: Option<&str>, turns: usize) -> History {
+pub(super) fn page(
+    format: TranscriptFormat,
+    lines: &[String],
+    before: Option<&str>,
+    turns: usize,
+) -> History {
     page_of(format, &transcript(lines), before, turns, false).expect("a page")
 }
 

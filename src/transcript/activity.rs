@@ -37,12 +37,14 @@ use crate::api::schema::{
 
 mod claude;
 mod history;
+mod image;
 mod omp;
 mod scan;
 #[cfg(test)]
 mod tests;
 
 pub use history::{history, DEFAULT_TURNS, MAX_TURNS};
+pub use image::{find_image, ImageLookup};
 use scan::Scan;
 
 /// Entries returned when a request names no limit.
@@ -764,16 +766,20 @@ fn message_text(content: Option<&Value>) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-/// How many image blocks a message's content holds.
-fn count_images(content: Option<&Value>) -> u32 {
-    let Some(Value::Array(blocks)) = content else {
-        return 0;
+/// The image blocks of a message's content, in order.
+fn image_blocks(content: Option<&Value>) -> impl Iterator<Item = &Value> {
+    let blocks: &[Value] = match content {
+        Some(Value::Array(blocks)) => blocks,
+        _ => &[],
     };
-    let images = blocks
+    blocks
         .iter()
         .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .count();
-    u32::try_from(images).unwrap_or(u32::MAX)
+}
+
+/// How many image blocks a message's content holds.
+fn count_images(content: Option<&Value>) -> u32 {
+    u32::try_from(image_blocks(content).count()).unwrap_or(u32::MAX)
 }
 
 /// How a tool call reads in the feed, before its result arrives. `intent` is what the agent
