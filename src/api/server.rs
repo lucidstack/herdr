@@ -619,6 +619,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::WorkItemLink(_) => "work_item.link",
         Method::WorkItemSearch(_) => "work_item.search",
         Method::WorkItemShow(_) => "work_item.show",
+        Method::WorkItemImage(_) => "work_item.image",
         Method::WorkItemAdd(_) => "work_item.add",
         Method::WorkItemPickNextStart(_) => "work_item.pick_next_start",
         Method::TabCreate(_) => "tab.create",

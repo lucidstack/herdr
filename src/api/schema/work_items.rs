@@ -48,6 +48,51 @@ pub struct WorkItemTicketTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemImageParams {
+    /// Configured source whose credentials fetch the image, e.g. `github`.
+    pub source_id: String,
+    /// The image's address as a ticket's description or comment gives it, e.g.
+    /// `https://github.com/user-attachments/assets/<id>`.
+    pub url: String,
+}
+
+/// Whether an image a ticket points at could be fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkItemImageStatus {
+    /// `media_type`, `byte_count` and `data` hold the image.
+    Available,
+    /// The tracker has nothing at this address, or nothing you may read.
+    NotFound,
+    /// The file is larger than 10 MiB; `byte_count` says how large, and no `data` is sent.
+    TooLarge,
+    /// The file is not a PNG, JPEG, GIF or WebP image, e.g. a video.
+    NotAnImage,
+    /// The source does not fetch this address: for GitHub, anything other than an image
+    /// attachment on github.com. A client fetches such an address itself.
+    UnsupportedUrl,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One image a ticket points at, fetched with the source's credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemImageInfo {
+    pub source_id: String,
+    pub url: String,
+    pub status: WorkItemImageStatus,
+    /// The image's type, e.g. "image/png". Present when `status` is `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// The file's size in bytes. Present when `status` is `available` or `too_large`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_count: Option<u64>,
+    /// The image's bytes in standard base64. Present when `status` is `available`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItemPickNextStartParams {
     /// Configured source whose "Pick next" discovery workspace is started or reused.
     pub source_id: String,

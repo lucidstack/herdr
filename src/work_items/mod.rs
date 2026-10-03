@@ -30,7 +30,9 @@ use crate::config::{GithubRepoConfig, WorkItemsConfig};
 pub(crate) use changes::{ItemChange, ItemChanges};
 use provision::ProvisionJob;
 use source::LinkedClone;
-pub(crate) use source::{PreparedItem, ProvisionPlan, SourceItem, TicketDetail, WorkItemSource};
+pub(crate) use source::{
+    PreparedItem, ProvisionPlan, SourceItem, TicketDetail, TicketImage, WorkItemSource,
+};
 use state::{NotFound, WorkItem, WorkItemsState};
 use store::StoreWriter;
 

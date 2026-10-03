@@ -42,6 +42,54 @@ pub(crate) struct TicketDetail {
     pub source_item: SourceItem,
 }
 
+/// An image a ticket points at, as its source fetched it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TicketImage {
+    Available {
+        media_type: &'static str,
+        bytes: Vec<u8>,
+    },
+    NotFound,
+    TooLarge {
+        byte_count: u64,
+    },
+    NotAnImage,
+    UnsupportedUrl,
+}
+
+/// The most `work_item.image` sends, as for `agent.image`.
+pub(crate) const MAX_TICKET_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+impl TicketImage {
+    /// `bytes` as fetched: too large, not an image, or the image with its type.
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
+        if bytes.len() > MAX_TICKET_IMAGE_BYTES {
+            return Self::TooLarge {
+                byte_count: bytes.len() as u64,
+            };
+        }
+        match image_media_type(&bytes) {
+            Some(media_type) => Self::Available { media_type, bytes },
+            None => Self::NotAnImage,
+        }
+    }
+}
+
+/// The type of a PNG, JPEG, GIF or WebP file, from its first bytes.
+fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ItemChoices {
     pub choices: Vec<WorkItemChoiceInfo>,
@@ -248,6 +296,11 @@ pub(crate) trait WorkItemSource: Send + Sync {
     /// Blocking; background thread only. Fetches one ticket by its tracker key (e.g.
     /// `TECH-123` or `owner/repo#12`); `None` when the key does not exist.
     fn fetch(&self, key: &str) -> Result<Option<TicketDetail>, String>;
+    /// Blocking; background thread only. Fetches an image a ticket's description or comment
+    /// points at, with the source's credentials. Sources that fetch none leave this as is.
+    fn image(&self, _url: &str) -> Result<TicketImage, String> {
+        Ok(TicketImage::UnsupportedUrl)
+    }
     /// Pure: plan for this provider's shared "Pick next" discovery workspace (a scratch
     /// directory; no checkout) running `agent`, briefed with `context` (may be empty) to
     /// investigate the tracker read-only and recommend what to work on next.
@@ -352,6 +405,30 @@ pub(crate) trait WorkItemSource: Send + Sync {
 mod tests {
     use super::*;
     use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceOptionInfo};
+
+    #[test]
+    fn ticket_image_bytes_are_typed_by_their_first_bytes_and_capped() {
+        let typed = |bytes: &[u8]| match TicketImage::from_bytes(bytes.to_vec()) {
+            TicketImage::Available { media_type, .. } => Some(media_type),
+            _ => None,
+        };
+        assert_eq!(typed(b"\x89PNG\r\n\x1a\n..."), Some("image/png"));
+        assert_eq!(typed(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
+        assert_eq!(typed(b"GIF89a..."), Some("image/gif"));
+        assert_eq!(typed(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+        assert_eq!(
+            TicketImage::from_bytes(b"<!DOCTYPE html>".to_vec()),
+            TicketImage::NotAnImage
+        );
+        let mut huge = b"\x89PNG\r\n\x1a\n".to_vec();
+        huge.resize(MAX_TICKET_IMAGE_BYTES + 1, 0);
+        assert_eq!(
+            TicketImage::from_bytes(huge),
+            TicketImage::TooLarge {
+                byte_count: MAX_TICKET_IMAGE_BYTES as u64 + 1
+            }
+        );
+    }
 
     fn choice_with(options: &[(&str, bool)]) -> WorkItemChoiceInfo {
         WorkItemChoiceInfo {

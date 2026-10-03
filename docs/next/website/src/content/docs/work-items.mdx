@@ -287,6 +287,18 @@ herdr work-item add jira APP-7
 
 `search` takes GitHub search syntax for the `github` source and JQL for `jira`, and returns each match's key, title, status, assignee and update time. `show` returns one ticket's full details: description, status, assignee and comments (the pull request or issue body for GitHub).
 
+A screenshot pasted into a GitHub issue or pull request is an attachment on github.com, which only someone signed in to GitHub can read when the repository is private. `work_item.image` fetches one for a client through the source's credentials, as `agent.image` does for an agent's transcript:
+
+```json
+{"id":"1","method":"work_item.image","params":{"source_id":"github","url":"https://github.com/user-attachments/assets/800ff5b7-…"}}
+```
+
+```json
+{"id":"1","result":{"type":"work_item_image","image":{"source_id":"github","url":"https://github.com/user-attachments/assets/800ff5b7-…","status":"available","media_type":"image/png","byte_count":427003,"data":"iVBORw0KGgo…"}}}
+```
+
+`status` is `available` with the image in `data` as base64; `not_found` when GitHub has nothing you may read there; `too_large` past 10 MiB, with `byte_count`; `not_an_image` for a file that is not a PNG, JPEG, GIF or WebP image, such as a video; and `unsupported_url` for any address that is not an attachment on github.com (`https://github.com/user-attachments/assets/<id>`, or the older `https://github.com/<owner>/<repo>/assets/<user>/<id>`), which a client fetches itself. The GitHub token is only ever sent to github.com. Jira fetches no images and answers `unsupported_url`. A failed `gh` call is a `work_item_image_failed` error.
+
 `add` fetches the ticket and inserts it into the inbox as an ordinary item, so `choose` works on it exactly as if the sidebar's own query had found it. It survives later polls even when the ordinary query does not return it: the item stays in the inbox until the tracker reports the ticket done (checked whenever it is next prepared) or you dismiss it. If a later poll does return it — for example once it is assigned to you — it becomes an ordinary item from then on, indistinguishable from one the sidebar found itself. Adding a key already in the inbox is a no-op; it returns the existing item.
 
 Item state lives in `work-items.json` in the session directory. Remove a review worktree through its right-click menu, or with `herdr worktree remove`, so the hooks run and the review branch is cleaned up.
