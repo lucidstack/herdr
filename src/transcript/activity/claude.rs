@@ -1,12 +1,14 @@
 //! Claude Code transcripts: one JSON object per line. A response is written as one line per
 //! content block, all sharing a message id, and a tool's result is a `user` line of its own.
+//! Lines follow one another by `uuid` and `parentUuid`; a compaction cuts that link and keeps
+//! it as `logicalParentUuid`.
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    describe, mcp_kind, message_text, parse_entry, result_tail, Assistant, Block, Call, Line,
-    Prompt, Stop, ToolResult,
+    count_images, describe, mcp_kind, message_text, parse_entry, result_tail, Assistant, Block,
+    Call, Compaction, Line, Link, Parsed, Prompt, Stop, ToolResult,
 };
 use crate::api::schema::AgentActivityToolKind;
 
@@ -18,6 +20,11 @@ struct Entry {
     subtype: Option<String>,
     #[serde(default)]
     uuid: Option<String>,
+    #[serde(rename = "parentUuid", default)]
+    parent: Option<String>,
+    /// A compaction cuts a line's link to the one before it and keeps it here.
+    #[serde(rename = "logicalParentUuid", default)]
+    logical_parent: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(rename = "isSidechain", default)]
@@ -31,28 +38,61 @@ struct Entry {
     /// The text of a `system` line, which has no message.
     #[serde(default)]
     content: Option<Value>,
+    /// What an `attachment` line carries, which has no message.
+    #[serde(default)]
+    attachment: Option<Value>,
 }
 
-pub(super) fn parse(line: &[u8]) -> Line {
+pub(super) fn parse(line: &[u8], thinking: bool) -> Parsed {
     let Some(entry) = parse_entry::<Entry>(line) else {
         // A line torn by a concurrent write is not an entry.
-        return Line::Other;
+        return Parsed::other();
     };
     // Subagents run in side chains; their work is not the main agent's turn.
     if entry.sidechain.unwrap_or(false) {
-        return Line::Other;
+        return Parsed::other();
     }
+    let line = line_of(&entry, thinking);
+    let result = matches!(line, Line::ToolResults(_));
+    let tip = match entry.kind.as_deref() {
+        Some("assistant" | "system") => true,
+        Some("user") => !result,
+        // Hook results and the like hang off the side of the line they follow.
+        Some("attachment") => matches!(line, Line::MidPrompt(_)),
+        _ => false,
+    };
+    let link = entry.uuid.map(|id| Link {
+        id,
+        parent: entry.parent.or(entry.logical_parent),
+        tip,
+        result,
+    });
+    Parsed { link, line }
+}
+
+fn line_of(entry: &Entry, thinking: bool) -> Line {
     if entry.kind.as_deref() == Some("system") {
-        return system(&entry);
+        return system(entry);
     }
-    let (Some(uuid), Some(message)) = (entry.uuid, entry.message) else {
+    let Some(uuid) = entry.uuid.as_deref() else {
+        return Line::Other;
+    };
+    if entry.kind.as_deref() == Some("attachment") {
+        return entry.attachment.as_ref().map_or(Line::Other, |attachment| {
+            queued(uuid, entry.timestamp.clone(), attachment)
+        });
+    }
+    let Some(message) = &entry.message else {
         return Line::Other;
     };
     match entry.kind.as_deref() {
-        Some("assistant") => assistant(&uuid, entry.timestamp, &message),
+        Some("assistant") => assistant(uuid, entry.timestamp.clone(), message, thinking),
+        Some("user") if entry.compact_summary.unwrap_or(false) => {
+            compaction(uuid, entry.timestamp.clone(), message)
+        }
         // Meta messages are context Claude Code feeds the model, such as a skill's text.
-        Some("user") if !entry.meta.unwrap_or(false) && !entry.compact_summary.unwrap_or(false) => {
-            user(uuid, entry.timestamp, &message)
+        Some("user") if !entry.meta.unwrap_or(false) => {
+            user(uuid.to_string(), entry.timestamp.clone(), message)
         }
         _ => Line::Other,
     }
@@ -80,7 +120,7 @@ fn is_local_output(text: &str) -> bool {
     text.starts_with("<local-command-stdout>") || text.starts_with("<local-command-stderr>")
 }
 
-fn assistant(uuid: &str, timestamp: Option<String>, message: &Value) -> Line {
+fn assistant(uuid: &str, timestamp: Option<String>, message: &Value, thinking: bool) -> Line {
     let stop = match message.get("stop_reason").and_then(Value::as_str) {
         Some("tool_use") => Stop::ToolUse,
         Some(_) => Stop::Ended,
@@ -90,7 +130,7 @@ fn assistant(uuid: &str, timestamp: Option<String>, message: &Value) -> Line {
         Some(Value::Array(blocks)) => blocks
             .iter()
             .enumerate()
-            .filter_map(|(index, block)| block_of(uuid, index, block))
+            .filter_map(|(index, block)| block_of(uuid, index, block, thinking))
             .collect(),
         Some(Value::String(text)) => text_block(uuid, 0, text).into_iter().collect(),
         _ => Vec::new(),
@@ -106,10 +146,19 @@ fn assistant(uuid: &str, timestamp: Option<String>, message: &Value) -> Line {
     })
 }
 
-/// Thinking and every block kind this reader does not know are not part of the feed.
-fn block_of(uuid: &str, index: usize, block: &Value) -> Option<Block> {
+/// Every block kind this reader does not know is not part of the feed, and thinking is only
+/// when it was asked for.
+fn block_of(uuid: &str, index: usize, block: &Value, thinking: bool) -> Option<Block> {
     match block.get("type")?.as_str()? {
         "text" => text_block(uuid, index, block.get("text")?.as_str()?),
+        "thinking" if thinking => {
+            let text = block.get("thinking")?.as_str()?;
+            // Thinking that Claude Code redacted is a signature without words.
+            (!text.trim().is_empty()).then(|| Block::Thinking {
+                id: format!("{uuid}:{index}"),
+                text: text.to_string(),
+            })
+        }
         "tool_use" => {
             let name = block
                 .get("name")
@@ -140,7 +189,49 @@ fn user(id: String, timestamp: Option<String>, message: &Value) -> Line {
         }
     }
     match message_text(content) {
-        Some(text) => classify(id, timestamp, text),
+        Some(text) => classify(id, timestamp, text, count_images(content)),
+        None => Line::Other,
+    }
+}
+
+/// The summary Claude Code puts where the conversation it compacted was.
+fn compaction(uuid: &str, timestamp: Option<String>, message: &Value) -> Line {
+    Line::Compaction(Compaction {
+        id: uuid.to_string(),
+        timestamp,
+        text: message_text(message.get("content")),
+    })
+}
+
+/// A message the user typed while the agent was working. Claude Code hands it to the model
+/// with the next request and records it as a `queued_command` attachment rather than as a
+/// user message. Task notices, other agents' messages and meta text arrive the same way and
+/// are not the user's words, which `origin` tells apart.
+fn queued(uuid: &str, timestamp: Option<String>, attachment: &Value) -> Line {
+    let field = |key: &str| attachment.get(key).and_then(Value::as_str);
+    let human = attachment
+        .get("origin")
+        .and_then(|origin| origin.get("kind"))
+        .and_then(Value::as_str)
+        == Some("human");
+    let typed = field("commandMode").is_none_or(|mode| mode == "prompt");
+    let meta = attachment
+        .get("isMeta")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if field("type") != Some("queued_command") || !human || !typed || meta {
+        return Line::Other;
+    }
+    let content = attachment.get("prompt");
+    match message_text(content) {
+        Some(text) => Line::MidPrompt(Prompt {
+            id: uuid.to_string(),
+            timestamp,
+            text,
+            images: count_images(content),
+            command: false,
+            context: false,
+        }),
         None => Line::Other,
     }
 }
@@ -156,12 +247,13 @@ fn tool_result(block: &Value) -> Option<ToolResult> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         output: block.get("content").and_then(result_tail),
+        images: count_images(block.get("content")),
     })
 }
 
 /// Claude Code writes more than the user's words as user messages: interruption markers,
 /// what local slash commands printed, shell escapes, background task notices.
-fn classify(id: String, timestamp: Option<String>, text: String) -> Line {
+fn classify(id: String, timestamp: Option<String>, text: String, images: u32) -> Line {
     if text.starts_with("[Request interrupted by user") {
         return Line::Interrupt;
     }
@@ -201,7 +293,9 @@ fn classify(id: String, timestamp: Option<String>, text: String) -> Line {
         id,
         timestamp,
         text,
+        images,
         command,
+        context: false,
     })
 }
 

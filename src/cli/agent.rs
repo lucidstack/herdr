@@ -997,6 +997,7 @@ fn parse_activity_args(args: &[String]) -> Result<AgentActivityParams, String> {
         target: target.clone(),
         since,
         limit,
+        include_thinking: false,
     })
 }
 
@@ -1048,6 +1049,7 @@ mod tests {
                 target: "w1:p1".into(),
                 since: None,
                 limit: None,
+                include_thinking: false,
             })
         );
         assert_eq!(
@@ -1056,6 +1058,7 @@ mod tests {
                 target: "w1:p1".into(),
                 since: Some("c:1.2.3".into()),
                 limit: Some(20),
+                include_thinking: false,
             })
         );
     }

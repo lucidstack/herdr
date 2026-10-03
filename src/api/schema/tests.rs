@@ -70,6 +70,7 @@ fn agent_activity_request_round_trips_and_omits_unset_options() {
             target: "w1:p1".into(),
             since: Some("c:1.2.3".into()),
             limit: Some(50),
+            include_thinking: true,
         }),
     };
 
@@ -77,7 +78,7 @@ fn agent_activity_request_round_trips_and_omits_unset_options() {
     assert_eq!(json["method"], "agent.activity");
     assert_eq!(
         json["params"],
-        serde_json::json!({"target": "w1:p1", "since": "c:1.2.3", "limit": 50})
+        serde_json::json!({"target": "w1:p1", "since": "c:1.2.3", "limit": 50, "include_thinking": true})
     );
     assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
 
@@ -89,6 +90,7 @@ fn agent_activity_request_round_trips_and_omits_unset_options() {
         Method::AgentActivity(AgentActivityParams {
             target: "w1:p1".into(),
             since: None,
+            include_thinking: false,
             limit: None,
         })
     );
@@ -109,6 +111,7 @@ fn agent_activity_result_serialises_with_the_documented_keys() {
                 agent: Some("claude".into()),
                 status: AgentActivityStatus::Available,
                 turn: Some(AgentActivityTurn {
+                    id: Some("u1".into()),
                     started_at: Some("2026-09-30T14:02:11.120Z".into()),
                     finished: false,
                 }),
@@ -119,6 +122,7 @@ fn agent_activity_result_serialises_with_the_documented_keys() {
                         timestamp: None,
                         text: Some("Go".into()),
                         tool: None,
+                        images: None,
                     },
                     AgentActivityEntry {
                         id: "toolu_1".into(),
@@ -144,6 +148,7 @@ fn agent_activity_result_serialises_with_the_documented_keys() {
                                 }],
                             }),
                         }),
+                        images: Some(2),
                     },
                 ],
                 cursor: Some("c:1.2.3".into()),
@@ -163,7 +168,7 @@ fn agent_activity_result_serialises_with_the_documented_keys() {
                 "pane_id": "w1:p1",
                 "agent": "claude",
                 "status": "available",
-                "turn": {"started_at": "2026-09-30T14:02:11.120Z", "finished": false},
+                "turn": {"id": "u1", "started_at": "2026-09-30T14:02:11.120Z", "finished": false},
                 "entries": [
                     {"id": "u1", "kind": "prompt", "text": "Go"},
                     {"id": "toolu_1", "kind": "tool", "tool": {
@@ -174,7 +179,7 @@ fn agent_activity_result_serialises_with_the_documented_keys() {
                         "question": {"questions": [
                             {"question": "Which?", "multi_select": false, "options": [{"label": "a"}]},
                         ]},
-                    }},
+                    }, "images": 2},
                 ],
                 "cursor": "c:1.2.3",
                 "reset": false,
@@ -214,6 +219,139 @@ fn agent_activity_result_from_a_newer_server_still_decodes() {
     let tool = activity.entries[0].tool.as_ref().unwrap();
     assert_eq!(tool.kind, AgentActivityToolKind::Unknown);
     assert_eq!(tool.status, AgentActivityToolStatus::Unknown);
+}
+
+#[test]
+fn agent_history_request_round_trips_and_omits_unset_options() {
+    let request = Request {
+        id: "req_history".into(),
+        method: Method::AgentHistory(AgentHistoryParams {
+            target: "w1:p1".into(),
+            before: Some("h:1a2b.3c4d".into()),
+            turns: Some(10),
+            include_thinking: true,
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "agent.history");
+    assert_eq!(
+        json["params"],
+        serde_json::json!({
+            "target": "w1:p1",
+            "before": "h:1a2b.3c4d",
+            "turns": 10,
+            "include_thinking": true,
+        })
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let bare: Request =
+        serde_json::from_str(r#"{"id":"1","method":"agent.history","params":{"target":"w1:p1"}}"#)
+            .unwrap();
+    assert_eq!(
+        bare.method,
+        Method::AgentHistory(AgentHistoryParams {
+            target: "w1:p1".into(),
+            before: None,
+            turns: None,
+            include_thinking: false,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&bare).unwrap()["params"],
+        serde_json::json!({"target": "w1:p1"})
+    );
+}
+
+#[test]
+fn agent_history_result_serialises_with_the_documented_keys() {
+    let entry = |id: &str, kind, text: Option<&str>| AgentActivityEntry {
+        id: id.into(),
+        kind,
+        timestamp: None,
+        text: text.map(str::to_string),
+        tool: None,
+        images: None,
+    };
+    let response = SuccessResponse {
+        id: "req_1".into(),
+        result: ResponseResult::AgentHistory {
+            history: AgentHistoryInfo {
+                terminal_id: "term_1".into(),
+                pane_id: "w1:p1".into(),
+                agent: Some("omp".into()),
+                status: AgentActivityStatus::Available,
+                turns: vec![AgentHistoryTurn {
+                    id: "u1".into(),
+                    started_at: Some("2026-09-30T14:02:11.120Z".into()),
+                    finished: true,
+                    entries: vec![
+                        entry("u1", AgentActivityEntryKind::Prompt, Some("Go")),
+                        entry("t1", AgentActivityEntryKind::Thinking, Some("Hmm")),
+                        entry("c1", AgentActivityEntryKind::Compaction, None),
+                    ],
+                    truncated: false,
+                }],
+                before: Some("h:0.1".into()),
+                reset: false,
+                transcript_path: None,
+            },
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        serde_json::json!({
+            "id": "req_1",
+            "result": {"type": "agent_history", "history": {
+                "terminal_id": "term_1",
+                "pane_id": "w1:p1",
+                "agent": "omp",
+                "status": "available",
+                "turns": [{
+                    "id": "u1",
+                    "started_at": "2026-09-30T14:02:11.120Z",
+                    "finished": true,
+                    "entries": [
+                        {"id": "u1", "kind": "prompt", "text": "Go"},
+                        {"id": "t1", "kind": "thinking", "text": "Hmm"},
+                        {"id": "c1", "kind": "compaction"},
+                    ],
+                    "truncated": false,
+                }],
+                "before": "h:0.1",
+                "reset": false,
+            }},
+        })
+    );
+}
+
+#[test]
+fn agent_history_result_from_a_newer_server_still_decodes() {
+    let response: SuccessResponse = serde_json::from_value(serde_json::json!({
+        "id": "1",
+        "result": {"type": "agent_history", "history": {
+            "terminal_id": "term_1",
+            "pane_id": "w1:p1",
+            "status": "not_yet_invented",
+            "turns": [{
+                "id": "u1",
+                "finished": false,
+                "entries": [{"id": "e1", "kind": "not_yet_invented"}],
+            }],
+        }},
+    }))
+    .unwrap();
+
+    let ResponseResult::AgentHistory { history } = response.result else {
+        panic!("not a history result");
+    };
+    assert_eq!(history.status, AgentActivityStatus::Unknown);
+    assert_eq!(
+        history.turns[0].entries[0].kind,
+        AgentActivityEntryKind::Unknown
+    );
 }
 
 #[test]

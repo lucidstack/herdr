@@ -11,6 +11,8 @@ type Status = AgentActivityToolStatus;
 const CLAUDE: TranscriptFormat = TranscriptFormat::Claude;
 const OMP: TranscriptFormat = TranscriptFormat::Omp;
 
+mod paging;
+
 fn lines_of(text: &str, chunk: usize) -> ReverseLines<io::Cursor<Vec<u8>>> {
     ReverseLines::new(io::Cursor::new(text.as_bytes().to_vec()), chunk).unwrap()
 }
@@ -22,7 +24,7 @@ fn read_text(
     since: Option<&str>,
     limit: usize,
 ) -> Option<Activity> {
-    read_turn(format, lines_of(text, READ_CHUNK))
+    read_turn(format, lines_of(text, READ_CHUNK), false)
         .unwrap()
         .map(|turn| turn.into_activity(since, limit))
 }
@@ -816,7 +818,7 @@ fn claude_turn_starts_at_the_newest_real_prompt() {
 
     let activity = read(CLAUDE, &lines);
 
-    assert_eq!(ids(&activity), ["u2", "toolu_1"]);
+    assert_eq!(ids(&activity), ["u2", "u5", "toolu_1"]);
     assert_eq!(text(&activity, "u2"), "Second task");
     assert_eq!(tool(&activity, "toolu_1").status, Status::Failed);
     assert!(activity.turn.finished, "an interrupted turn is over");
@@ -1331,7 +1333,7 @@ fn reading_from_disk_follows_a_transcript_as_it_grows() {
         writeln!(file, "{line}").unwrap();
     }
 
-    let first = activity(CLAUDE, &path, None, DEFAULT_LIMIT)
+    let first = activity(CLAUDE, &path, None, DEFAULT_LIMIT, false)
         .unwrap()
         .unwrap();
     assert_eq!(ids(&first), ["u1", "toolu_1"]);
@@ -1342,13 +1344,13 @@ fn reading_from_disk_follows_a_transcript_as_it_grows() {
         claude_result("r1", "toolu_1", json!("x"), false)
     )
     .unwrap();
-    let second = activity(CLAUDE, &path, Some(&first.cursor), DEFAULT_LIMIT)
+    let second = activity(CLAUDE, &path, Some(&first.cursor), DEFAULT_LIMIT, false)
         .unwrap()
         .unwrap();
     assert_eq!(ids(&second), ["toolu_1"]);
     assert_eq!(tool(&second, "toolu_1").status, Status::Succeeded);
 
-    let missing = activity(CLAUDE, &dir.join("gone.jsonl"), None, DEFAULT_LIMIT);
+    let missing = activity(CLAUDE, &dir.join("gone.jsonl"), None, DEFAULT_LIMIT, false);
     assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1369,7 +1371,9 @@ fn turn_is_found_however_the_file_is_chunked_and_however_large_it_is() {
     let text = transcript(&lines);
 
     for chunk in [7, 64, 1000, READ_CHUNK] {
-        let turn = read_turn(CLAUDE, lines_of(&text, chunk)).unwrap().unwrap();
+        let turn = read_turn(CLAUDE, lines_of(&text, chunk), false)
+            .unwrap()
+            .unwrap();
         let activity = turn.into_activity(None, DEFAULT_LIMIT);
         assert_eq!(ids(&activity), ["u1", "a1:0"], "chunk {chunk}");
     }

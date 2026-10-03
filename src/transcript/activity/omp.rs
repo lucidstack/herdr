@@ -1,13 +1,15 @@
 //! omp transcripts: one JSON object per line, forming a tree by `id` and `parentId`. A
 //! `message` line holds a whole response or a whole tool result. A prompt the user sent
 //! through a skill or a collaborator is a `custom_message` line instead of a user message.
+//! What the user typed while the agent was working is a user message marked `steering`.
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{
-    describe, first_line, mcp_kind, message_text, parse_entry, result_tail, shorten, Assistant,
-    Block, Call, Keep, Line, Prompt, Stop, ToolResult, TARGET_CHARS,
+    count_images, describe, first_line, mcp_kind, message_text, parse_entry, result_tail, shorten,
+    Assistant, Block, Call, Compaction, Keep, Line, Link, Parsed, Prompt, Stop, ToolResult,
+    TARGET_CHARS,
 };
 use crate::api::schema::AgentActivityToolKind;
 
@@ -17,6 +19,8 @@ struct Entry {
     kind: Option<String>,
     #[serde(default)]
     id: Option<String>,
+    #[serde(rename = "parentId", default)]
+    parent_id: Option<String>,
     #[serde(default)]
     timestamp: Option<String>,
     #[serde(default)]
@@ -30,45 +34,114 @@ struct Entry {
     content: Option<Value>,
     #[serde(default)]
     details: Option<Value>,
+    /// The text of a `compaction` line.
+    #[serde(default)]
+    summary: Option<String>,
 }
 
-pub(super) fn parse(line: &[u8]) -> Line {
+pub(super) fn parse(line: &[u8], thinking: bool) -> Parsed {
     let Some(entry) = parse_entry::<Entry>(line) else {
         // A line torn by a concurrent write is not an entry.
-        return Line::Other;
+        return Parsed::other();
     };
+    let line = line_of(&entry, thinking);
+    // Every entry belongs to the tree, whatever it records.
+    let link = entry.id.map(|id| Link {
+        id,
+        parent: entry.parent_id,
+        tip: true,
+        result: false,
+    });
+    Parsed { link, line }
+}
+
+fn line_of(entry: &Entry, thinking: bool) -> Line {
     match entry.kind.as_deref() {
         Some("message") => {}
         Some("custom_message") => return custom_prompt(entry),
+        Some("compaction") => return compaction(entry),
         _ => return Line::Other,
     }
-    let (Some(id), Some(message)) = (entry.id, entry.message) else {
+    let (Some(id), Some(message)) = (entry.id.as_deref(), &entry.message) else {
         return Line::Other;
     };
     match message.get("role").and_then(Value::as_str) {
-        Some("user") => match message_text(message.get("content")) {
-            Some(text) => Line::Prompt(Prompt {
-                id,
-                timestamp: entry.timestamp,
-                text,
-                command: false,
-            }),
-            None => Line::Other,
-        },
-        Some("assistant") => assistant(&id, entry.timestamp, &message),
-        Some("toolResult") => tool_result(&message),
+        Some("user") => user(id, entry.timestamp.clone(), message),
+        Some("assistant") => assistant(id, entry.timestamp.clone(), message, thinking),
+        Some("developer") => context(id, entry.timestamp.clone(), message),
+        Some("toolResult") => tool_result(message),
         _ => Line::Other,
     }
+}
+
+fn user(id: &str, timestamp: Option<String>, message: &Value) -> Line {
+    let content = message.get("content");
+    let Some(text) = message_text(content) else {
+        return Line::Other;
+    };
+    let prompt = Prompt {
+        id: id.to_string(),
+        timestamp,
+        text,
+        images: count_images(content),
+        command: false,
+        context: false,
+    };
+    // What the user typed while the agent was working is marked as steering. It reaches the
+    // model after the tool calls that were running, and continues the turn.
+    if message
+        .get("steering")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        Line::MidPrompt(prompt)
+    } else {
+        Line::Prompt(prompt)
+    }
+}
+
+/// A message omp gives the model on the session's behalf, such as the context of a handoff.
+/// A session that opens with one has it open its first turn.
+fn context(id: &str, timestamp: Option<String>, message: &Value) -> Line {
+    let content = message.get("content");
+    match message_text(content) {
+        Some(text) => Line::Context(Prompt {
+            id: id.to_string(),
+            timestamp,
+            text,
+            images: count_images(content),
+            command: false,
+            context: true,
+        }),
+        None => Line::Other,
+    }
+}
+
+/// Where omp summarised the conversation so far.
+fn compaction(entry: &Entry) -> Line {
+    let Some(id) = entry.id.clone() else {
+        return Line::Other;
+    };
+    Line::Compaction(Compaction {
+        id,
+        timestamp: entry.timestamp.clone(),
+        text: entry
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .map(str::to_string),
+    })
 }
 
 /// A prompt that reaches omp as a custom message: a skill the user invoked, a message from a
 /// collaborator. What the user sees is what counts. Notices the agent sends itself, and
 /// attachments that have no display, are not prompts.
-fn custom_prompt(entry: Entry) -> Line {
+fn custom_prompt(entry: &Entry) -> Line {
     if entry.attribution.as_deref() != Some("user") || entry.display != Some(true) {
         return Line::Other;
     }
-    let Some(id) = entry.id else {
+    let Some(id) = entry.id.clone() else {
         return Line::Other;
     };
     // A skill's content is the whole skill text; `details.prompt` is what the user typed.
@@ -83,15 +156,17 @@ fn custom_prompt(entry: Entry) -> Line {
     match typed.or_else(|| message_text(entry.content.as_ref())) {
         Some(text) => Line::Prompt(Prompt {
             id,
-            timestamp: entry.timestamp,
+            timestamp: entry.timestamp.clone(),
             text,
+            images: count_images(entry.content.as_ref()),
             command: false,
+            context: false,
         }),
         None => Line::Other,
     }
 }
 
-fn assistant(id: &str, timestamp: Option<String>, message: &Value) -> Line {
+fn assistant(id: &str, timestamp: Option<String>, message: &Value, thinking: bool) -> Line {
     let stop = match message.get("stopReason").and_then(Value::as_str) {
         Some("toolUse") => Stop::ToolUse,
         Some(_) => Stop::Ended,
@@ -104,7 +179,7 @@ fn assistant(id: &str, timestamp: Option<String>, message: &Value) -> Line {
             blocks
                 .iter()
                 .enumerate()
-                .filter_map(|(index, block)| block_of(id, index, block))
+                .filter_map(|(index, block)| block_of(id, index, block, thinking))
                 .collect()
         })
         .unwrap_or_default();
@@ -116,12 +191,20 @@ fn assistant(id: &str, timestamp: Option<String>, message: &Value) -> Line {
     })
 }
 
-/// Thinking and every block kind this reader does not know are not part of the feed.
-fn block_of(id: &str, index: usize, block: &Value) -> Option<Block> {
+/// Every block kind this reader does not know is not part of the feed, and thinking is only
+/// when it was asked for.
+fn block_of(id: &str, index: usize, block: &Value, thinking: bool) -> Option<Block> {
     match block.get("type")?.as_str()? {
         "text" => {
             let text = block.get("text")?.as_str()?;
             (!text.trim().is_empty()).then(|| Block::Text {
+                id: format!("{id}:{index}"),
+                text: text.to_string(),
+            })
+        }
+        "thinking" if thinking => {
+            let text = block.get("thinking")?.as_str()?;
+            (!text.trim().is_empty()).then(|| Block::Thinking {
                 id: format!("{id}:{index}"),
                 text: text.to_string(),
             })
@@ -172,6 +255,7 @@ fn tool_result(message: &Value) -> Line {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         output: message.get("content").and_then(result_tail),
+        images: count_images(message.get("content")),
     }])
 }
 
