@@ -1268,7 +1268,7 @@ impl ReviewMode {
             }
             Self::StartIssue => "Worktree on a new branch; the agent proposes a plan and waits",
             Self::StartIssueAgent => {
-                "Worktree on a new branch; the agent implements it, no commit or push"
+                "Worktree on a new branch; the agent implements it and finishes per the repo's agent rules"
             }
             Self::ThreadAgent => "No checkout; nothing is posted to GitHub",
         }
@@ -1647,8 +1647,11 @@ fn issue_brief(
         format!("Labels: {}\n", detail.labels.join(", "))
     };
     let instructions = if mode == ReviewMode::StartIssueAgent {
-        "Implement it now, with tests. Do not commit, push or comment on GitHub. Report what \
-         you changed and any open question."
+        "Implement it now, with tests. When it is done, finish it the way this repository's \
+         agent instructions (AGENTS.md, CLAUDE.md) say: committing, pushing, opening a pull \
+         request and merging it only where they ask for that. Where they say nothing about \
+         finishing work, do not commit, push or comment on GitHub. Report what you did and \
+         any open question."
     } else {
         "Investigate the code, propose an implementation plan and wait for my instructions \
          before changing anything."
