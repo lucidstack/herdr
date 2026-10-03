@@ -22,8 +22,8 @@ use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::work_items::{
-    AgentAttentionInfo, WorkItemInfo, WorkItemPickNextInfo, WorkItemRepositoryInfo,
-    WorkItemSourceInfo, WorkItemTicketComment, WorkItemTicketInfo,
+    AgentAttentionInfo, WorkItemImageInfo, WorkItemInfo, WorkItemPickNextInfo,
+    WorkItemRepositoryInfo, WorkItemSourceInfo, WorkItemTicketComment, WorkItemTicketInfo,
 };
 use super::workspaces::{WorkspaceDiffInfo, WorkspaceInfo};
 use super::worktrees::{WorktreeInfo, WorktreeSourceInfo};
@@ -327,6 +327,9 @@ pub enum ResponseResult {
     },
     WorkItemAdded {
         item: WorkItemInfo,
+    },
+    WorkItemImage {
+        image: WorkItemImageInfo,
     },
     Ok {},
 }

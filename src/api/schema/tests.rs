@@ -355,6 +355,59 @@ fn agent_history_result_from_a_newer_server_still_decodes() {
 }
 
 #[test]
+fn work_item_image_request_and_result_use_the_documented_keys() {
+    let request: Request = serde_json::from_str(
+        r#"{"id":"1","method":"work_item.image","params":{"source_id":"github","url":"https://github.com/user-attachments/assets/abc"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        request.method,
+        Method::WorkItemImage(WorkItemImageParams {
+            source_id: "github".into(),
+            url: "https://github.com/user-attachments/assets/abc".into(),
+        })
+    );
+
+    let response = SuccessResponse {
+        id: "1".into(),
+        result: ResponseResult::WorkItemImage {
+            image: WorkItemImageInfo {
+                source_id: "github".into(),
+                url: "https://github.com/user-attachments/assets/abc".into(),
+                status: WorkItemImageStatus::TooLarge,
+                media_type: None,
+                byte_count: Some(12_000_000),
+                data: None,
+            },
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        serde_json::json!({
+            "id": "1",
+            "result": {"type": "work_item_image", "image": {
+                "source_id": "github",
+                "url": "https://github.com/user-attachments/assets/abc",
+                "status": "too_large",
+                "byte_count": 12_000_000,
+            }},
+        })
+    );
+    for (status, name) in [
+        (WorkItemImageStatus::Available, "available"),
+        (WorkItemImageStatus::NotFound, "not_found"),
+        (WorkItemImageStatus::NotAnImage, "not_an_image"),
+        (WorkItemImageStatus::UnsupportedUrl, "unsupported_url"),
+    ] {
+        assert_eq!(serde_json::to_value(status).unwrap(), name);
+    }
+    assert_eq!(
+        serde_json::from_value::<WorkItemImageStatus>(serde_json::json!("later")).unwrap(),
+        WorkItemImageStatus::Unknown
+    );
+}
+
+#[test]
 fn agent_image_request_round_trips_and_index_defaults_to_zero() {
     let request = Request {
         id: "req_image".into(),

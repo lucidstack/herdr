@@ -11,9 +11,10 @@ use super::{App, AppPolicy};
 use crate::api::schema::{
     AgentPromptParams, AgentStartParams, ErrorBody, ErrorResponse, Method, PaneInfo,
     PaneSendInputParams, PaneTarget, Request, ResponseResult, SuccessResponse, TabCreateParams,
-    TabInfo, TabRenameParams, WorkItemSearchParams, WorkItemStep, WorkItemStepStatus,
-    WorkItemTicketTarget, WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo,
-    WorkspaceTarget, WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
+    TabInfo, TabRenameParams, WorkItemImageInfo, WorkItemImageParams, WorkItemImageStatus,
+    WorkItemSearchParams, WorkItemStep, WorkItemStepStatus, WorkItemTicketTarget,
+    WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo, WorkspaceTarget,
+    WorktreeCreateParams, WorktreeOpenParams, WorktreeRemoveParams,
 };
 use crate::app::api::responses::{encode_error, encode_success};
 use crate::events::AppEvent;
@@ -22,8 +23,36 @@ use crate::work_items::provision::{
 };
 use crate::work_items::source::{DownloadSpec, WorkspaceSource};
 use crate::work_items::{
-    OwnedWorktree, PendingRemoval, StorePolicy, WorkItemNotice, WorkItemsEvent,
+    OwnedWorktree, PendingRemoval, StorePolicy, TicketImage, WorkItemNotice, WorkItemsEvent,
 };
+
+fn work_item_image_info(params: WorkItemImageParams, image: TicketImage) -> WorkItemImageInfo {
+    use base64::Engine as _;
+    let mut info = WorkItemImageInfo {
+        source_id: params.source_id,
+        url: params.url,
+        status: WorkItemImageStatus::NotFound,
+        media_type: None,
+        byte_count: None,
+        data: None,
+    };
+    match image {
+        TicketImage::Available { media_type, bytes } => {
+            info.status = WorkItemImageStatus::Available;
+            info.media_type = Some(media_type.to_string());
+            info.byte_count = Some(bytes.len() as u64);
+            info.data = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
+        }
+        TicketImage::NotFound => {}
+        TicketImage::TooLarge { byte_count } => {
+            info.status = WorkItemImageStatus::TooLarge;
+            info.byte_count = Some(byte_count);
+        }
+        TicketImage::NotAnImage => info.status = WorkItemImageStatus::NotAnImage,
+        TicketImage::UnsupportedUrl => info.status = WorkItemImageStatus::UnsupportedUrl,
+    }
+    info
+}
 
 /// How long the agent may take to accept `agent.start` and then its brief.
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(90);
@@ -402,7 +431,7 @@ impl App {
         });
     }
 
-    /// Handles `work_item.search`, `work_item.show` and `work_item.add`: each runs its
+    /// Handles `work_item.search`, `work_item.show`, `work_item.image` and `work_item.add`: each runs its
     /// network fetch on a background thread and replies through `respond_to` once it
     /// finishes, so it never blocks the app thread.
     pub(crate) fn handle_deferred_work_item_api_request(
@@ -419,6 +448,9 @@ impl App {
             }
             Method::WorkItemAdd(params) => {
                 self.start_work_item_add(request.id, params, respond_to);
+            }
+            Method::WorkItemImage(params) => {
+                self.start_work_item_image(request.id, params, respond_to);
             }
             _ => return false,
         }
@@ -493,6 +525,29 @@ impl App {
                     format!("unknown ticket {}", params.key),
                 ),
                 Err(message) => encode_error(id, "work_item_show_failed", message),
+            };
+            let _ = respond_to.send(response);
+        });
+    }
+
+    fn start_work_item_image(
+        &mut self,
+        id: String,
+        params: WorkItemImageParams,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let Some(source) = self.work_item_source_for(&params.source_id, &id, &respond_to) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let response = match source.image(&params.url) {
+                Ok(image) => encode_success(
+                    id,
+                    ResponseResult::WorkItemImage {
+                        image: work_item_image_info(params, image),
+                    },
+                ),
+                Err(message) => encode_error(id, "work_item_image_failed", message),
             };
             let _ = respond_to.send(response);
         });
@@ -1798,6 +1853,31 @@ mod tests {
             &main,
             "/src/other/.git"
         ));
+    }
+
+    #[test]
+    fn image_of_a_source_that_fetches_none_answers_unsupported_url() {
+        use crate::api::schema::WorkItemImageParams;
+
+        let mut app = test_app();
+        let source = FakeSource::with_items(Vec::new());
+        app.work_items = WorkItems::for_test(vec![source], Instant::now());
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(app.handle_deferred_work_item_api_request(
+            request(Method::WorkItemImage(WorkItemImageParams {
+                source_id: "fake".into(),
+                url: "https://example.test/a.png".into(),
+            })),
+            tx,
+        ));
+        let reply: serde_json::Value =
+            serde_json::from_str(&rx.recv_timeout(Duration::from_secs(5)).expect("reply")).unwrap();
+        assert_eq!(reply["result"]["type"], "work_item_image");
+        assert_eq!(reply["result"]["image"]["status"], "unsupported_url");
+        assert_eq!(
+            reply["result"]["image"]["url"],
+            "https://example.test/a.png"
+        );
     }
 
     #[test]

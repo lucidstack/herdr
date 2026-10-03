@@ -123,6 +123,8 @@ pub enum Method {
     WorkItemShow(WorkItemTicketTarget),
     #[serde(rename = "work_item.add")]
     WorkItemAdd(WorkItemTicketTarget),
+    #[serde(rename = "work_item.image")]
+    WorkItemImage(WorkItemImageParams),
     #[serde(rename = "work_item.pick_next_start")]
     WorkItemPickNextStart(WorkItemPickNextStartParams),
     #[serde(rename = "tab.create")]

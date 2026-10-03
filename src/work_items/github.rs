@@ -18,7 +18,7 @@ use crate::config::{
 use super::process::{failure_detail, run_with_timeout};
 use super::source::{
     DownloadSpec, ItemChoices, LinkedClone, PreparedItem, ProvisionPlan, SourceItem, StartReminder,
-    TicketDetail, WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
+    TicketDetail, TicketImage, WorkItemSource, WorkspaceLayout, WorkspaceSource, WorktreeSpec,
     LINK_CLONE_CHOICE_ID, START_WORK_CHOICE_ID,
 };
 use super::state::WorkItem;
@@ -1092,6 +1092,34 @@ fn parse_pull_request_statuses(
             })
         })
         .collect())
+}
+
+/// Whether `url` is an attachment uploaded to github.com, the only kind `gh` is asked to
+/// fetch: `https://github.com/user-attachments/assets/<id>`, or the older
+/// `https://github.com/<owner>/<repo>/assets/<user>/<id>`. Anything else, including other
+/// hosts, query strings and escapes, is left to the client, so the token never goes
+/// anywhere but GitHub.
+fn is_attachment_url(url: &str) -> bool {
+    let Some(path) = url.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let segments: Vec<&str> = path.split('/').collect();
+    let plain = |segment: &&str| {
+        !segment.is_empty()
+            && *segment != "."
+            && *segment != ".."
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !segments.iter().all(plain) {
+        return false;
+    }
+    match segments.as_slice() {
+        ["user-attachments", "assets", _] => true,
+        [_, _, "assets", user, _] => user.chars().all(|c| c.is_ascii_digit()),
+        _ => false,
+    }
 }
 
 fn gh_env() -> Vec<(String, String)> {
@@ -2731,6 +2759,18 @@ impl WorkItemSource for GithubSource {
                 .collect(),
             source_item,
         }))
+    }
+
+    fn image(&self, url: &str) -> Result<TicketImage, String> {
+        if !is_attachment_url(url) {
+            return Ok(TicketImage::UnsupportedUrl);
+        }
+        // `gh api` takes a github.com address as it is, signs the request, and follows the
+        // redirect to the file without the token.
+        Ok(match self.run_gh_optional(&["api", url])? {
+            Some(bytes) => TicketImage::from_bytes(bytes),
+            None => TicketImage::NotFound,
+        })
     }
 
     fn pick_next_plan(
@@ -4657,6 +4697,94 @@ esac
         let result = source.fetch("o/r#404").expect("fetch");
         let _ = std::fs::remove_dir_all(gh.parent().unwrap());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn only_github_attachments_are_fetched_with_the_token() {
+        for url in [
+            "https://github.com/user-attachments/assets/800ff5b7-f6b3-4a01-8ce4-0a09805dd91e",
+            "https://github.com/o/r/assets/1248581/800ff5b7-f6b3-4a01-8ce4-0a09805dd91e",
+        ] {
+            assert!(is_attachment_url(url), "{url}");
+        }
+        for url in [
+            "http://github.com/user-attachments/assets/abc",
+            "https://github.com.evil.test/user-attachments/assets/abc",
+            "https://evil.test/https://github.com/user-attachments/assets/abc",
+            "https://github.com/user-attachments/assets/abc?redirect=https://evil.test",
+            "https://github.com/user-attachments/assets/abc#x",
+            "https://github.com/user-attachments/assets/../../user",
+            "https://github.com/user-attachments/assets/a%2Fb",
+            "https://github.com/user-attachments/files/1/report.pdf",
+            "https://github.com/o/r/assets/me/abc",
+            "https://github.com/settings/profile",
+            "https://private-user-images.githubusercontent.com/1/2.png?jwt=x",
+        ] {
+            assert!(!is_attachment_url(url), "{url}");
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_gh_attachments(name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-fake-gh-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("gh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+echo "$*" >> "{log}"
+case "$*" in
+  "api https://github.com/user-attachments/assets/png")
+    printf '\211PNG\r\n\032\nrest'
+    ;;
+  "api https://github.com/user-attachments/assets/video")
+    printf '\000\000\000\030ftypmp42'
+    ;;
+  *)
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+esac
+"#,
+                log = dir.join("calls").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_fetches_an_attachment_through_gh_and_leaves_other_addresses_alone() {
+        let gh = fake_gh_attachments("image");
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
+        let png = source.image("https://github.com/user-attachments/assets/png");
+        let video = source.image("https://github.com/user-attachments/assets/video");
+        let missing = source.image("https://github.com/user-attachments/assets/gone");
+        let elsewhere = source.image("https://example.test/a.png");
+        let calls = std::fs::read_to_string(gh.parent().unwrap().join("calls")).unwrap();
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        assert_eq!(
+            png,
+            Ok(TicketImage::Available {
+                media_type: "image/png",
+                bytes: b"\x89PNG\r\n\x1a\nrest".to_vec(),
+            })
+        );
+        assert_eq!(video, Ok(TicketImage::NotAnImage));
+        assert_eq!(missing, Ok(TicketImage::NotFound));
+        assert_eq!(elsewhere, Ok(TicketImage::UnsupportedUrl));
+        assert_eq!(calls.lines().count(), 3, "{calls}");
+        assert!(!calls.contains("example.test"), "{calls}");
     }
 
     #[test]

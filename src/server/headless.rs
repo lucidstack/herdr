@@ -3011,6 +3011,7 @@ impl HeadlessServer {
             &msg.request.method,
             api::schema::Method::WorkItemSearch(_)
                 | api::schema::Method::WorkItemShow(_)
+                | api::schema::Method::WorkItemImage(_)
                 | api::schema::Method::WorkItemAdd(_)
         ) {
             // Each fetches over the network on a background thread and replies later; the

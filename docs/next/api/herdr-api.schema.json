@@ -5327,6 +5327,23 @@
           ],
           "type": "object"
         },
+        "WorkItemImageParams": {
+          "properties": {
+            "source_id": {
+              "description": "Configured source whose credentials fetch the image, e.g. `github`.",
+              "type": "string"
+            },
+            "url": {
+              "description": "The image's address as a ticket's description or comment gives it, e.g.\n`https://github.com/user-attachments/assets/<id>`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "url"
+          ],
+          "type": "object"
+        },
         "WorkItemLinkParams": {
           "properties": {
             "item_id": {
@@ -6341,6 +6358,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemTicketTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.image",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemImageParams"
             }
           },
           "required": [
@@ -12914,6 +12947,22 @@
             },
             {
               "properties": {
+                "image": {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemImageInfo"
+                },
+                "type": {
+                  "const": "work_item_image",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "image"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "ok",
                   "type": "string"
@@ -13250,6 +13299,85 @@
             "default"
           ],
           "type": "object"
+        },
+        "WorkItemImageInfo": {
+          "description": "One image a ticket points at, fetched with the source's credentials.",
+          "properties": {
+            "byte_count": {
+              "description": "The file's size in bytes. Present when `status` is `available` or `too_large`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "data": {
+              "description": "The image's bytes in standard base64. Present when `status` is `available`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "media_type": {
+              "description": "The image's type, e.g. \"image/png\". Present when `status` is `available`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_id": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/WorkItemImageStatus"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "url",
+            "status"
+          ],
+          "type": "object"
+        },
+        "WorkItemImageStatus": {
+          "description": "Whether an image a ticket points at could be fetched.",
+          "oneOf": [
+            {
+              "enum": [
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "available",
+              "description": "`media_type`, `byte_count` and `data` hold the image.",
+              "type": "string"
+            },
+            {
+              "const": "not_found",
+              "description": "The tracker has nothing at this address, or nothing you may read.",
+              "type": "string"
+            },
+            {
+              "const": "too_large",
+              "description": "The file is larger than 10 MiB; `byte_count` says how large, and no `data` is sent.",
+              "type": "string"
+            },
+            {
+              "const": "not_an_image",
+              "description": "The file is not a PNG, JPEG, GIF or WebP image, e.g. a video.",
+              "type": "string"
+            },
+            {
+              "const": "unsupported_url",
+              "description": "The source does not fetch this address: for GitHub, anything other than an image\nattachment on github.com. A client fetches such an address itself.",
+              "type": "string"
+            }
+          ]
         },
         "WorkItemInfo": {
           "properties": {
