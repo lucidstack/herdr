@@ -100,7 +100,7 @@ Raw socket method names use dot notation:
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
-| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
+| Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.diff`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
@@ -168,6 +168,32 @@ Herdr keeps an agent up to date with changes it makes outside the agent's sessio
 The omp and Claude Code integrations take the notes and pass them to the agent: while it works, they steer the running turn; while it is idle, they join the context of its next turn without starting one. Other agents only see the notes a script or plugin passes on.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
+
+`workspace.diff` returns what changed in a workspace's checkout, so a client can review an agent's work without reading a terminal. It compares the working tree, which has what is committed on the branch, staged, unstaged and untracked, with the merge-base of `HEAD` and the branch the work started from. The checkout is the workspace's worktree checkout, or else the directory of its first pane. Herdr runs Git for it on a background thread and answers when Git is done, so a slow repository does not stall Herdr; when too many diffs are pending at once it answers `worktree_busy`. An unknown `workspace_id` fails with `workspace_not_found`, as for `workspace.get`.
+
+```json
+{"id":"1","method":"workspace.diff","params":{"workspace_id":"w4"}}
+```
+
+`path` limits the answer to one file, named as its `path` or, for a renamed file, its `old_path`, and allows its patch to be larger. `summary_only` leaves out every patch, for the counts alone.
+
+```json
+{"id":"1","method":"workspace.diff","params":{"workspace_id":"w4","path":"src/login.rs"}}
+```
+
+```json
+{"id":"1","result":{"type":"workspace_diff","diff":{"workspace_id":"w4","status":"available","directory":"/Users/me/worktrees/acme/tech-123-fix-login","branch":"tech-123-fix-login","base":{"ref_name":"origin/main","commit":"4f2c9e1d0b3a5c7e8f9a1b2c3d4e5f60718293a4"},"head":"9ab1d07c2e4f6a8b0c1d3e5f708192a3b4c5d6e7","additions":44,"deletions":7,"truncated":false,"files":[{"path":"src/login.rs","status":"modified","additions":40,"deletions":7,"binary":false,"patch":"@@ -10,7 +10,40 @@ fn login(\n context\n-old\n+new\n","patch_truncated":false},{"path":"src/session.rs","old_path":"src/auth.rs","status":"renamed","additions":2,"deletions":0,"binary":false,"patch":"@@ -1,3 +1,5 @@\n","patch_truncated":false},{"path":"assets/logo.png","status":"added","binary":true,"patch_truncated":false},{"path":"notes.md","status":"untracked","additions":2,"deletions":0,"binary":false,"patch":"@@ -0,0 +1,2 @@\n+first\n+second\n","patch_truncated":false},{"path":"Cargo.lock","status":"modified","additions":900,"deletions":850,"binary":false,"patch_truncated":true}]}}}
+```
+
+The base is the first of these that exists and shares history with `HEAD`: the base recorded for the branch (`branch.<branch>.herdrBase` in the repository's Git config, which `worktree.create` writes), the default branch of the branch's remote (`refs/remotes/<remote>/HEAD`, where the remote is `branch.<branch>.remote` or `origin`), a local `main`, a local `master`. `base.ref_name` is the short name of the one used and `base.commit` the merge-base, so what the base branch gained after the work forked from it is not part of the diff. `base` is `null` when none was found, and the diff then holds only the changes that are not committed. `branch` is `null` when `HEAD` is detached, and `head` is `null` on a branch without a commit.
+
+`status` is `available` or says why not: `no_directory` (the workspace has none, or it is gone), `not_a_repository` (the directory is not in a Git work tree) and `unreadable` (Git failed or took longer than 10 seconds; `error` has Git's message). `files` is then empty. `directory` is the top-level directory of the checkout, which every `path` is relative to. `additions` and `deletions` add up the listed text files.
+
+`files` lists the changed files by path, committed, staged, unstaged and untracked together, so a file edited after it was staged is one entry. `status` is `added`, `modified`, `deleted`, `renamed`, `copied`, `type_changed` or `untracked`; files that Git ignores, and repositories nested in the checkout, are not listed. `old_path` is there for a renamed or copied file. `additions` and `deletions` count its lines, and are absent for a `binary` file and for an untracked file too large to read.
+
+`patch` is the file's unified diff from its first `@@` line, without the `diff --git`, `index`, `---` and `+++` header lines. A file that has no hunks, such as one that was only renamed or whose mode changed, has an empty `patch`. A file that turned into a symbolic link, or the other way round, has the hunk that removes what it was and then the one that adds what it is. An untracked file's patch is a hunk that adds all of it, ending in `\ No newline at end of file` when its last line has no newline, and an untracked symbolic link shows the path it points to. A binary file has no `patch`.
+
+A patch is left out, and `patch_truncated` is `true`, when it is larger than 128 KiB (2 MiB with `path`), when the patches before it in the reply already add up to 512 KiB (2 MiB with `path`), which also leaves out those of every file after it, when the diff's output is cut off before it (Herdr keeps the first 8 MiB of Git's output), and for an untracked file larger than 256 KiB (2 MiB with `path`). Ask for such a file with `path` to get it alone. A reply lists at most 2,000 files, in path order, and `truncated` is then `true`.
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,
@@ -394,6 +420,8 @@ Set or clear the foreground client's outer terminal window title:
 `no_foreground_client`.
 
 Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. If the requested branch already exists locally, it checks out that branch; otherwise it creates the branch from the requested base or `HEAD`. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch.
+
+When `worktree.create` creates the branch from a `base` you passed that names a ref, such as a branch, a remote-tracking branch or a tag, it records the full name of that ref as `branch.<branch>.herdrBase` in the repository's Git config, which `workspace.diff` compares the branch with. A `base` that is a bare commit id, no `base` and an existing branch record nothing, and a base that cannot be recorded does not fail the worktree.
 
 Create a worktree from a source workspace:
 

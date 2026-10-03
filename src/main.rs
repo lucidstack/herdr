@@ -63,6 +63,7 @@ mod ui;
 mod update;
 mod work_items;
 mod workspace;
+mod workspace_diff;
 mod worktree;
 
 const DEFAULT_CONFIG: &str = r##"# herdr configuration

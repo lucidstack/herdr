@@ -2251,3 +2251,128 @@ fn client_receives_notify_on_agent_state_change() {
 
     cleanup_spawned_herdr(spawned, base);
 }
+
+#[test]
+fn workspace_diff_over_the_api_socket_reports_the_checkout_of_the_workspace() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+    let repo = base.join("repo");
+    let plain_dir = base.join("plain");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&plain_dir).unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet", "-b", "main"]);
+    git(&["config", "user.email", "herdr@example.invalid"]);
+    git(&["config", "user.name", "Herdr Test"]);
+    fs::write(repo.join("tracked.txt"), "one\ntwo\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "--no-verify", "-m", "initial"]);
+    fs::write(repo.join("tracked.txt"), "one\ntwo\nthree\n").unwrap();
+    fs::write(repo.join("untracked.txt"), "fresh\n").unwrap();
+
+    let spawned = spawn_server_with_config(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &client_socket,
+        "onboarding = false\n[ui]\nmouse_capture = false\n",
+    );
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let create = |cwd: &PathBuf, label: &str| {
+        let created = send_json_request(
+            &api_socket,
+            &serde_json::json!({
+                "id": format!("create-{label}"),
+                "method": "workspace.create",
+                "params": {"cwd": cwd, "label": label},
+            })
+            .to_string(),
+        );
+        created["result"]["workspace"]["workspace_id"]
+            .as_str()
+            .expect("created workspace id")
+            .to_string()
+    };
+    let repo_workspace = create(&repo, "repo");
+    let plain_workspace = create(&plain_dir, "plain");
+
+    let diff = |params: Value| {
+        send_json_request(
+            &api_socket,
+            &serde_json::json!({"id": "diff", "method": "workspace.diff", "params": params})
+                .to_string(),
+        )
+    };
+
+    let reply = diff(serde_json::json!({"workspace_id": repo_workspace}));
+    assert_eq!(reply["id"], "diff");
+    assert_eq!(reply["result"]["type"], "workspace_diff", "{reply}");
+    let result = &reply["result"]["diff"];
+    assert_eq!(result["workspace_id"], repo_workspace.as_str());
+    assert_eq!(result["status"], "available");
+    assert_eq!(result["branch"], "main");
+    assert_eq!(result["base"]["ref_name"], "main");
+    assert_eq!(result["base"]["commit"], result["head"]);
+    assert_eq!(result["additions"], 2);
+    assert_eq!(result["deletions"], 0);
+    assert_eq!(result["truncated"], false);
+    assert_eq!(
+        result["files"],
+        serde_json::json!([
+            {
+                "path": "tracked.txt",
+                "status": "modified",
+                "additions": 1,
+                "deletions": 0,
+                "binary": false,
+                "patch": "@@ -1,2 +1,3 @@\n one\n two\n+three\n",
+                "patch_truncated": false,
+            },
+            {
+                "path": "untracked.txt",
+                "status": "untracked",
+                "additions": 1,
+                "deletions": 0,
+                "binary": false,
+                "patch": "@@ -0,0 +1,1 @@\n+fresh\n",
+                "patch_truncated": false,
+            },
+        ])
+    );
+
+    let summary = diff(serde_json::json!({"workspace_id": repo_workspace, "summary_only": true}));
+    assert_eq!(summary["result"]["diff"]["files"][0]["path"], "tracked.txt");
+    assert!(summary["result"]["diff"]["files"][0].get("patch").is_none());
+    let single = diff(serde_json::json!({"workspace_id": repo_workspace, "path": "untracked.txt"}));
+    assert_eq!(
+        single["result"]["diff"]["files"].as_array().unwrap().len(),
+        1
+    );
+
+    let plain = diff(serde_json::json!({"workspace_id": plain_workspace}));
+    assert_eq!(plain["result"]["diff"]["status"], "not_a_repository");
+    assert_eq!(plain["result"]["diff"]["files"], serde_json::json!([]));
+
+    let unknown = diff(serde_json::json!({"workspace_id": "w-nope"}));
+    assert_eq!(unknown["error"]["code"], "workspace_not_found", "{unknown}");
+
+    cleanup_spawned_herdr(spawned, base);
+}

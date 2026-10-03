@@ -3000,6 +3000,13 @@ impl HeadlessServer {
             );
             return changed | (deferred_changed && !read_only);
         }
+        if matches!(&msg.request.method, api::schema::Method::WorkspaceDiff(_)) {
+            // Git runs on a background thread, which replies when it is done. Nothing in the
+            // app changes, so there is nothing to render.
+            self.app
+                .handle_deferred_workspace_diff_api_request(msg.request, msg.respond_to);
+            return changed;
+        }
         if matches!(
             &msg.request.method,
             api::schema::Method::WorkItemSearch(_)

@@ -306,19 +306,98 @@ fn local_branch_exists(
     }
 }
 
+/// Adds the checkout. A branch that does not exist yet is created from `base`; with
+/// `record_base`, and when `base` names a ref, that ref is then recorded as the branch's
+/// base for `workspace.diff`.
 pub(crate) fn run_worktree_add_command(
     repo_root: &Path,
     path: &Path,
     branch: &str,
     base: &str,
+    record_base: bool,
     trust_repository: bool,
 ) -> Result<(), String> {
-    let command = if local_branch_exists(repo_root, branch, trust_repository)? {
-        build_worktree_add_existing_branch_command(repo_root, path, branch, trust_repository)
-    } else {
-        build_worktree_add_new_branch_command(repo_root, path, branch, base, trust_repository)
+    if local_branch_exists(repo_root, branch, trust_repository)? {
+        return run_worktree_command(&build_worktree_add_existing_branch_command(
+            repo_root,
+            path,
+            branch,
+            trust_repository,
+        ));
+    }
+    run_worktree_command(&build_worktree_add_new_branch_command(
+        repo_root,
+        path,
+        branch,
+        base,
+        trust_repository,
+    ))?;
+    if record_base {
+        // The checkout exists either way, so a base that could not be recorded is only
+        // reported.
+        if let Err(err) = record_branch_base(repo_root, path, branch, base, trust_repository) {
+            tracing::warn!(
+                branch,
+                base,
+                error = %err,
+                "could not record the base of a new worktree branch"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Writes `branch.<branch>.herdrBase`, the full name of the ref `base` names. A `base` that
+/// is not a ref, such as a commit id, or that is `HEAD` of a detached checkout, records
+/// nothing.
+fn record_branch_base(
+    repo_root: &Path,
+    checkout: &Path,
+    branch: &str,
+    base: &str,
+    trust_repository: bool,
+) -> Result<(), String> {
+    if base.starts_with('-') {
+        return Ok(());
+    }
+    // Resolved in the checkout the branch was created from: `HEAD` there is not the new
+    // branch.
+    let resolved = repository_git_command(repo_root, trust_repository)
+        .args(["rev-parse", "--symbolic-full-name", base])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !resolved.status.success() {
+        return Err(command_failure_message(&resolved));
+    }
+    let printed = String::from_utf8_lossy(&resolved.stdout);
+    let mut names = printed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let (Some(full_ref), None) = (names.next(), names.next()) else {
+        return Ok(());
     };
-    run_worktree_command(&command)
+    if !full_ref.starts_with("refs/") {
+        return Ok(());
+    }
+    let written = repository_git_command(checkout, trust_repository)
+        .args(["config", &format!("branch.{branch}.herdrBase"), full_ref])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if written.status.success() {
+        Ok(())
+    } else {
+        Err(command_failure_message(&written))
+    }
+}
+
+fn command_failure_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        format!("git failed with status {}", output.status)
+    } else {
+        stderr
+    }
 }
 
 pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), String> {
@@ -1012,6 +1091,140 @@ prunable stale
         run_worktree_command(&remove).unwrap();
         assert!(!checkout.exists());
 
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    fn recorded_base(repo: &Path, branch: &str) -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["config", "--get", &format!("branch.{branch}.herdrBase")])
+            .output()
+            .unwrap();
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8(output.stdout).unwrap().trim().to_string())
+    }
+
+    fn head_commit(repo: &Path) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn a_new_branch_records_the_ref_it_was_created_from_as_its_base() {
+        let repo = create_committed_repo("worktree-base-record-repo");
+        let root = unique_temp_path("worktree-base-record-root");
+        run_git(&repo, &["branch", "-M", "trunk"]);
+        run_git(&repo, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+        run_git(&repo, &["tag", "v1"]);
+
+        for (branch, base) in [
+            ("feature/local", "trunk"),
+            ("feature/remote", "origin/trunk"),
+            ("feature/head", "HEAD"),
+            ("feature/full", "refs/heads/trunk"),
+            ("feature/tag", "v1"),
+        ] {
+            let checkout = root.join(branch_to_path_slug(branch));
+            run_worktree_add_command(&repo, &checkout, branch, base, true, false).unwrap();
+            assert!(checkout.join("README.md").exists());
+        }
+
+        // Whatever name was given, the full name of the ref it resolves to is kept, and
+        // `HEAD` is the source checkout's, not the new branch's.
+        let recorded = |branch| recorded_base(&repo, branch);
+        assert_eq!(
+            recorded("feature/local").as_deref(),
+            Some("refs/heads/trunk")
+        );
+        assert_eq!(
+            recorded("feature/remote").as_deref(),
+            Some("refs/remotes/origin/trunk")
+        );
+        assert_eq!(
+            recorded("feature/head").as_deref(),
+            Some("refs/heads/trunk")
+        );
+        assert_eq!(
+            recorded("feature/full").as_deref(),
+            Some("refs/heads/trunk")
+        );
+        assert_eq!(recorded("feature/tag").as_deref(), Some("refs/tags/v1"));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn a_base_that_is_a_commit_and_not_a_ref_records_nothing() {
+        let repo = create_committed_repo("worktree-base-commit-repo");
+        let root = unique_temp_path("worktree-base-commit-root");
+        let commit = head_commit(&repo);
+        let checkout = root.join("by-commit");
+
+        run_worktree_add_command(&repo, &checkout, "feature/by-commit", &commit, true, false)
+            .unwrap();
+
+        assert!(checkout.join("README.md").exists());
+        assert_eq!(recorded_base(&repo, "feature/by-commit"), None);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn no_base_is_recorded_unless_asked_for_or_for_a_branch_that_already_exists() {
+        let repo = create_committed_repo("worktree-base-unasked-repo");
+        let root = unique_temp_path("worktree-base-unasked-root");
+        run_git(&repo, &["branch", "existing"]);
+
+        run_worktree_add_command(
+            &repo,
+            &root.join("unasked"),
+            "feature/unasked",
+            "HEAD",
+            false,
+            false,
+        )
+        .unwrap();
+        run_worktree_add_command(
+            &repo,
+            &root.join("existing"),
+            "existing",
+            "HEAD",
+            true,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(recorded_base(&repo, "feature/unasked"), None);
+        assert_eq!(recorded_base(&repo, "existing"), None);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_base_that_cannot_be_recorded_does_not_fail_the_worktree() {
+        let repo = create_committed_repo("worktree-base-locked-repo");
+        let root = unique_temp_path("worktree-base-locked-root");
+        // Git cannot write its config while the lock file's name is taken.
+        std::fs::create_dir(repo.join(".git/config.lock")).unwrap();
+        let checkout = root.join("locked");
+
+        run_worktree_add_command(&repo, &checkout, "feature/locked", "HEAD", true, false).unwrap();
+
+        assert!(checkout.join("README.md").exists());
+        std::fs::remove_dir(repo.join(".git/config.lock")).unwrap();
+        assert_eq!(recorded_base(&repo, "feature/locked"), None);
+        let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(repo);
     }
 

@@ -483,6 +483,227 @@ fn agent_image_statuses_are_snake_case_and_a_newer_one_decodes_as_unknown() {
 }
 
 #[test]
+fn workspace_diff_request_round_trips_and_omits_unset_options() {
+    let request = Request {
+        id: "req_diff".into(),
+        method: Method::WorkspaceDiff(WorkspaceDiffParams {
+            workspace_id: "w4".into(),
+            path: Some("src/login.rs".into()),
+            summary_only: true,
+        }),
+    };
+
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "workspace.diff");
+    assert_eq!(
+        json["params"],
+        serde_json::json!({"workspace_id": "w4", "path": "src/login.rs", "summary_only": true})
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let bare: Request = serde_json::from_str(
+        r#"{"id":"1","method":"workspace.diff","params":{"workspace_id":"w4"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        bare.method,
+        Method::WorkspaceDiff(WorkspaceDiffParams {
+            workspace_id: "w4".into(),
+            path: None,
+            summary_only: false,
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&bare).unwrap()["params"],
+        serde_json::json!({"workspace_id": "w4"})
+    );
+}
+
+#[test]
+fn workspace_diff_result_serialises_with_the_documented_keys() {
+    let file = |path: &str, status, additions, deletions| WorkspaceDiffFile {
+        path: path.into(),
+        old_path: None,
+        status,
+        additions,
+        deletions,
+        binary: false,
+        patch: None,
+        patch_truncated: false,
+    };
+    let response = SuccessResponse {
+        id: "req_1".into(),
+        result: ResponseResult::WorkspaceDiff {
+            diff: WorkspaceDiffInfo {
+                workspace_id: "w4".into(),
+                status: WorkspaceDiffStatus::Available,
+                directory: Some("/Users/me/worktrees/acme/tech-123-fix-login".into()),
+                branch: Some("tech-123-fix-login".into()),
+                base: Some(WorkspaceDiffBase {
+                    ref_name: Some("origin/main".into()),
+                    commit: "4f2c9e1".into(),
+                }),
+                head: Some("9ab1d07".into()),
+                additions: 44,
+                deletions: 7,
+                truncated: false,
+                files: vec![
+                    WorkspaceDiffFile {
+                        patch: Some("@@ -10,7 +10,40 @@\n-old\n+new\n".into()),
+                        ..file(
+                            "src/login.rs",
+                            WorkspaceDiffFileStatus::Modified,
+                            Some(40),
+                            Some(7),
+                        )
+                    },
+                    WorkspaceDiffFile {
+                        old_path: Some("src/auth.rs".into()),
+                        patch: Some("@@ -1,3 +1,5 @@\n".into()),
+                        ..file(
+                            "src/session.rs",
+                            WorkspaceDiffFileStatus::Renamed,
+                            Some(2),
+                            Some(0),
+                        )
+                    },
+                    WorkspaceDiffFile {
+                        binary: true,
+                        ..file(
+                            "assets/logo.png",
+                            WorkspaceDiffFileStatus::Added,
+                            None,
+                            None,
+                        )
+                    },
+                    WorkspaceDiffFile {
+                        patch: Some("@@ -0,0 +1,2 @@\n+first\n+second\n".into()),
+                        ..file(
+                            "notes.md",
+                            WorkspaceDiffFileStatus::Untracked,
+                            Some(2),
+                            Some(0),
+                        )
+                    },
+                    WorkspaceDiffFile {
+                        patch_truncated: true,
+                        ..file(
+                            "Cargo.lock",
+                            WorkspaceDiffFileStatus::Modified,
+                            Some(900),
+                            Some(850),
+                        )
+                    },
+                ],
+                error: None,
+            },
+        },
+    };
+
+    assert_eq!(
+        serde_json::to_value(&response).unwrap(),
+        serde_json::json!({
+            "id": "req_1",
+            "result": {"type": "workspace_diff", "diff": {
+                "workspace_id": "w4",
+                "status": "available",
+                "directory": "/Users/me/worktrees/acme/tech-123-fix-login",
+                "branch": "tech-123-fix-login",
+                "base": {"ref_name": "origin/main", "commit": "4f2c9e1"},
+                "head": "9ab1d07",
+                "additions": 44,
+                "deletions": 7,
+                "truncated": false,
+                "files": [
+                    {"path": "src/login.rs", "status": "modified", "additions": 40, "deletions": 7,
+                     "binary": false, "patch": "@@ -10,7 +10,40 @@\n-old\n+new\n", "patch_truncated": false},
+                    {"path": "src/session.rs", "old_path": "src/auth.rs", "status": "renamed",
+                     "additions": 2, "deletions": 0, "binary": false, "patch": "@@ -1,3 +1,5 @@\n",
+                     "patch_truncated": false},
+                    {"path": "assets/logo.png", "status": "added", "binary": true,
+                     "patch_truncated": false},
+                    {"path": "notes.md", "status": "untracked", "additions": 2, "deletions": 0,
+                     "binary": false, "patch": "@@ -0,0 +1,2 @@\n+first\n+second\n",
+                     "patch_truncated": false},
+                    {"path": "Cargo.lock", "status": "modified", "additions": 900, "deletions": 850,
+                     "binary": false, "patch_truncated": true},
+                ],
+            }},
+        })
+    );
+}
+
+#[test]
+fn workspace_diff_without_branch_base_or_head_says_null_and_names_the_error() {
+    let response = SuccessResponse {
+        id: "req_1".into(),
+        result: ResponseResult::WorkspaceDiff {
+            diff: WorkspaceDiffInfo {
+                workspace_id: "w4".into(),
+                status: WorkspaceDiffStatus::Unreadable,
+                directory: None,
+                branch: None,
+                base: None,
+                head: None,
+                additions: 0,
+                deletions: 0,
+                truncated: false,
+                files: Vec::new(),
+                error: Some("fatal: index file corrupt".into()),
+            },
+        },
+    };
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        json["result"]["diff"],
+        serde_json::json!({
+            "workspace_id": "w4",
+            "status": "unreadable",
+            "branch": null,
+            "base": null,
+            "head": null,
+            "additions": 0,
+            "deletions": 0,
+            "truncated": false,
+            "files": [],
+            "error": "fatal: index file corrupt",
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn workspace_diff_result_from_a_newer_server_still_decodes() {
+    let response: SuccessResponse = serde_json::from_value(serde_json::json!({
+        "id": "1",
+        "result": {"type": "workspace_diff", "diff": {
+            "workspace_id": "w4",
+            "status": "not_yet_invented",
+            "files": [
+                {"path": "a", "status": "not_yet_invented", "binary": false},
+                {"path": "b", "status": "untracked", "extra": "ignored"},
+            ],
+        }},
+    }))
+    .unwrap();
+
+    let ResponseResult::WorkspaceDiff { diff } = response.result else {
+        panic!("not a workspace diff result");
+    };
+    assert_eq!(diff.status, WorkspaceDiffStatus::Unknown);
+    assert_eq!(diff.files[0].status, WorkspaceDiffFileStatus::Unknown);
+    assert_eq!(diff.files[1].status, WorkspaceDiffFileStatus::Untracked);
+    // What the server leaves out takes its default.
+    assert_eq!((diff.base, diff.branch, diff.head), (None, None, None));
+    assert!(!diff.truncated && diff.additions == 0);
+    assert!(!diff.files[1].patch_truncated && diff.files[1].patch.is_none());
+}
+
+#[test]
 fn workspace_close_group_intent_defaults_false_and_round_trips() {
     let request: Request = serde_json::from_value(serde_json::json!({
         "id": "close",
