@@ -154,6 +154,28 @@ pub(crate) fn forward_remote_bridge_stdio(
     )
 }
 
+/// Like `forward_remote_bridge_stdio`, but forwards only client requests `allow` permits and
+/// answers the rest on stdout itself.
+pub(crate) fn forward_remote_bridge_stdio_filtered(
+    stream: crate::ipc::LocalStream,
+    allow: crate::remote::AllowList,
+) -> std::io::Result<()> {
+    use interprocess::TryClone as _;
+
+    let server = stream.try_clone()?;
+    crate::remote::forward_filtered(
+        allow,
+        std::io::stdin(),
+        stream,
+        |stream| {
+            let crate::ipc::LocalStream::UdSocket(stream) = stream;
+            let _ = stream.inner().shutdown(std::net::Shutdown::Write);
+        },
+        server,
+        std::io::stdout(),
+    )
+}
+
 pub(super) fn forward_remote_bridge_stdio_with_timeout(
     stream: crate::ipc::LocalStream,
     idle_timeout: Option<std::time::Duration>,

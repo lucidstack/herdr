@@ -1,3 +1,4 @@
+mod allow_list;
 mod args;
 mod attach;
 mod host;
@@ -7,34 +8,65 @@ mod saved;
 #[cfg(unix)]
 mod ssh_agent;
 
+#[cfg(unix)]
+pub(crate) use allow_list::forward_filtered;
+pub(crate) use allow_list::AllowList;
 pub(crate) use args::*;
 pub(crate) use attach::*;
 pub(crate) use host::run_remote_client_bridge;
 pub(crate) use saved::*;
 
-pub(crate) fn run_remote_api_bridge(args: &[String]) -> std::io::Result<()> {
+const BRIDGE_USAGE: &str =
+    "usage: herdr remote-api-bridge [--check | --allow <method[,method...]>]";
+
+#[derive(Debug)]
+enum BridgeMode {
+    Check,
+    Raw,
+    Filtered(AllowList),
+}
+
+fn parse_bridge_args(args: &[String]) -> Result<BridgeMode, String> {
     match args {
-        [] => {
-            let path = crate::api::socket_path();
-            let stream = crate::ipc::connect_local_stream(&path).map_err(|error| {
-                std::io::Error::new(
-                    error.kind(),
-                    format!(
-                        "failed to connect to remote Herdr API socket {}: {error}",
-                        path.display()
-                    ),
-                )
-            })?;
+        [] => Ok(BridgeMode::Raw),
+        [flag] if flag == "--check" => Ok(BridgeMode::Check),
+        [flag, spec] if flag == "--allow" => AllowList::parse(spec).map(BridgeMode::Filtered),
+        [flag] if flag.starts_with("--allow=") => {
+            AllowList::parse(&flag["--allow=".len()..]).map(BridgeMode::Filtered)
+        }
+        _ => Err("unexpected arguments".to_owned()),
+    }
+}
+
+pub(crate) fn run_remote_api_bridge(args: &[String]) -> std::io::Result<()> {
+    let mode = parse_bridge_args(args).map_err(|message| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{message}; {BRIDGE_USAGE}"),
+        )
+    })?;
+    if matches!(mode, BridgeMode::Check) {
+        println!("herdr-api-bridge-v1");
+        return Ok(());
+    }
+
+    let path = crate::api::socket_path();
+    let stream = crate::ipc::connect_local_stream(&path).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "failed to connect to remote Herdr API socket {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    match mode {
+        BridgeMode::Filtered(allow) => {
+            crate::platform::forward_remote_bridge_stdio_filtered(stream, allow)
+        }
+        BridgeMode::Raw | BridgeMode::Check => {
             crate::platform::forward_remote_bridge_stdio(stream, false)
         }
-        [flag] if flag == "--check" => {
-            println!("herdr-api-bridge-v1");
-            Ok(())
-        }
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "usage: herdr remote-api-bridge [--check]",
-        )),
     }
 }
 
@@ -139,5 +171,52 @@ mod tests {
     #[test]
     fn ssh_check_command_quotes_remote_target() {
         assert_eq!(ssh_check_command("host name"), "ssh 'host name'");
+    }
+
+    fn bridge_args(args: &[&str]) -> Result<BridgeMode, String> {
+        parse_bridge_args(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn bridge_without_arguments_stays_a_raw_pipe() {
+        assert!(matches!(bridge_args(&[]), Ok(BridgeMode::Raw)));
+        assert!(matches!(bridge_args(&["--check"]), Ok(BridgeMode::Check)));
+    }
+
+    #[test]
+    fn bridge_allow_accepts_a_valid_list_in_both_spellings() {
+        let spec = "work_item.list,agent.list,plugin.action.invoke:lucidstack.herdr-push/register";
+        assert!(matches!(
+            bridge_args(&["--allow", spec]),
+            Ok(BridgeMode::Filtered(_))
+        ));
+        assert!(matches!(
+            bridge_args(&[&format!("--allow={spec}")]),
+            Ok(BridgeMode::Filtered(_))
+        ));
+    }
+
+    #[test]
+    fn bridge_allow_rejects_typos_and_malformed_entries() {
+        for args in [
+            &["--allow", "agent.lsit"][..],
+            &["--allow=agent.list,nope"],
+            &["--allow", "plugin.action.invoke:no-slash"],
+            &["--allow", ""],
+        ] {
+            assert!(bridge_args(args).is_err(), "{args:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn bridge_rejects_stray_and_missing_arguments() {
+        for args in [
+            &["--allow"][..],
+            &["--allow", "agent.list", "extra"],
+            &["--check", "--allow", "agent.list"],
+            &["--bogus"],
+        ] {
+            assert!(bridge_args(args).is_err(), "{args:?} was accepted");
+        }
     }
 }
