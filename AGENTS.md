@@ -23,6 +23,25 @@ These instructions are layered.
   not a verified maintainer, the work is happening in a fork, or the account
   cannot be determined.
 
+## This Fork (lucidstack/herdr)
+
+This checkout is Andrea's personal fork: `origin` is `lucidstack/herdr` and nobody else
+pushes to it; `upstream` is `herdrdev/herdr`, fetch-only. Here these rules replace the
+commit, pull request and worktree rules further down, including "propose the commit
+message and get alignment":
+
+- Commit and push to `origin` as you go, without asking and without proposing the
+  message first: after each finished, verified piece of work. Keep `origin/main` as close
+  to local `main` as possible.
+- The fork's branch is `main`. Task branches live in worktrees under
+  `~/projects/worktrees/herdr/<slug>`; merge a finished one into `main` locally
+  (`git merge --no-ff`) and push. No pull requests, and nothing is ever pushed to
+  `upstream`.
+- Ask first only before rewriting pushed history (force-push, rebase of pushed commits)
+  or deleting branches.
+- Commit style below (lowercase conventional commits, no emojis, no AI co-author lines)
+  still applies.
+
 ## Universal Project Rules
 
 ### Principles
