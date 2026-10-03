@@ -166,6 +166,23 @@ impl<R: Read + Seek> Scan<R> {
         }
     }
 
+    /// Hands each line of the newest turn to `take`, newest first, without building the turn:
+    /// a caller after one fact about it has no use for the entries, whose cost grows with the
+    /// turn. The walk looks back at most `reach` bytes from the end of the file, and ends at
+    /// the turn's opening whether or not it got that far.
+    pub(super) fn visit_turn(&mut self, reach: u64, mut take: impl FnMut(Line)) -> io::Result<()> {
+        let floor = self.at.saturating_sub(reach);
+        loop {
+            match self.step(floor)? {
+                Step::Line(_, line) => take(line),
+                // Whether a context line opens the turn depends on what is older, and the
+                // lines on both sides of it belong to the turn either way.
+                Step::Context(..) => {}
+                Step::Prompt(..) | Step::End | Step::Far => return Ok(()),
+            }
+        }
+    }
+
     /// The next line that matters going back, or the prompt that opens the turn. A line at an
     /// offset below `floor` ends the walk.
     fn step(&mut self, floor: u64) -> io::Result<Step> {

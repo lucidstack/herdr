@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::Deserialize;
 
 pub const DEFAULT_GITHUB_REVIEW_REQUESTED_QUERY: &str =
@@ -61,6 +63,11 @@ pub const DEFAULT_JIRA_JQL: &str =
 pub const DEFAULT_AGENT: &str = "claude";
 /// omp's slash command that switches its session into plan mode.
 const OMP_PLAN_COMMAND: &str = "/plan";
+/// Seconds one command may run before the agent running it needs you, unless configured.
+const DEFAULT_STUCK_AFTER_SECONDS: u64 = 600;
+/// The shortest and the longest `stuck_after_seconds` that is taken as set.
+const MIN_STUCK_AFTER_SECONDS: u64 = 60;
+const MAX_STUCK_AFTER_SECONDS: u64 = 24 * 60 * 60;
 
 /// An agent kind and the extra arguments it is started with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +105,8 @@ pub struct WorkItemsConfig {
     pub agent_args: Vec<String>,
     /// The "Pick next task…" discovery workspace.
     pub pick_next: PickNextConfig,
+    /// Seconds an agent may run one command before it counts as stuck and needs you, clamped to 60–86400. Default: 600.
+    pub stuck_after_seconds: u64,
     /// GitHub pull requests. Unset disables the source.
     pub github: Option<GithubWorkItemsConfig>,
     /// Jira issues. Unset disables the source.
@@ -110,6 +119,7 @@ impl Default for WorkItemsConfig {
             agent: DEFAULT_AGENT.into(),
             agent_args: Vec::new(),
             pick_next: PickNextConfig::default(),
+            stuck_after_seconds: DEFAULT_STUCK_AFTER_SECONDS,
             github: None,
             jira: None,
         }
@@ -121,6 +131,14 @@ impl WorkItemsConfig {
     /// handoff refreshes these from the caller, so a rotated token reaches the new server.
     pub fn credential_env_names(&self) -> impl Iterator<Item = &str> {
         self.jira.iter().map(|jira| jira.token_env.as_str())
+    }
+
+    /// How long an agent may run one command before it counts as stuck and needs you.
+    pub fn stuck_after(&self) -> Duration {
+        Duration::from_secs(
+            self.stuck_after_seconds
+                .clamp(MIN_STUCK_AFTER_SECONDS, MAX_STUCK_AFTER_SECONDS),
+        )
     }
 
     /// The agent of workflow blocks that do not set their own.
@@ -572,6 +590,37 @@ agent_args = []
         assert_eq!(no_plan.pick_next_plan_command(), "");
         let custom = parse("[work_items.pick_next]\nplan_command = \"/plan-mode\"\n");
         assert_eq!(custom.pick_next_plan_command(), "/plan-mode");
+    }
+
+    #[test]
+    fn an_agent_is_stuck_after_ten_minutes_on_one_command_unless_configured() {
+        let stuck_after = |toml: &str| {
+            toml::from_str::<Config>(toml)
+                .expect("config parses")
+                .work_items
+                .stuck_after()
+        };
+        assert_eq!(stuck_after(""), Duration::from_secs(600));
+        assert_eq!(
+            stuck_after("[work_items]\nstuck_after_seconds = 90\n"),
+            Duration::from_secs(90)
+        );
+    }
+
+    #[test]
+    fn stuck_after_is_kept_between_a_minute_and_a_day() {
+        let stuck_after = |seconds: u64| {
+            WorkItemsConfig {
+                stuck_after_seconds: seconds,
+                ..WorkItemsConfig::default()
+            }
+            .stuck_after()
+        };
+        assert_eq!(stuck_after(0), Duration::from_secs(60));
+        assert_eq!(stuck_after(59), Duration::from_secs(60));
+        assert_eq!(stuck_after(86_400), Duration::from_secs(86_400));
+        assert_eq!(stuck_after(86_401), Duration::from_secs(86_400));
+        assert_eq!(stuck_after(u64::MAX), Duration::from_secs(86_400));
     }
 
     #[test]

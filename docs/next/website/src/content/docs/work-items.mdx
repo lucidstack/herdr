@@ -250,6 +250,7 @@ Herdr works out whether each item needs you, and why, and reports it as the item
 | Kind | When |
 |---|---|
 | `blocked` | An agent in the item's workspace waits on you. The reason is the prompt the agent reported, when its integration reports one. |
+| `stuck` | An agent in the item's workspace has been running one shell command for at least `work_items.stuck_after_seconds`. The reason names the command and that period, for example `` `cargo test` has been running for over 10 min ``, and never the time run so far, so it stays the same while the command goes on. It stops counting when the command ends or the agent stops working. |
 | `failed` | Setting up the workspace or carrying out a choice failed, or the workspace could not be removed. A failed agent brief stops counting once an agent in the item's workspace has finished a turn after it: the agent worked, so it was ready after all. The step stays failed in `provisioning`. |
 | `finished` | An agent in the item's workspace finished its turn and its pane got no input for two minutes since. Typing, pasting or prompting it after the turn ended, or dismissing it with `agent.dismiss`, counts as dealing with it. |
 | `changes_requested`, `checks_failing`, `ready_to_merge` | What the tracker asks of your pull request, including the one linked to a ticket. |
@@ -258,11 +259,18 @@ Herdr works out whether each item needs you, and why, and reports it as the item
 
 While an agent in the item's workspace is working, or Herdr is setting up the workspace or carrying out a choice, the tracker's asks wait: someone is already on it. Hidden items, items waiting on others, and items you chose to handle on GitHub or Jira carry no tracker asks. A start reminder is shown on the item but is never a need.
 
+A command is running while its call in the agent's transcript has no result yet. Herdr reads the transcripts of working agents once a minute. It can read those of omp and Claude Code, so no other agent is ever stuck, and it follows an agent's own commands, not those of its subagents. A command that a permission prompt held back counts from when the agent went back to work. The period is set in seconds, from 60 to 86400:
+
+```toml
+[work_items]
+stuck_after_seconds = 600   # default: ten minutes
+```
+
 `attention.changed` is published when an item starts or stops needing you, or needs you for another kind of reason, and never again while the kind stays the same. It carries `item_id`, `workspace_id`, a `title` and the new `attention` (absent once it no longer needs you). Needs found at start-up are recorded without events.
 
-Agents in panes outside every item's workspace are covered too, so none goes unnoticed: `herdr work-item list` returns them under `agents`, each with its pane, workspace, status and `attention` (`blocked` or `finished`, by the same rules), and `attention.changed` reports them with a `pane_id` instead of an `item_id`.
+Agents in panes outside every item's workspace are covered too, so none goes unnoticed: `herdr work-item list` returns them under `agents`, each with its pane, workspace, status and `attention` (`blocked`, `stuck` or `finished`, by the same rules), and `attention.changed` reports them with a `pane_id` instead of an `item_id`.
 
-`agent.dismiss` counts an agent's finished turn as dealt with, so its `finished` attention clears, for agents inside an item's workspace and outside alike. It takes the agent's pane as `target`. A `blocked` agent has to be answered instead and fails with `agent_blocked`. An agent whose turn does not need you yet, because it is working, ended its turn less than two minutes ago, or was dealt with already, is left as it is.
+`agent.dismiss` counts an agent's finished turn as dealt with, so its `finished` attention clears, for agents inside an item's workspace and outside alike. It takes the agent's pane as `target`. A `blocked` agent has to be answered instead and fails with `agent_blocked`. An agent whose turn does not need you yet, because it is working (a `stuck` one as well), ended its turn less than two minutes ago, or was dealt with already, is left as it is.
 
 ### Read, search and add tickets on demand
 

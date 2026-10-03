@@ -92,7 +92,7 @@
               "$ref": "#/schemas/event/$defs/AttentionKind"
             },
             "pane_id": {
-              "description": "The agent's pane, for `blocked` and `finished`.",
+              "description": "The agent's pane, for `blocked`, `stuck` and `finished`.",
               "type": [
                 "string",
                 "null"
@@ -128,6 +128,11 @@
             {
               "const": "blocked",
               "description": "An agent waits on you, e.g. for a permission or a question.",
+              "type": "string"
+            },
+            {
+              "const": "stuck",
+              "description": "An agent has been running one shell command for at least `work_items.stuck_after_seconds`.",
               "type": "string"
             },
             {
@@ -8684,7 +8689,7 @@
               "$ref": "#/schemas/success_response/$defs/AttentionKind"
             },
             "pane_id": {
-              "description": "The agent's pane, for `blocked` and `finished`.",
+              "description": "The agent's pane, for `blocked`, `stuck` and `finished`.",
               "type": [
                 "string",
                 "null"
@@ -8720,6 +8725,11 @@
             {
               "const": "blocked",
               "description": "An agent waits on you, e.g. for a permission or a question.",
+              "type": "string"
+            },
+            {
+              "const": "stuck",
+              "description": "An agent has been running one shell command for at least `work_items.stuck_after_seconds`.",
               "type": "string"
             },
             {

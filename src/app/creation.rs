@@ -404,7 +404,7 @@ impl App {
     }
 }
 
-fn terminal_agent_session_info(
+pub(super) fn terminal_agent_session_info(
     terminal: &crate::terminal::TerminalState,
 ) -> Option<crate::api::schema::AgentSessionInfo> {
     let transcript_path = terminal.agent_transcript_path().map(str::to_string);

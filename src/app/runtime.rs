@@ -162,6 +162,7 @@ impl App {
             self.next_tab_bar_status_deadline(),
             self.work_items.next_deadline(),
             self.attention_deadline(),
+            self.running_command_check_at,
             render_deadline,
         ]
         .into_iter()

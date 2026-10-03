@@ -215,6 +215,8 @@ pub enum AppEvent {
     WorkItems(Box<crate::work_items::WorkItemsEvent>),
     /// Background searches for agent transcripts no integration reported completed.
     AgentTranscriptsLookedUp(Vec<AgentTranscriptLookup>),
+    /// Background reads of what working agents' transcripts show them running completed.
+    RunningCommandsRead(Vec<RunningCommandRead>),
 }
 
 /// The outcome of searching for the transcript of the session in one pane's terminal.
@@ -224,4 +226,13 @@ pub struct AgentTranscriptLookup {
     pub terminal_id: crate::terminal::TerminalId,
     pub session_ref: crate::agent_resume::AgentSessionRef,
     pub path: Option<String>,
+}
+
+/// What one working agent's transcript showed it running when it was read.
+#[derive(Debug)]
+pub(crate) struct RunningCommandRead {
+    pub terminal_id: crate::terminal::TerminalId,
+    /// The oldest shell command that had no result yet and a start time; `None` when there was
+    /// none, or the transcript could not be read.
+    pub command: Option<crate::work_items::attention::RunningCommand>,
 }

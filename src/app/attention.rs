@@ -6,7 +6,7 @@
 //! per render or per byte of output.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use super::App;
 use crate::api::schema::{AgentAttentionInfo, EventData, EventEnvelope, EventKind};
@@ -86,6 +86,8 @@ impl App {
     }
 
     fn agent_verdicts(&self, now: Instant) -> AgentVerdicts {
+        // Read once, so that every agent's command has run for the same time.
+        let wall_now = SystemTime::now();
         let item_workspaces = self.work_items.item_workspace_ids();
         let mut by_workspace = HashMap::new();
         let mut loose = Vec::new();
@@ -94,7 +96,7 @@ impl App {
             let linked = item_workspaces.contains(ws.id.as_str());
             let mut verdicts = Vec::new();
             for signal in self.agent_signals(ws_idx) {
-                let verdict = attention::agent_verdict(&signal, now);
+                let verdict = attention::agent_verdict(&signal, now, wall_now);
                 recheck_at = attention::earliest(recheck_at, verdict.recheck_at);
                 if linked {
                     verdicts.push(verdict);
@@ -148,6 +150,9 @@ impl App {
                 .terminal_runtimes
                 .get(terminal_id)
                 .and_then(|runtime| runtime.last_user_input_at()),
+            running_command: self.running_commands.get(terminal_id).cloned(),
+            stuck_after: self.work_items.stuck_after(),
+            working_since: terminal.working_since,
         })
     }
 
@@ -177,7 +182,7 @@ impl App {
         now: Instant,
     ) -> bool {
         self.agent_signal(ws_idx, pane_id, terminal_id)
-            .and_then(|signal| attention::agent_verdict(&signal, now).need)
+            .and_then(|signal| attention::agent_verdict(&signal, now, SystemTime::now()).need)
             .is_some_and(|need| need.kind == crate::api::schema::AttentionKind::Finished)
     }
 
@@ -227,13 +232,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use crate::api::schema::{
         AgentTarget, AttentionKind, EmptyParams, ErrorResponse, EventData, Method, PaneAgentState,
         PaneReportAgentParams, Request, ResponseResult, SuccessResponse, WorkItemLinkParams,
     };
+    use crate::app::running_commands::test_support;
     use crate::app::{App, AppPolicy};
+    use crate::work_items::attention::RunningCommand;
     use crate::work_items::test_support::{source_item, FakeSource};
     use crate::work_items::WorkItems;
 
@@ -528,5 +535,171 @@ mod tests {
             target: "w9:p9".into(),
         })));
         assert_eq!(error_code(&unknown).as_deref(), Some("agent_not_found"));
+    }
+
+    fn terminal_of(app: &App, ws_idx: usize) -> crate::terminal::TerminalId {
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone()
+    }
+
+    /// Reports the agent of workspace `ws_idx` working, with its transcript showing `command`
+    /// running for `minutes` minutes. The agent has been working a minute longer.
+    fn run_command_for_minutes(app: &mut App, ws_idx: usize, command: &str, minutes: u64) {
+        report(app, ws_idx, PaneAgentState::Working, None);
+        let terminal_id = terminal_of(app, ws_idx);
+        let ran = Duration::from_secs(minutes * 60);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .working_since = Instant::now().checked_sub(ran + Duration::from_secs(60));
+        app.running_commands.insert(
+            terminal_id,
+            RunningCommand {
+                call_id: "toolu_1".into(),
+                started_at: SystemTime::now() - ran,
+                label: command.into(),
+            },
+        );
+        app.attention_schedule.mark_dirty();
+        app.sync_work_item_events();
+    }
+
+    #[test]
+    fn an_agent_in_an_items_workspace_needs_you_once_one_command_ran_too_long_and_not_after() {
+        let (mut app, hub) = app_with_item();
+        let item_id = Some("fake:a".to_string());
+        let workspace_id = app.state.workspaces[0].id.clone();
+        app.handle_api_request(request(Method::WorkItemLink(WorkItemLinkParams {
+            item_id: "fake:a".into(),
+            workspace_id,
+        })));
+
+        run_command_for_minutes(&mut app, 0, "cargo test --all", 11);
+        let attention = list(&mut app).0[0].attention.clone().expect("stuck");
+        assert_eq!(attention.kind, AttentionKind::Stuck);
+        assert_eq!(
+            attention.reason,
+            "`cargo test --all` has been running for over 10 min"
+        );
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert_eq!(attention.pane_id, app.public_pane_id(0, pane_id));
+        // The agent is in the item's workspace, so it is not listed on its own.
+        assert!(list(&mut app).1.is_empty());
+
+        report(&mut app, 0, PaneAgentState::Idle, None);
+        assert_eq!(list(&mut app).0[0].attention, None);
+
+        assert_eq!(
+            attention_events(&hub),
+            vec![
+                (item_id.clone(), None, Some(AttentionKind::New)),
+                (item_id.clone(), None, None),
+                (item_id.clone(), None, Some(AttentionKind::Stuck)),
+                (item_id, None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_agent_outside_every_item_is_stuck_by_the_same_rule_and_reported_by_pane() {
+        let (mut app, hub) = app_with_item();
+        run_command_for_minutes(&mut app, 1, "npm run build", 11);
+
+        let (_, agents) = list(&mut app);
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let pane_public = app.public_pane_id(1, pane_id);
+        assert_eq!(agents.len(), 1);
+        let attention = agents[0].attention.as_ref().expect("stuck");
+        assert_eq!(attention.kind, AttentionKind::Stuck);
+        assert_eq!(
+            attention.reason,
+            "`npm run build` has been running for over 10 min"
+        );
+        assert_eq!(attention.pane_id, pane_public);
+
+        report(&mut app, 1, PaneAgentState::Idle, None);
+        assert_eq!(list(&mut app).1[0].attention, None);
+
+        let pane_events: Vec<_> = attention_events(&hub)
+            .into_iter()
+            .filter(|(item_id, _, _)| item_id.is_none())
+            .collect();
+        assert_eq!(
+            pane_events,
+            vec![
+                (None, pane_public.clone(), Some(AttentionKind::Stuck)),
+                (None, pane_public, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_command_that_has_not_run_long_enough_waits_for_the_stuck_period_to_end() {
+        let (mut app, _hub) = app_with_item();
+        run_command_for_minutes(&mut app, 1, "npm run build", 5);
+        assert_eq!(list(&mut app).1[0].attention, None);
+
+        // Attention is worked out again when the command will have run for ten minutes.
+        let wait = app
+            .attention_deadline()
+            .expect("a recheck")
+            .saturating_duration_since(Instant::now());
+        assert!(
+            (Duration::from_secs(290)..=Duration::from_secs(300)).contains(&wait),
+            "{wait:?}"
+        );
+    }
+
+    #[test]
+    fn dismissing_a_stuck_agent_changes_nothing_because_its_command_has_to_end() {
+        let (mut app, _hub) = app_with_item();
+        run_command_for_minutes(&mut app, 1, "npm run build", 11);
+
+        assert!(is_ok(&dismiss(&mut app, 1)));
+        let attention = list(&mut app).1[0].attention.clone().expect("still stuck");
+        assert_eq!(attention.kind, AttentionKind::Stuck);
+    }
+
+    #[test]
+    fn a_working_agent_whose_transcript_shows_an_old_command_running_is_stuck() {
+        use crate::agent_resume::{AgentSessionRef, PersistedAgentSession};
+
+        let (mut app, _hub) = app_with_item();
+        let started = SystemTime::now() - Duration::from_secs(11 * 60);
+        let path = test_support::claude_transcript(
+            "attention",
+            &[("toolu_1", "cargo test --all", Some(started))],
+        );
+        report(&mut app, 1, PaneAgentState::Working, None);
+        let terminal_id = terminal_of(&app, 1);
+        let terminal = app.state.terminals.get_mut(&terminal_id).expect("terminal");
+        terminal.set_persisted_agent_session(PersistedAgentSession {
+            source: "test".into(),
+            agent: "claude".into(),
+            session_ref: AgentSessionRef::path(path.to_str().expect("utf-8 path")).expect("path"),
+        });
+        terminal.working_since = Instant::now().checked_sub(Duration::from_secs(12 * 60));
+
+        // The first look arms the schedule, and a minute later the transcript is read.
+        let now = Instant::now();
+        app.run_running_command_check(now);
+        app.run_running_command_check(now + Duration::from_secs(60));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.running_commands.is_empty() {
+            assert!(Instant::now() < deadline, "the transcript was never read");
+            app.drain_all_internal_events();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.sync_work_item_events();
+
+        let attention = list(&mut app).1[0].attention.clone().expect("stuck");
+        assert_eq!(attention.kind, AttentionKind::Stuck);
+        assert_eq!(
+            attention.reason,
+            "`cargo test --all` has been running for over 10 min"
+        );
     }
 }

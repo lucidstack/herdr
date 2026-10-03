@@ -16,7 +16,9 @@ use serde::Deserialize;
 mod activity;
 mod locate;
 
-pub use activity::{activity, history, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS};
+pub use activity::{
+    activity, history, running_shell_calls, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS,
+};
 pub use locate::find_claude_transcript;
 
 const READ_CHUNK: usize = 64 * 1024;

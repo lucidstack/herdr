@@ -2,7 +2,7 @@
 //! I/O.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::api::schema::{AttentionInfo, AttentionKind};
 use crate::detect::AgentState;
@@ -29,6 +29,17 @@ impl Need {
     }
 }
 
+/// A shell command an agent has been running, as its transcript shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunningCommand {
+    /// The id of the tool call, which tells one command from another that reads the same.
+    pub call_id: String,
+    /// When the transcript wrote the call.
+    pub started_at: SystemTime,
+    /// What the command is: its first line, or what its call says it does.
+    pub label: String,
+}
+
 /// One agent pane as the rules see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentSignal<'a> {
@@ -41,6 +52,12 @@ pub(crate) struct AgentSignal<'a> {
     /// The `turn_finished_at` of a turn the user dismissed rather than typed to the pane.
     pub dismissed_turn: Option<Instant>,
     pub last_input_at: Option<Instant>,
+    /// The oldest command the agent's transcript shows it running, when one is.
+    pub running_command: Option<RunningCommand>,
+    /// How long the agent may run one command before it needs you.
+    pub stuck_after: Duration,
+    /// When the agent began working, if that was seen.
+    pub working_since: Option<Instant>,
 }
 
 /// What one agent means for you right now.
@@ -52,7 +69,7 @@ pub(crate) struct AgentVerdict {
     /// dealt with it since.
     pub turn_finished_at: Option<Instant>,
     /// When the verdict may change without any new signal: a finished turn's quiet period
-    /// ending.
+    /// ending, or a running command having run for the stuck period.
     pub recheck_at: Option<Instant>,
 }
 
@@ -64,10 +81,15 @@ impl AgentVerdict {
     }
 }
 
-/// Blocked: needs you. Idle after a turn: needs you once the pane was left alone for
-/// `FINISHED_QUIET_PERIOD` since the turn ended; input after the turn ended, or dismissing
-/// the turn, means you already dealt with it.
-pub(crate) fn agent_verdict(signal: &AgentSignal<'_>, now: Instant) -> AgentVerdict {
+/// Blocked: needs you. Working: needs you once one command has been running for
+/// `stuck_after`, by the wall clock `wall_now`. Idle after a turn: needs you once the pane was
+/// left alone for `FINISHED_QUIET_PERIOD` since the turn ended; input after the turn ended, or
+/// dismissing the turn, means you already dealt with it.
+pub(crate) fn agent_verdict(
+    signal: &AgentSignal<'_>,
+    now: Instant,
+    wall_now: SystemTime,
+) -> AgentVerdict {
     match signal.state {
         AgentState::Blocked => {
             let reason = signal
@@ -86,10 +108,20 @@ pub(crate) fn agent_verdict(signal: &AgentSignal<'_>, now: Instant) -> AgentVerd
                 ..AgentVerdict::default()
             }
         }
-        AgentState::Working => AgentVerdict {
-            working: true,
-            ..AgentVerdict::default()
-        },
+        AgentState::Working => {
+            let mut verdict = AgentVerdict {
+                working: true,
+                ..AgentVerdict::default()
+            };
+            if let Some(command) = &signal.running_command {
+                let ran = running_for(command, signal.working_since, now, wall_now);
+                match signal.stuck_after.checked_sub(ran) {
+                    Some(left) if !left.is_zero() => verdict.recheck_at = Some(now + left),
+                    _ => verdict.need = Some(stuck_need(signal, command)),
+                }
+            }
+            verdict
+        }
         AgentState::Idle => {
             let Some(finished_at) = signal.turn_finished_at else {
                 return AgentVerdict::default();
@@ -126,6 +158,46 @@ pub(crate) fn agent_verdict(signal: &AgentSignal<'_>, now: Instant) -> AgentVerd
     }
 }
 
+/// How long `command` has been running by the wall clock `wall_now`, `now` on the monotonic
+/// one. Never longer than its agent has been working: a command a permission prompt held back
+/// was written down before it began. A command written after `wall_now` means the clock was set
+/// back since, and counts as just begun.
+fn running_for(
+    command: &RunningCommand,
+    working_since: Option<Instant>,
+    now: Instant,
+    wall_now: SystemTime,
+) -> Duration {
+    let since_written = wall_now
+        .duration_since(command.started_at)
+        .unwrap_or_default();
+    working_since.map_or(since_written, |since| {
+        since_written.min(now.saturating_duration_since(since))
+    })
+}
+
+/// How many characters of a command its reason shows.
+const COMMAND_CHARS: usize = 80;
+
+/// The reason names the period, never the time run so far: it must stay the same while the
+/// command goes on, or each look at the agent would update the item.
+fn stuck_need(signal: &AgentSignal<'_>, command: &RunningCommand) -> Need {
+    let label = if command.label.chars().count() > COMMAND_CHARS {
+        let head: String = command.label.chars().take(COMMAND_CHARS - 1).collect();
+        format!("{head}…")
+    } else {
+        command.label.clone()
+    };
+    Need {
+        kind: AttentionKind::Stuck,
+        reason: format!(
+            "`{label}` has been running for over {} min",
+            signal.stuck_after.as_secs() / 60
+        ),
+        pane_id: Some(signal.pane_id.clone()),
+    }
+}
+
 /// Every agent of one workspace folded together: the most urgent need, whether any agent is
 /// working, and the latest turn any of them finished.
 pub(crate) fn fold_verdicts(verdicts: impl IntoIterator<Item = AgentVerdict>) -> AgentVerdict {
@@ -151,18 +223,12 @@ pub(crate) struct ItemSignals {
     pub tracker: Option<Need>,
 }
 
-/// Blocked agents first, then failures, then finished agents. While an agent works or
-/// Herdr is busy on the item, the tracker's asks wait: someone is already on it.
+/// Blocked and stuck agents first, then failures, then finished agents: the order of
+/// `AttentionKind`. While an agent works or Herdr is busy on the item, the tracker's asks wait:
+/// someone is already on it.
 pub(crate) fn item_need(agents: &AgentVerdict, item: ItemSignals) -> Option<Need> {
-    let agent_need = agents.need.as_ref();
-    if let Some(need) = agent_need.filter(|need| need.kind == AttentionKind::Blocked) {
-        return Some(need.clone());
-    }
-    if item.failure.is_some() {
-        return item.failure;
-    }
-    if let Some(need) = agent_need {
-        return Some(need.clone());
+    if let Some(need) = most_urgent(agents.need.clone(), item.failure) {
+        return Some(need);
     }
     if agents.working || item.busy {
         return None;
@@ -298,8 +364,8 @@ pub(crate) struct Update {
     pub items_changed: bool,
 }
 
-/// When attention must be worked out again: something it depends on changed, or a
-/// finished turn's quiet period ends.
+/// When attention must be worked out again: something it depends on changed, a finished turn's
+/// quiet period ends, or a command has run for the stuck period.
 #[derive(Debug)]
 pub(crate) struct Schedule {
     dirty: bool,
@@ -352,6 +418,35 @@ mod tests {
             turn_finished_at: None,
             dismissed_turn: None,
             last_input_at: None,
+            running_command: None,
+            stuck_after: Duration::from_secs(600),
+            working_since: None,
+        }
+    }
+
+    /// The verdict of an agent whose wall clock does not matter.
+    fn verdict_of(signal: &AgentSignal<'_>, now: Instant) -> AgentVerdict {
+        agent_verdict(signal, now, wall())
+    }
+
+    /// A wall-clock moment that is the same on every run.
+    fn wall() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000)
+    }
+
+    fn running(label: &str, started_at: SystemTime) -> RunningCommand {
+        RunningCommand {
+            call_id: "toolu_1".into(),
+            started_at,
+            label: label.into(),
+        }
+    }
+
+    /// An agent working on `command`, with the default ten minutes to run it.
+    fn working_on(command: RunningCommand) -> AgentSignal<'static> {
+        AgentSignal {
+            running_command: Some(command),
+            ..signal(AgentState::Working)
         }
     }
 
@@ -371,14 +466,14 @@ mod tests {
     fn blocked_agent_needs_you_with_the_first_line_of_its_prompt() {
         let mut blocked = signal(AgentState::Blocked);
         blocked.blocked_message = Some("\n  Allow running bin/rails db:migrate?\nYes / No");
-        let need = agent_verdict(&blocked, Instant::now())
+        let need = verdict_of(&blocked, Instant::now())
             .need
             .expect("blocked needs you");
         assert_eq!(need.kind, AttentionKind::Blocked);
         assert_eq!(need.reason, "Allow running bin/rails db:migrate?");
         assert_eq!(need.pane_id.as_deref(), Some("w1-1"));
 
-        let silent = agent_verdict(&signal(AgentState::Blocked), Instant::now());
+        let silent = verdict_of(&signal(AgentState::Blocked), Instant::now());
         assert_eq!(silent.need.unwrap().reason, "claude is waiting for you");
     }
 
@@ -389,26 +484,148 @@ mod tests {
         idle.turn_finished_at = Some(finished_at);
         idle.last_input_at = Some(finished_at - Duration::from_secs(5));
 
-        let early = agent_verdict(&idle, finished_at + Duration::from_secs(60));
+        let early = verdict_of(&idle, finished_at + Duration::from_secs(60));
         assert_eq!(early.need, None);
         assert_eq!(early.recheck_at, Some(finished_at + FINISHED_QUIET_PERIOD));
 
-        let due = agent_verdict(&idle, finished_at + FINISHED_QUIET_PERIOD);
+        let due = verdict_of(&idle, finished_at + FINISHED_QUIET_PERIOD);
         assert_eq!(
             due.need.map(|need| need.kind),
             Some(AttentionKind::Finished)
         );
 
         idle.last_input_at = Some(finished_at + Duration::from_secs(30));
-        let touched = agent_verdict(&idle, finished_at + Duration::from_secs(600));
+        let touched = verdict_of(&idle, finished_at + Duration::from_secs(600));
         assert_eq!(touched.need, None);
         assert_eq!(touched.recheck_at, None);
     }
 
     #[test]
     fn idle_agent_that_never_finished_a_turn_does_not_need_you() {
-        let verdict = agent_verdict(&signal(AgentState::Idle), Instant::now());
+        let verdict = verdict_of(&signal(AgentState::Idle), Instant::now());
         assert_eq!(verdict, AgentVerdict::default());
+    }
+
+    #[test]
+    fn a_working_agent_with_no_command_running_is_only_working() {
+        assert_eq!(
+            verdict_of(&signal(AgentState::Working), Instant::now()),
+            AgentVerdict {
+                working: true,
+                ..AgentVerdict::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_working_agent_waits_for_its_command_to_run_for_the_stuck_period() {
+        let now = Instant::now();
+        let agent = working_on(running("cargo test", wall()));
+
+        let early = agent_verdict(&agent, now, wall() + Duration::from_secs(599));
+        assert_eq!(early.need, None);
+        assert!(early.working);
+        assert_eq!(early.recheck_at, Some(now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_working_agent_needs_you_once_its_command_ran_for_the_stuck_period() {
+        let now = Instant::now();
+        let agent = working_on(running("cargo test", wall()));
+
+        let stuck = agent_verdict(&agent, now, wall() + Duration::from_secs(600));
+        let need = stuck.need.expect("stuck needs you");
+        assert_eq!(need.kind, AttentionKind::Stuck);
+        assert_eq!(need.reason, "`cargo test` has been running for over 10 min");
+        assert_eq!(need.pane_id.as_deref(), Some("w1-1"));
+        assert!(stuck.working);
+        assert_eq!(stuck.recheck_at, None);
+
+        // The reason does not count up: one that did would update the item at every look.
+        let later = agent_verdict(&agent, now, wall() + Duration::from_secs(7200));
+        assert_eq!(later.need, Some(need));
+    }
+
+    #[test]
+    fn the_reason_names_the_stuck_period_in_whole_minutes() {
+        let now = Instant::now();
+        let reason = |stuck_after: u64| {
+            let agent = AgentSignal {
+                stuck_after: Duration::from_secs(stuck_after),
+                ..working_on(running("make", wall()))
+            };
+            agent_verdict(&agent, now, wall() + Duration::from_secs(stuck_after))
+                .need
+                .expect("stuck needs you")
+                .reason
+        };
+        assert_eq!(reason(90), "`make` has been running for over 1 min");
+        assert_eq!(reason(3600), "`make` has been running for over 60 min");
+    }
+
+    #[test]
+    fn a_command_of_more_than_eighty_characters_is_cut_in_the_reason() {
+        let reason = |label: &str| {
+            agent_verdict(
+                &working_on(running(label, wall())),
+                Instant::now(),
+                wall() + Duration::from_secs(600),
+            )
+            .need
+            .expect("stuck needs you")
+            .reason
+        };
+        let whole = "y".repeat(80);
+        assert_eq!(
+            reason(&whole),
+            format!("`{whole}` has been running for over 10 min")
+        );
+        assert_eq!(
+            reason(&"x".repeat(81)),
+            format!("`{}…` has been running for over 10 min", "x".repeat(79))
+        );
+    }
+
+    #[test]
+    fn a_command_has_run_no_longer_than_its_agent_has_been_working() {
+        // Written down 20 minutes ago, but held back by a permission prompt until a minute ago.
+        let now = Instant::now();
+        let seconds = Duration::from_secs;
+        let agent = AgentSignal {
+            working_since: Some(now - seconds(60)),
+            ..working_on(running("rm -rf target", wall()))
+        };
+        let verdict = agent_verdict(&agent, now, wall() + seconds(1200));
+        assert_eq!(verdict.need, None);
+        assert_eq!(verdict.recheck_at, Some(now + seconds(540)));
+    }
+
+    #[test]
+    fn a_command_written_after_the_wall_clock_has_just_begun() {
+        // The clock was set back after the call was written.
+        let now = Instant::now();
+        let agent = working_on(running("ls", wall() + Duration::from_secs(3600)));
+        let verdict = agent_verdict(&agent, now, wall());
+        assert_eq!(verdict.need, None);
+        assert_eq!(verdict.recheck_at, Some(now + Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_command_counts_only_while_its_agent_works() {
+        let now = Instant::now();
+        let later = wall() + Duration::from_secs(3600);
+        let stuck = working_on(running("cargo test", wall()));
+        let kind = |state| {
+            let agent = AgentSignal {
+                state,
+                ..stuck.clone()
+            };
+            agent_verdict(&agent, now, later).need.map(|need| need.kind)
+        };
+        assert_eq!(kind(AgentState::Working), Some(AttentionKind::Stuck));
+        assert_eq!(kind(AgentState::Blocked), Some(AttentionKind::Blocked));
+        assert_eq!(kind(AgentState::Idle), None);
+        assert_eq!(kind(AgentState::Unknown), None);
     }
 
     #[test]
@@ -418,12 +635,12 @@ mod tests {
         idle.turn_finished_at = Some(finished_at);
         let late = finished_at + FINISHED_QUIET_PERIOD + Duration::from_secs(1);
         assert_eq!(
-            agent_verdict(&idle, late).need.map(|need| need.kind),
+            verdict_of(&idle, late).need.map(|need| need.kind),
             Some(AttentionKind::Finished)
         );
 
         idle.dismissed_turn = Some(finished_at);
-        let dismissed = agent_verdict(&idle, late);
+        let dismissed = verdict_of(&idle, late);
         assert_eq!(dismissed.need, None);
         assert_eq!(dismissed.recheck_at, None);
 
@@ -431,7 +648,7 @@ mod tests {
         let next = finished_at + Duration::from_secs(300);
         idle.turn_finished_at = Some(next);
         assert_eq!(
-            agent_verdict(&idle, next + FINISHED_QUIET_PERIOD)
+            verdict_of(&idle, next + FINISHED_QUIET_PERIOD)
                 .need
                 .map(|need| need.kind),
             Some(AttentionKind::Finished)
@@ -442,7 +659,7 @@ mod tests {
     fn a_turn_stays_taken_whether_or_not_it_needs_you() {
         let finished_at = Instant::now();
         let seconds = Duration::from_secs;
-        let turn = |signal: &AgentSignal<'_>, now| agent_verdict(signal, now).turn_finished_at;
+        let turn = |signal: &AgentSignal<'_>, now| verdict_of(signal, now).turn_finished_at;
         let mut idle = signal(AgentState::Idle);
         idle.turn_finished_at = Some(finished_at);
 
@@ -535,6 +752,46 @@ mod tests {
         assert_eq!(
             item_need(&agents(AttentionKind::Finished), failure()).map(|need| need.kind),
             Some(AttentionKind::Failed)
+        );
+    }
+
+    #[test]
+    fn a_stuck_agent_outranks_a_failure_and_a_finished_agent_but_not_a_blocked_one() {
+        let kind_of = |a, b| {
+            most_urgent(Some(Need::new(a, "a")), Some(Need::new(b, "b"))).map(|need| need.kind)
+        };
+        assert_eq!(
+            kind_of(AttentionKind::Stuck, AttentionKind::Blocked),
+            Some(AttentionKind::Blocked)
+        );
+        assert_eq!(
+            kind_of(AttentionKind::Blocked, AttentionKind::Stuck),
+            Some(AttentionKind::Blocked)
+        );
+        assert_eq!(
+            kind_of(AttentionKind::Failed, AttentionKind::Stuck),
+            Some(AttentionKind::Stuck)
+        );
+        assert_eq!(
+            kind_of(AttentionKind::Stuck, AttentionKind::Finished),
+            Some(AttentionKind::Stuck)
+        );
+
+        // An item shows the same order: its stuck agent over its failure, and over what the
+        // tracker asks of you.
+        let item = ItemSignals {
+            failure: Some(Need::new(AttentionKind::Failed, "checkout failed")),
+            tracker: Some(Need::new(AttentionKind::ChangesRequested, "changes")),
+            ..ItemSignals::default()
+        };
+        let stuck = AgentVerdict {
+            need: Some(Need::new(AttentionKind::Stuck, "stuck")),
+            working: true,
+            ..AgentVerdict::default()
+        };
+        assert_eq!(
+            item_need(&stuck, item).map(|need| need.kind),
+            Some(AttentionKind::Stuck)
         );
     }
 

@@ -12,6 +12,7 @@ const CLAUDE: TranscriptFormat = TranscriptFormat::Claude;
 const OMP: TranscriptFormat = TranscriptFormat::Omp;
 
 mod paging;
+mod running;
 
 fn lines_of(text: &str, chunk: usize) -> ReverseLines<io::Cursor<Vec<u8>>> {
     ReverseLines::new(io::Cursor::new(text.as_bytes().to_vec()), chunk).unwrap()
