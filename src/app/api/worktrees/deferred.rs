@@ -121,6 +121,7 @@ impl App {
             );
             return;
         }
+        let record_base = params.base.is_some();
         let base = params.base.unwrap_or_else(|| "HEAD".into());
         let source = match self.resolve_worktree_source(params.workspace_id, params.cwd) {
             Ok(source) => source,
@@ -205,6 +206,7 @@ impl App {
                     &path,
                     &branch,
                     &base,
+                    record_base,
                     params.trust_repository,
                 )
             });

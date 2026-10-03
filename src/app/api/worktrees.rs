@@ -946,6 +946,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(repo);
     }
 
+    /// Creates `feature/based` through the API, from `base` when one is given, and returns
+    /// the base the repository recorded for it.
+    fn recorded_base_after_api_create(name: &str, base: Option<&str>) -> Option<String> {
+        let repo = create_committed_repo(&format!("api-worktree-create-base-{name}-repo"));
+        let worktree_root = unique_temp_path(&format!("api-worktree-create-base-{name}-root"));
+        run_git(&repo, &["branch", "release"]);
+        let mut app = test_app();
+        let mut parent = Workspace::test_new("main");
+        parent.identity_cwd = repo.clone();
+        let parent_id = parent.id.clone();
+        app.state.workspaces = vec![parent];
+        app.state.ensure_test_terminals();
+        app.state.worktree_directory = worktree_root.clone();
+
+        let response = run_deferred_api_request(
+            &mut app,
+            Request {
+                id: "req".into(),
+                method: crate::api::schema::Method::WorktreeCreate(WorktreeCreateParams {
+                    workspace_id: Some(parent_id),
+                    branch: Some("feature/based".into()),
+                    base: base.map(Into::into),
+                    ..WorktreeCreateParams::default()
+                }),
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            matches!(success.result, ResponseResult::WorktreeCreated { .. }),
+            "{response}"
+        );
+
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "--get", "branch.feature/based.herdrBase"])
+            .output()
+            .unwrap();
+        let recorded = output
+            .status
+            .success()
+            .then(|| String::from_utf8(output.stdout).unwrap().trim().to_string());
+
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(worktree_root);
+        let _ = std::fs::remove_dir_all(repo);
+        recorded
+    }
+
+    #[tokio::test]
+    async fn api_worktree_create_records_an_explicit_base_ref() {
+        assert_eq!(
+            recorded_base_after_api_create("explicit", Some("release")).as_deref(),
+            Some("refs/heads/release")
+        );
+    }
+
+    #[tokio::test]
+    async fn api_worktree_create_records_nothing_without_a_base() {
+        assert_eq!(recorded_base_after_api_create("omitted", None), None);
+    }
+
     #[test]
     fn deferred_api_worktree_create_failure_clears_pending_checkout() {
         let repo = create_committed_repo("api-worktree-create-failure-repo");
