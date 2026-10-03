@@ -293,15 +293,21 @@ pub struct AgentActivityParams {
     /// `limit`, the answer is a `reset` holding the newest `limit` entries of the whole turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Include the assistant's thinking as `thinking` entries (default false). Thinking the
+    /// transcript redacted or encrypted is skipped. Keep it the same for as long as a cursor
+    /// is used: a cursor does not bring back thinking written before it.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub include_thinking: bool,
 }
 
 /// Whether an agent's current turn could be read from its transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivityStatus {
-    /// `turn`, `entries` and `cursor` describe the current turn.
+    /// The transcript was read: for `agent.activity`, `turn`, `entries` and `cursor` describe
+    /// the current turn; for `agent.history`, `turns` holds the page.
     Available,
-    /// The transcript has no user prompt yet.
+    /// The transcript has no turn yet: no user prompt, and no message the session opened with.
     NoActivity,
     /// The agent's integration has not reported a transcript for its current session.
     NoTranscript,
@@ -315,7 +321,11 @@ pub enum AgentActivityStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentActivityTurn {
-    /// When the turn's prompt was written, as the transcript records it.
+    /// The turn's stable id, the same string `agent.history` gives the same turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// When the turn's first entry, its prompt or its `context`, was written, as the transcript
+    /// records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     /// The turn's final assistant message exists and no tool call is outstanding.
@@ -367,6 +377,16 @@ pub enum AgentActivityEntryKind {
     Tool,
     /// The final assistant message of a finished turn.
     Message,
+    /// The assistant's thinking, in the entries only when the request asked for it. Thinking
+    /// the transcript redacted or encrypted is not in them.
+    Thinking,
+    /// Where the agent summarised the conversation so far. `text` holds the summary when the
+    /// transcript has it.
+    Compaction,
+    /// The message a session opened with that is not the user's, such as the context a
+    /// handoff gave the agent. It opens the session's first turn in place of a prompt; `text`
+    /// holds it, never truncated.
+    Context,
     #[serde(other)]
     Unknown,
 }
@@ -379,12 +399,17 @@ pub struct AgentActivityEntry {
     /// As the transcript records it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
-    /// The text of a `prompt`, `note` or `message`, as markdown and never truncated.
+    /// The text of a `prompt`, `note`, `message`, `thinking`, `compaction` or `context`, as
+    /// markdown and never truncated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Present when `kind` is `tool`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<AgentActivityTool>,
+    /// How many images the prompt or tool result carried. The images themselves are not sent.
+    /// Absent when there were none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
@@ -459,6 +484,78 @@ pub struct AgentActivityQuestionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentHistoryParams {
+    pub target: String,
+    /// The `before` of an earlier response: the turns just older than the turn it names are
+    /// returned. Without it, the newest turns, the current one included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// The most turns returned, from 1 to 20 (default 5). Herdr may return fewer to keep the
+    /// response under about 512 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    /// Include the assistant's thinking as `thinking` entries (default false). Thinking the
+    /// transcript redacted or encrypted is skipped.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub include_thinking: bool,
+}
+
+/// One turn of an agent's transcript: a user prompt, or the `context` the session opened with,
+/// and everything up to the next prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentHistoryTurn {
+    /// Stable across calls, and the `turn.id` that `agent.activity` gives the same turn.
+    pub id: String,
+    /// When the turn's first entry, its prompt or its `context`, was written, as the transcript
+    /// records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// The turn's final assistant message exists and no tool call is outstanding.
+    pub finished: bool,
+    /// In order: the prompt (or the `context`), then notes, thinking, tool calls, compactions
+    /// and further prompts the user sent mid-turn, and the final `message` once the turn
+    /// finished. Each entry has the `id` that `agent.activity` gives it. At most 200: when the
+    /// turn has more, its prompt and its newest entries are kept.
+    #[serde(default)]
+    pub entries: Vec<AgentActivityEntry>,
+    /// Entries between the prompt and the newest ones were left out because the turn has
+    /// more than 200.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// A page of an agent's conversation, read from its transcript: whole turns, the current one
+/// included, newest page first. Prompts that block the agent are not in transcripts; read
+/// them from the screen with `agent.read`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentHistoryInfo {
+    pub terminal_id: String,
+    pub pane_id: String,
+    /// The agent, e.g. "omp" or "claude".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The same statuses as `agent.activity`. `no_activity` means the transcript has no turn
+    /// yet.
+    pub status: AgentActivityStatus,
+    /// The page's turns, oldest first. At most the `turns` asked for, and fewer when that
+    /// would make the response larger than about 512 KiB, but at least one when the
+    /// transcript has any.
+    #[serde(default)]
+    pub turns: Vec<AgentHistoryTurn>,
+    /// Pass back as `before` for the next older page. Absent when this page reaches the start
+    /// of the transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// The `before` given does not apply: it names another transcript (after `/clear`, say),
+    /// a turn that no longer exists, or is not a cursor Herdr issued. `turns` then holds the
+    /// newest page and replaces what the client holds.
+    #[serde(default)]
+    pub reset: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
 }
 
 /// Something Herdr did outside the agent's session that the agent should know about, e.g.

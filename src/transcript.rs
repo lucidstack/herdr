@@ -1,5 +1,6 @@
 //! Reads an agent's transcript, the file its hook integration reports: the last complete
-//! message here, and what the agent is doing in its current turn in `activity`.
+//! message here, what the agent is doing in its current turn in `activity`, and the turns
+//! before it, a page at a time, in `activity::history`.
 //!
 //! Transcripts are append-only JSONL files that can grow to tens of megabytes, and the
 //! final message is almost always near the end. The readers walk the file backwards and
@@ -14,7 +15,7 @@ use serde::Deserialize;
 
 mod activity;
 
-pub use activity::{activity, DEFAULT_LIMIT, MAX_LIMIT};
+pub use activity::{activity, history, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS};
 
 const READ_CHUNK: usize = 64 * 1024;
 
@@ -97,6 +98,49 @@ impl<R: Read + Seek> ReverseLines<R> {
         self.end = data.len();
         self.buf = data;
         Ok(())
+    }
+
+    /// Reads on backwards from `offset`, as if the file ended there.
+    fn restart_at(&mut self, offset: u64) {
+        self.pos = offset.min(self.len);
+        self.buf.clear();
+        self.end = 0;
+    }
+
+    /// The whole line that starts at `offset`, without its newline. `None` when no line starts
+    /// there: `offset` is past the end, or inside a line.
+    fn line_at(&mut self, offset: u64) -> io::Result<Option<Vec<u8>>> {
+        if offset >= self.len {
+            return Ok(None);
+        }
+        // Reading starts one byte early, to see that the line before ends where this one begins.
+        let mut at = offset.saturating_sub(1);
+        let mut before = offset > 0;
+        self.reader.seek(SeekFrom::Start(at))?;
+        let mut chunk = vec![0; self.chunk];
+        let mut line = Vec::new();
+        loop {
+            let size = (self.len - at).min(chunk.len() as u64) as usize;
+            if size == 0 {
+                return Ok(Some(line));
+            }
+            self.reader.read_exact(&mut chunk[..size])?;
+            at += size as u64;
+            let mut data = &chunk[..size];
+            if std::mem::take(&mut before) {
+                if data[0] != b'\n' {
+                    return Ok(None);
+                }
+                data = &data[1..];
+            }
+            match data.iter().position(|&b| b == b'\n') {
+                Some(end) => {
+                    line.extend_from_slice(&data[..end]);
+                    return Ok(Some(line));
+                }
+                None => line.extend_from_slice(data),
+            }
+        }
     }
 
     /// Yields the next line, last to first, with the file offset it starts at.

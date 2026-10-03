@@ -1,15 +1,15 @@
-//! `agent.activity`: like `agent.last_message`, the socket server resolves the agent through
-//! the app, then reads its transcript on the connection's own thread, so a transcript of
-//! tens of megabytes never stalls the app loop.
+//! `agent.activity` and `agent.history`: like `agent.last_message`, the socket server resolves
+//! the agent through the app, then reads its transcript on the connection's own thread, so a
+//! transcript of tens of megabytes never stalls the app loop.
 
 use std::path::Path;
 
 use crate::api::schema::{
-    AgentActivityInfo, AgentActivityParams, AgentActivityStatus, AgentInfo, ErrorBody,
-    ErrorResponse, ResponseResult, SuccessResponse,
+    AgentActivityInfo, AgentActivityParams, AgentActivityStatus, AgentHistoryInfo,
+    AgentHistoryParams, AgentInfo, ErrorBody, ErrorResponse, ResponseResult, SuccessResponse,
 };
 use crate::api::ApiRequestSender;
-use crate::transcript::{TranscriptFormat, DEFAULT_LIMIT, MAX_LIMIT};
+use crate::transcript::{TranscriptFormat, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS};
 
 use super::last_message::encode;
 
@@ -34,7 +34,43 @@ pub(super) fn agent_activity(
     encode(&SuccessResponse {
         id: request_id,
         result: ResponseResult::AgentActivity {
-            activity: read_activity(agent, params.since.as_deref(), limit),
+            activity: read_activity(
+                agent,
+                params.since.as_deref(),
+                limit,
+                params.include_thinking,
+            ),
+        },
+    })
+}
+
+pub(super) fn agent_history(
+    request_id: String,
+    params: AgentHistoryParams,
+    api_tx: &ApiRequestSender,
+) -> String {
+    let Some(turns) = effective_turns(params.turns) else {
+        return encode(&ErrorResponse {
+            id: request_id,
+            error: ErrorBody {
+                code: "invalid_params".into(),
+                message: format!("turns must be between 1 and {MAX_TURNS}"),
+            },
+        });
+    };
+    let agent = match super::wait::agent_get(&request_id, &params.target, api_tx) {
+        Ok(agent) => agent,
+        Err(response) => return encode(&response),
+    };
+    encode(&SuccessResponse {
+        id: request_id,
+        result: ResponseResult::AgentHistory {
+            history: read_history(
+                agent,
+                params.before.as_deref(),
+                turns,
+                params.include_thinking,
+            ),
         },
     })
 }
@@ -48,16 +84,50 @@ fn effective_limit(limit: Option<u32>) -> Option<usize> {
     }
 }
 
-fn read_activity(agent: AgentInfo, since: Option<&str>, limit: usize) -> AgentActivityInfo {
-    let (session_agent, transcript_path) = agent
-        .agent_session
-        .map(|session| (Some(session.agent), session.transcript_path))
-        .unwrap_or_default();
+/// The number of turns to return, or `None` when the request's count is out of range.
+fn effective_turns(turns: Option<u32>) -> Option<usize> {
+    match turns {
+        None => Some(DEFAULT_TURNS),
+        Some(turns) if (1..=MAX_TURNS as u32).contains(&turns) => Some(turns as usize),
+        Some(_) => None,
+    }
+}
+
+/// The agent that owns the session, whose format the transcript has even when the pane is
+/// labelled as another agent, and where the session's transcript is.
+fn session_of(agent: &AgentInfo) -> (Option<String>, Option<String>) {
+    let session = agent.agent_session.as_ref();
+    (
+        session
+            .map(|session| session.agent.clone())
+            .or_else(|| agent.agent.clone()),
+        session.and_then(|session| session.transcript_path.clone()),
+    )
+}
+
+/// Where to read the transcript and in what format, or why there is nothing to read.
+fn reader<'a>(
+    path: Option<&'a str>,
+    agent: Option<&str>,
+) -> Result<(&'a str, TranscriptFormat), AgentActivityStatus> {
+    let path = path.ok_or(AgentActivityStatus::NoTranscript)?;
+    let format = agent
+        .and_then(TranscriptFormat::for_agent)
+        .ok_or(AgentActivityStatus::UnsupportedFormat)?;
+    Ok((path, format))
+}
+
+fn read_activity(
+    agent: AgentInfo,
+    since: Option<&str>,
+    limit: usize,
+    thinking: bool,
+) -> AgentActivityInfo {
+    let (session_agent, transcript_path) = session_of(&agent);
     let mut info = AgentActivityInfo {
         terminal_id: agent.terminal_id,
         pane_id: agent.pane_id,
-        // The transcript's format follows the agent that owns the session.
-        agent: session_agent.or(agent.agent),
+        agent: session_agent,
         status: AgentActivityStatus::NoTranscript,
         turn: None,
         entries: Vec::new(),
@@ -66,14 +136,14 @@ fn read_activity(agent: AgentInfo, since: Option<&str>, limit: usize) -> AgentAc
         truncated: false,
         transcript_path,
     };
-    let Some(path) = info.transcript_path.as_deref() else {
-        return info;
+    let (path, format) = match reader(info.transcript_path.as_deref(), info.agent.as_deref()) {
+        Ok(reader) => reader,
+        Err(status) => {
+            info.status = status;
+            return info;
+        }
     };
-    let Some(format) = info.agent.as_deref().and_then(TranscriptFormat::for_agent) else {
-        info.status = AgentActivityStatus::UnsupportedFormat;
-        return info;
-    };
-    match crate::transcript::activity(format, Path::new(path), since, limit) {
+    match crate::transcript::activity(format, Path::new(path), since, limit, thinking) {
         Ok(Some(activity)) => {
             info.status = AgentActivityStatus::Available;
             info.turn = Some(activity.turn);
@@ -83,6 +153,51 @@ fn read_activity(agent: AgentInfo, since: Option<&str>, limit: usize) -> AgentAc
             info.truncated = activity.truncated;
         }
         Ok(None) => info.status = AgentActivityStatus::NoActivity,
+        Err(error) => {
+            tracing::warn!(path, %error, "failed to read agent transcript");
+            info.status = AgentActivityStatus::Unreadable;
+        }
+    }
+    info
+}
+
+fn read_history(
+    agent: AgentInfo,
+    before: Option<&str>,
+    turns: usize,
+    thinking: bool,
+) -> AgentHistoryInfo {
+    let (session_agent, transcript_path) = session_of(&agent);
+    let mut info = AgentHistoryInfo {
+        terminal_id: agent.terminal_id,
+        pane_id: agent.pane_id,
+        agent: session_agent,
+        status: AgentActivityStatus::NoTranscript,
+        turns: Vec::new(),
+        before: None,
+        reset: false,
+        transcript_path,
+    };
+    let (path, format) = match reader(info.transcript_path.as_deref(), info.agent.as_deref()) {
+        Ok(reader) => reader,
+        Err(status) => {
+            info.status = status;
+            return info;
+        }
+    };
+    match crate::transcript::history(format, Path::new(path), before, turns, thinking) {
+        Ok(Some(history)) => {
+            info.status = AgentActivityStatus::Available;
+            info.turns = history.turns;
+            info.before = history.before;
+            info.reset = history.reset;
+        }
+        // Without a prompt there is nothing a cursor could name, so one that was given did
+        // not apply.
+        Ok(None) => {
+            info.status = AgentActivityStatus::NoActivity;
+            info.reset = before.is_some();
+        }
         Err(error) => {
             tracing::warn!(path, %error, "failed to read agent transcript");
             info.status = AgentActivityStatus::Unreadable;
@@ -166,6 +281,7 @@ mod tests {
                     target: "w1:p1".into(),
                     since: None,
                     limit: Some(limit),
+                    include_thinking: false,
                 },
                 &api_tx,
             );
@@ -183,7 +299,7 @@ mod tests {
             agent_info(Some("claude"), None),
             agent_info(Some("claude"), Some(("claude", None))),
         ] {
-            let info = read_activity(agent, None, 200);
+            let info = read_activity(agent, None, 200, false);
 
             assert_eq!(info.status, AgentActivityStatus::NoTranscript);
             assert_eq!(info.pane_id, "w1:p1");
@@ -198,6 +314,7 @@ mod tests {
             agent_info(Some("codex"), Some(("codex", path.to_str()))),
             None,
             200,
+            false,
         );
 
         assert_eq!(info.status, AgentActivityStatus::UnsupportedFormat);
@@ -212,6 +329,7 @@ mod tests {
             agent_info(Some("claude"), Some(("claude", missing.to_str()))),
             None,
             200,
+            false,
         );
         assert_eq!(info.status, AgentActivityStatus::Unreadable);
 
@@ -220,6 +338,7 @@ mod tests {
             agent_info(Some("claude"), Some(("claude", empty.to_str()))),
             None,
             200,
+            false,
         );
         assert_eq!(info.status, AgentActivityStatus::NoActivity);
     }
@@ -230,7 +349,7 @@ mod tests {
         // The pane may still be labelled as another agent; the session decides the format.
         let agent = agent_info(Some("omp"), Some(("claude", path.to_str())));
 
-        let info = read_activity(agent.clone(), None, 200);
+        let info = read_activity(agent.clone(), None, 200, false);
 
         assert_eq!(info.status, AgentActivityStatus::Available);
         assert_eq!(info.agent.as_deref(), Some("claude"));
@@ -249,9 +368,116 @@ mod tests {
         );
 
         // Handing the cursor back returns only what changed: nothing.
-        let again = read_activity(agent, info.cursor.as_deref(), 200);
+        let again = read_activity(agent, info.cursor.as_deref(), 200, false);
         assert!(again.entries.is_empty());
         assert_eq!(again.cursor, info.cursor);
         assert!(!again.reset);
+    }
+
+    /// Two turns of a Claude Code conversation, linked the way Claude Code links them.
+    fn claude_two_turns() -> String {
+        [
+            json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "t1",
+                "message": {"role": "user", "content": "Say hello"}}),
+            json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": "t2",
+                "message": {"id": "m1", "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Hello."}]}}),
+            json!({"type": "user", "uuid": "u2", "parentUuid": "a1", "timestamp": "t3",
+                "message": {"role": "user", "content": "Say goodbye"}}),
+            json!({"type": "assistant", "uuid": "a2", "parentUuid": "u2", "timestamp": "t4",
+                "message": {"id": "m2", "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Goodbye."}]}}),
+        ]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect()
+    }
+
+    #[test]
+    fn turns_default_to_five_and_stay_between_one_and_twenty() {
+        assert_eq!(effective_turns(None), Some(5));
+        assert_eq!(effective_turns(Some(1)), Some(1));
+        assert_eq!(effective_turns(Some(20)), Some(20));
+        assert_eq!(effective_turns(Some(0)), None);
+        assert_eq!(effective_turns(Some(21)), None);
+        assert_eq!(effective_turns(Some(u32::MAX)), None);
+    }
+
+    #[test]
+    fn out_of_range_turns_are_rejected_before_the_agent_is_looked_up() {
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel();
+        for turns in [0, 21] {
+            let response = agent_history(
+                "req_1".into(),
+                AgentHistoryParams {
+                    target: "w1:p1".into(),
+                    before: None,
+                    turns: Some(turns),
+                    include_thinking: false,
+                },
+                &api_tx,
+            );
+
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.id, "req_1");
+            assert_eq!(error.error.code, "invalid_params");
+        }
+        assert!(api_rx.try_recv().is_err(), "the app was never asked");
+    }
+
+    #[test]
+    fn history_says_why_there_is_nothing_to_read() {
+        let codex = transcript_file("history-codex.jsonl", &claude_two_turns());
+        let missing = std::env::temp_dir().join("herdr-api-history-missing.jsonl");
+        let empty = transcript_file("history-empty.jsonl", "");
+        let cases = [
+            (
+                agent_info(Some("claude"), None),
+                AgentActivityStatus::NoTranscript,
+            ),
+            (
+                agent_info(Some("codex"), Some(("codex", codex.to_str()))),
+                AgentActivityStatus::UnsupportedFormat,
+            ),
+            (
+                agent_info(Some("claude"), Some(("claude", missing.to_str()))),
+                AgentActivityStatus::Unreadable,
+            ),
+            (
+                agent_info(Some("claude"), Some(("claude", empty.to_str()))),
+                AgentActivityStatus::NoActivity,
+            ),
+        ];
+
+        for (agent, status) in cases {
+            let info = read_history(agent, None, 5, false);
+
+            assert_eq!(info.status, status);
+        }
+    }
+
+    #[test]
+    fn history_cursor_for_a_transcript_with_no_prompt_is_a_reset() {
+        let empty = transcript_file("history-empty-reset.jsonl", "");
+        let agent = agent_info(Some("claude"), Some(("claude", empty.to_str())));
+
+        let info = read_history(agent, Some("h:0.0"), 5, false);
+
+        assert_eq!(info.status, AgentActivityStatus::NoActivity);
+        assert!(info.reset, "the client holds turns this transcript lacks");
+    }
+
+    #[test]
+    fn the_sessions_agent_decides_the_format_history_is_read_in() {
+        let path = transcript_file("history-claude.jsonl", &claude_two_turns());
+        // The pane may still be labelled as another agent; the session decides the format.
+        let agent = agent_info(Some("omp"), Some(("claude", path.to_str())));
+
+        let info = read_history(agent, None, 5, false);
+
+        assert_eq!(info.status, AgentActivityStatus::Available);
+        assert_eq!(info.agent.as_deref(), Some("claude"));
+        let ids: Vec<_> = info.turns.iter().map(|turn| turn.id.as_str()).collect();
+        assert_eq!(ids, ["u1", "u2"]);
     }
 }

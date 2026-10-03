@@ -1966,6 +1966,10 @@
       "$defs": {
         "AgentActivityParams": {
           "properties": {
+            "include_thinking": {
+              "description": "Include the assistant's thinking as `thinking` entries (default false). Thinking the\ntranscript redacted or encrypted is skipped. Keep it the same for as long as a cursor\nis used: a cursor does not bring back thinking written before it.",
+              "type": "boolean"
+            },
             "limit": {
               "description": "The most entries returned, from 1 to 500 (default 200). When the turn has more, the\nnewest are kept and `truncated` is set. With `since`, when more entries changed than\n`limit`, the answer is a `reset` holding the newest `limit` entries of the whole turn.",
               "format": "uint32",
@@ -1984,6 +1988,37 @@
             },
             "target": {
               "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
+        "AgentHistoryParams": {
+          "properties": {
+            "before": {
+              "description": "The `before` of an earlier response: the turns just older than the turn it names are\nreturned. Without it, the newest turns, the current one included.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "include_thinking": {
+              "description": "Include the assistant's thinking as `thinking` entries (default false). Thinking the\ntranscript redacted or encrypted is skipped.",
+              "type": "boolean"
+            },
+            "target": {
+              "type": "string"
+            },
+            "turns": {
+              "description": "The most turns returned, from 1 to 20 (default 5). Herdr may return fewer to keep the\nresponse under about 512 KiB.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -6619,6 +6654,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.history",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentHistoryParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.notes.take",
               "type": "string"
             },
@@ -7761,11 +7812,20 @@
               "description": "Stable across calls for the same entry.",
               "type": "string"
             },
+            "images": {
+              "description": "How many images the prompt or tool result carried. The images themselves are not sent.\nAbsent when there were none.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "kind": {
               "$ref": "#/schemas/success_response/$defs/AgentActivityEntryKind"
             },
             "text": {
-              "description": "The text of a `prompt`, `note` or `message`, as markdown and never truncated.",
+              "description": "The text of a `prompt`, `note`, `message`, `thinking`, `compaction` or `context`, as\nmarkdown and never truncated.",
               "type": [
                 "string",
                 "null"
@@ -7822,6 +7882,21 @@
             {
               "const": "message",
               "description": "The final assistant message of a finished turn.",
+              "type": "string"
+            },
+            {
+              "const": "thinking",
+              "description": "The assistant's thinking, in the entries only when the request asked for it. Thinking\nthe transcript redacted or encrypted is not in them.",
+              "type": "string"
+            },
+            {
+              "const": "compaction",
+              "description": "Where the agent summarised the conversation so far. `text` holds the summary when the\ntranscript has it.",
+              "type": "string"
+            },
+            {
+              "const": "context",
+              "description": "The message a session opened with that is not the user's, such as the context a\nhandoff gave the agent. It opens the session's first turn in place of a prompt; `text`\nholds it, never truncated.",
               "type": "string"
             }
           ]
@@ -7965,12 +8040,12 @@
             },
             {
               "const": "available",
-              "description": "`turn`, `entries` and `cursor` describe the current turn.",
+              "description": "The transcript was read: for `agent.activity`, `turn`, `entries` and `cursor` describe\nthe current turn; for `agent.history`, `turns` holds the page.",
               "type": "string"
             },
             {
               "const": "no_activity",
-              "description": "The transcript has no user prompt yet.",
+              "description": "The transcript has no turn yet: no user prompt, and no message the session opened with.",
               "type": "string"
             },
             {
@@ -8098,8 +8173,15 @@
               "description": "The turn's final assistant message exists and no tool call is outstanding.",
               "type": "boolean"
             },
+            "id": {
+              "description": "The turn's stable id, the same string `agent.history` gives the same turn.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "started_at": {
-              "description": "When the turn's prompt was written, as the transcript records it.",
+              "description": "When the turn's first entry, its prompt or its `context`, was written, as the transcript\nrecords it.",
               "type": [
                 "string",
                 "null"
@@ -8148,6 +8230,98 @@
             "workspace_label",
             "agent",
             "agent_status"
+          ],
+          "type": "object"
+        },
+        "AgentHistoryInfo": {
+          "description": "A page of an agent's conversation, read from its transcript: whole turns, the current one\nincluded, newest page first. Prompts that block the agent are not in transcripts; read\nthem from the screen with `agent.read`.",
+          "properties": {
+            "agent": {
+              "description": "The agent, e.g. \"omp\" or \"claude\".",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "before": {
+              "description": "Pass back as `before` for the next older page. Absent when this page reaches the start\nof the transcript.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "reset": {
+              "default": false,
+              "description": "The `before` given does not apply: it names another transcript (after `/clear`, say),\na turn that no longer exists, or is not a cursor Herdr issued. `turns` then holds the\nnewest page and replaces what the client holds.",
+              "type": "boolean"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentActivityStatus",
+              "description": "The same statuses as `agent.activity`. `no_activity` means the transcript has no turn\nyet."
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "transcript_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turns": {
+              "default": [],
+              "description": "The page's turns, oldest first. At most the `turns` asked for, and fewer when that\nwould make the response larger than about 512 KiB, but at least one when the\ntranscript has any.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentHistoryTurn"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "pane_id",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentHistoryTurn": {
+          "description": "One turn of an agent's transcript: a user prompt, or the `context` the session opened with,\nand everything up to the next prompt.",
+          "properties": {
+            "entries": {
+              "default": [],
+              "description": "In order: the prompt (or the `context`), then notes, thinking, tool calls, compactions\nand further prompts the user sent mid-turn, and the final `message` once the turn\nfinished. Each entry has the `id` that `agent.activity` gives it. At most 200: when the\nturn has more, its prompt and its newest entries are kept.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentActivityEntry"
+              },
+              "type": "array"
+            },
+            "finished": {
+              "description": "The turn's final assistant message exists and no tool call is outstanding.",
+              "type": "boolean"
+            },
+            "id": {
+              "description": "Stable across calls, and the `turn.id` that `agent.activity` gives the same turn.",
+              "type": "string"
+            },
+            "started_at": {
+              "description": "When the turn's first entry, its prompt or its `context`, was written, as the transcript\nrecords it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "truncated": {
+              "default": false,
+              "description": "Entries between the prompt and the newest ones were left out because the turn has\nmore than 200.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "finished"
           ],
           "type": "object"
         },
@@ -11417,6 +11591,22 @@
               "required": [
                 "type",
                 "activity"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "history": {
+                  "$ref": "#/schemas/success_response/$defs/AgentHistoryInfo"
+                },
+                "type": {
+                  "const": "agent_history",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "history"
               ],
               "type": "object"
             },

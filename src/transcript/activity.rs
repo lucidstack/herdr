@@ -1,6 +1,8 @@
 //! What an agent is doing in its current turn, read from its transcript: the user's prompt,
 //! the notes the assistant wrote, its tool calls with their results and, once the turn is
-//! over, its final message.
+//! over, its final message. A session that opens with a message that is not the user's, such
+//! as the context of a handoff, has that message open its first turn instead. The turns before
+//! the current one come out of the same lines, a page at a time, in `history`.
 //!
 //! **Tail strategy.** The current turn sits at the end of a transcript that can be tens of
 //! megabytes. One backward pass, in the chunks `ReverseLines` reads, parses each line from
@@ -8,7 +10,8 @@
 //! of the current turn, never the size of the file, and nothing is cached between calls.
 //! The pass keeps file order instead of following parent links: Claude Code writes the
 //! results of parallel tool calls as siblings of one another, so a parent walk would lose
-//! all but one of them.
+//! all but one of them. `history` has to skip the turns of abandoned branches, so it
+//! follows the links, and takes tool results by file order for the same reason.
 //!
 //! **Cursor.** `c:<turn>.<prompt>.<end>`, each part in hex: the byte offset of the turn's
 //! prompt, a hash of the prompt's id, and the offset just past the last complete line read.
@@ -33,9 +36,14 @@ use crate::api::schema::{
 };
 
 mod claude;
+mod history;
 mod omp;
+mod scan;
 #[cfg(test)]
 mod tests;
+
+pub use history::{history, DEFAULT_TURNS, MAX_TURNS};
+use scan::Scan;
 
 /// Entries returned when a request names no limit.
 pub const DEFAULT_LIMIT: usize = 200;
@@ -65,21 +73,32 @@ pub struct Activity {
     pub truncated: bool,
 }
 
-/// Reads the current turn of a transcript: from its newest real user prompt onwards.
-/// `Ok(None)` means the transcript holds no prompt yet. `limit` is at least 1.
+/// Reads the current turn of a transcript: from its newest real user prompt onwards, or from
+/// the context the session opened with while no prompt follows it. `Ok(None)` means the
+/// transcript holds no turn yet. `limit` is at least 1. With
+/// `thinking`, the assistant's thinking is among the entries.
 pub fn activity(
     format: TranscriptFormat,
     path: &Path,
     since: Option<&str>,
     limit: usize,
+    thinking: bool,
 ) -> io::Result<Option<Activity>> {
     let lines = ReverseLines::new(std::fs::File::open(path)?, READ_CHUNK)?;
-    Ok(read_turn(format, lines)?.map(|turn| turn.into_activity(since, limit)))
+    Ok(read_turn(format, lines, thinking)?.map(|turn| turn.into_activity(since, limit)))
 }
 
 /// One transcript line reduced to what the feed needs.
 enum Line {
     Prompt(Prompt),
+    /// A message the session gave the model that is not the user's, such as the context of a
+    /// handoff. The one a session opens with opens its first turn (see `Scan`); later ones are
+    /// not part of the feed.
+    Context(Prompt),
+    /// A message the user sent while the agent was working. It opens no turn.
+    MidPrompt(Prompt),
+    /// Where the agent summarised the conversation so far.
+    Compaction(Compaction),
     /// What a local slash command printed. The model never saw it.
     LocalOutput,
     /// The user stopped the agent.
@@ -91,14 +110,58 @@ enum Line {
     Other,
 }
 
-/// A user message that opens a turn.
+/// A parsed transcript line and how it links to the others.
+struct Parsed {
+    /// `None` when the line is no entry of the main conversation: torn by a concurrent write,
+    /// or written by a subagent.
+    link: Option<Link>,
+    line: Line,
+}
+
+impl Parsed {
+    fn other() -> Self {
+        Self {
+            link: None,
+            line: Line::Other,
+        }
+    }
+}
+
+/// How an entry links to the rest of its transcript. Transcripts are trees: a session that
+/// is rewound or branched keeps the abandoned branch in the file.
+struct Link {
+    id: String,
+    /// The entry this one follows. `None` for the first entry of a branch.
+    parent: Option<String>,
+    /// The entry may be the newest of its branch. Entries that hang off the side of one and
+    /// lead nowhere, such as hook results, are not.
+    tip: bool,
+    /// A tool result. Claude Code writes the results of parallel calls as siblings of one
+    /// another, of which the branch goes on through only one, so results count wherever
+    /// they hang.
+    result: bool,
+}
+
+/// A user message that opens a turn, or that the user sent in the middle of one, or the
+/// context a session opened with.
 struct Prompt {
     id: String,
     timestamp: Option<String>,
     text: String,
+    /// How many images came with it.
+    images: u32,
     /// Typed as a slash command. A local one (`/model`, `/clear`) prints its result and never
     /// reaches the model, so it opens a turn only when that output does not follow it.
     command: bool,
+    /// Not the user's words: the context a session opened with.
+    context: bool,
+}
+
+struct Compaction {
+    id: String,
+    timestamp: Option<String>,
+    /// The summary, when the transcript has it.
+    text: Option<String>,
 }
 
 struct Assistant {
@@ -121,7 +184,15 @@ enum Stop {
 }
 
 enum Block {
-    Text { id: String, text: String },
+    Text {
+        id: String,
+        text: String,
+    },
+    /// The assistant's thinking. Only read when the request asked for it.
+    Thinking {
+        id: String,
+        text: String,
+    },
     Call(Call),
 }
 
@@ -136,12 +207,14 @@ struct ToolResult {
     failed: bool,
     /// The tail of the result, already cut down.
     output: Option<String>,
+    /// How many images the result carried.
+    images: u32,
 }
 
-fn parse(format: TranscriptFormat, line: &[u8]) -> Line {
+fn parse(format: TranscriptFormat, line: &[u8], thinking: bool) -> Parsed {
     match format {
-        TranscriptFormat::Claude => claude::parse(line),
-        TranscriptFormat::Omp => omp::parse(line),
+        TranscriptFormat::Claude => claude::parse(line, thinking),
+        TranscriptFormat::Omp => omp::parse(line, thinking),
     }
 }
 
@@ -199,52 +272,13 @@ fn repair_surrogates(line: &[u8]) -> Option<Vec<u8>> {
 /// the turn from the lines after it.
 fn read_turn<R: Read + Seek>(
     format: TranscriptFormat,
-    mut lines: ReverseLines<R>,
+    lines: ReverseLines<R>,
+    thinking: bool,
 ) -> io::Result<Option<Turn>> {
-    let len = lines.len;
-    let mut end = len;
-    let mut first = true;
-    // The lines after the one being examined, newest first.
-    let mut collected = Vec::new();
-    // Whether the next line after the one being examined, bookkeeping aside, is what a local
-    // slash command printed.
-    let mut local_output_next = false;
-    while let Some(line) = lines.next_with_offset() {
-        let (offset, bytes) = line?;
-        if std::mem::take(&mut first) && offset + bytes.len() as u64 == len {
-            // The writer has not ended this line yet. Leave it for the next read, which
-            // sees it whole.
-            end = offset;
-        }
-        match parse(format, &bytes) {
-            // A local slash command prints its result and the model never answers it: what it
-            // printed follows it directly, and the turn is an earlier one.
-            Line::Prompt(prompt) if prompt.command && local_output_next => {
-                local_output_next = false;
-            }
-            Line::Prompt(prompt) => {
-                let mut turn = Turn::new(offset, end, prompt);
-                for (offset, line) in collected.into_iter().rev() {
-                    turn.push(offset, line);
-                }
-                return Ok(Some(turn));
-            }
-            line @ (Line::Assistant(_) | Line::ToolResults(_)) => {
-                local_output_next = false;
-                collected.push((offset, line));
-            }
-            Line::Interrupt => {
-                local_output_next = false;
-                collected.push((offset, Line::Interrupt));
-            }
-            Line::LocalOutput => local_output_next = true,
-            Line::Other => {}
-        }
-    }
-    Ok(None)
+    Scan::in_file_order(format, lines, thinking).next_turn()
 }
 
-/// The current turn as the transcript stands.
+/// A turn as the transcript stands.
 struct Turn {
     /// Offset of the prompt's line.
     start: u64,
@@ -259,6 +293,9 @@ struct Turn {
     last_result: u64,
     /// Offset of the line where the user stopped the agent, when no response followed it.
     interrupted_at: Option<u64>,
+    /// What sits between the responses, with the offset of its line: messages the user sent
+    /// mid-turn, and compactions.
+    inserted: Vec<(u64, AgentActivityEntry)>,
 }
 
 struct Response {
@@ -287,6 +324,17 @@ struct Outcome {
     line: u64,
     failed: bool,
     output: Option<String>,
+    /// How many images the result carried.
+    images: u32,
+}
+
+/// An entry of a turn and where it belongs.
+struct Placed {
+    /// Offset of the line that wrote it, which is its place among the other entries.
+    at: u64,
+    /// Offset of the newest line that created or changed it.
+    touched: u64,
+    entry: AgentActivityEntry,
 }
 
 impl Turn {
@@ -300,6 +348,7 @@ impl Turn {
             results: HashMap::new(),
             last_result: 0,
             interrupted_at: None,
+            inserted: Vec::new(),
         }
     }
 
@@ -316,12 +365,17 @@ impl Turn {
                             line: offset,
                             failed: result.failed,
                             output: result.output,
+                            images: result.images,
                         },
                     );
                 }
             }
             Line::Interrupt => self.interrupted_at = Some(offset),
-            Line::Prompt(_) | Line::LocalOutput | Line::Other => {}
+            Line::MidPrompt(prompt) => self.inserted.push((offset, prompt_entry(&prompt))),
+            Line::Compaction(compaction) => {
+                self.inserted.push((offset, compaction_entry(&compaction)))
+            }
+            Line::Prompt(_) | Line::Context(_) | Line::LocalOutput | Line::Other => {}
         }
     }
 
@@ -366,13 +420,15 @@ impl Turn {
             }));
     }
 
-    /// The turn's entries in order, each with the offset of the newest line that created
-    /// or changed it, and whether the turn is over.
+    /// The turn's entries in order, each with where its line sits in the file and the offset
+    /// of the newest line that created or changed it, and whether the turn is over.
     ///
     /// A response without tool calls becomes one entry holding all its text: the final
     /// `message` when it closes a finished turn, a `note` otherwise. Its kind can change
-    /// with later lines, which is why those lines count as changing it.
-    fn entries(&self) -> (Vec<(u64, AgentActivityEntry)>, bool) {
+    /// with later lines, which is why those lines count as changing it. Thinking stands in
+    /// entries of its own. Messages the user sent mid-turn and compactions go where their
+    /// lines were written.
+    fn entries(&self) -> (Vec<Placed>, bool) {
         let interrupted = self.interrupted_at.is_some();
         let running = self
             .responses
@@ -391,16 +447,11 @@ impl Turn {
         });
         let finished = (closing.is_some() || interrupted) && !running;
 
-        let mut entries = vec![(
-            self.start,
-            AgentActivityEntry {
-                id: self.prompt.id.clone(),
-                kind: AgentActivityEntryKind::Prompt,
-                timestamp: self.prompt.timestamp.clone(),
-                text: Some(self.prompt.text.clone()),
-                tool: None,
-            },
-        )];
+        let mut entries = vec![Placed {
+            at: self.start,
+            touched: self.start,
+            entry: prompt_entry(&self.prompt),
+        }];
         for (index, response) in self.responses.iter().enumerate() {
             if response.has_call() {
                 // The text of a response that holds tool calls was one entry until its
@@ -413,32 +464,34 @@ impl Turn {
                     .min()
                     .unwrap_or(0);
                 for item in &response.items {
-                    match &item.block {
-                        Block::Text { id, text } => entries.push((
-                            item.line.max(first_call),
-                            text_entry(
+                    entries.push(match &item.block {
+                        Block::Text { id, text } => Placed {
+                            at: item.line,
+                            touched: item.line.max(first_call),
+                            entry: text_entry(
                                 id,
                                 &item.timestamp,
                                 text.clone(),
                                 AgentActivityEntryKind::Note,
                             ),
-                        )),
-                        Block::Call(call) => entries.push(self.tool_entry(item, call)),
-                    }
+                        },
+                        Block::Thinking { id, text } => thinking_entry(item, id, text),
+                        Block::Call(call) => self.tool_entry(item, call),
+                    });
                 }
                 continue;
             }
             let mut texts = response.items.iter().filter_map(|item| match &item.block {
-                Block::Text { id, text } => Some((id, &item.timestamp, text)),
-                Block::Call(_) => None,
+                Block::Text { id, text } => Some((item, id, text)),
+                Block::Thinking { .. } | Block::Call(_) => None,
             });
-            let Some((id, timestamp, first)) = texts.next() else {
-                continue;
-            };
-            let text = texts.fold(first.clone(), |mut text, (_, _, more)| {
-                text.push_str("\n\n");
-                text.push_str(more);
-                text
+            let merged = texts.next().map(|(first, id, first_text)| {
+                let text = texts.fold(first_text.clone(), |mut text, (_, _, more)| {
+                    text.push_str("\n\n");
+                    text.push_str(more);
+                    text
+                });
+                (first, id, text)
             });
             let kind = if finished && closing == Some(index) {
                 AgentActivityEntryKind::Message
@@ -452,14 +505,47 @@ impl Turn {
             if closing == Some(index) {
                 touched = touched.max(self.last_result);
             }
-            entries.push((touched, text_entry(id, timestamp, text, kind)));
+            let mut merged = merged.map(|(first, id, text)| Placed {
+                at: first.line,
+                touched,
+                entry: text_entry(id, &first.timestamp, text, kind),
+            });
+            // The text entry stands where the first of its blocks was written.
+            let first_text = response
+                .items
+                .iter()
+                .position(|item| matches!(item.block, Block::Text { .. }));
+            for (position, item) in response.items.iter().enumerate() {
+                match &item.block {
+                    Block::Thinking { id, text } => entries.push(thinking_entry(item, id, text)),
+                    Block::Text { .. } if Some(position) == first_text => {
+                        entries.extend(merged.take());
+                    }
+                    Block::Text { .. } | Block::Call(_) => {}
+                }
+            }
+        }
+        for (at, entry) in &self.inserted {
+            let index = entries
+                .iter()
+                .rposition(|placed| placed.at < *at)
+                .map_or(0, |index| index + 1);
+            entries.insert(
+                index,
+                Placed {
+                    at: *at,
+                    touched: *at,
+                    entry: entry.clone(),
+                },
+            );
         }
         (entries, finished)
     }
 
-    fn tool_entry(&self, item: &Item, call: &Call) -> (u64, AgentActivityEntry) {
+    fn tool_entry(&self, item: &Item, call: &Call) -> Placed {
         let mut tool = call.tool.clone();
         let mut touched = item.line;
+        let mut images = None;
         if let Some(outcome) = self.results.get(&call.id) {
             touched = touched.max(outcome.line);
             tool.status = if outcome.failed {
@@ -468,17 +554,20 @@ impl Turn {
                 AgentActivityToolStatus::Succeeded
             };
             tool.output = outcome.output.clone();
+            images = (outcome.images > 0).then_some(outcome.images);
         }
-        (
+        Placed {
+            at: item.line,
             touched,
-            AgentActivityEntry {
+            entry: AgentActivityEntry {
                 id: call.id.clone(),
                 kind: AgentActivityEntryKind::Tool,
                 timestamp: item.timestamp.clone(),
                 text: None,
                 tool: Some(tool),
+                images,
             },
-        )
+        }
     }
 
     /// Applies the client's cursor and limit to the turn.
@@ -505,7 +594,7 @@ impl Turn {
         if let Some(end) = resume {
             let changed = entries
                 .iter()
-                .filter(|(touched, _)| *touched >= end)
+                .filter(|placed| placed.touched >= end)
                 .count();
             if changed > limit {
                 resume = None;
@@ -514,8 +603,8 @@ impl Turn {
         }
         let mut entries: Vec<AgentActivityEntry> = entries
             .into_iter()
-            .filter(|(touched, _)| resume.is_none_or(|end| *touched >= end))
-            .map(|(_, entry)| entry)
+            .filter(|placed| resume.is_none_or(|end| placed.touched >= end))
+            .map(|placed| placed.entry)
             .collect();
         let truncated = entries.len() > limit;
         if truncated {
@@ -523,6 +612,7 @@ impl Turn {
         }
         Activity {
             turn: AgentActivityTurn {
+                id: Some(self.prompt.id),
                 started_at: self.prompt.timestamp,
                 finished,
             },
@@ -551,6 +641,46 @@ fn text_entry(
         timestamp: timestamp.clone(),
         text: Some(text),
         tool: None,
+        images: None,
+    }
+}
+
+fn thinking_entry(item: &Item, id: &str, text: &str) -> Placed {
+    Placed {
+        at: item.line,
+        touched: item.line,
+        entry: text_entry(
+            id,
+            &item.timestamp,
+            text.to_string(),
+            AgentActivityEntryKind::Thinking,
+        ),
+    }
+}
+
+fn prompt_entry(prompt: &Prompt) -> AgentActivityEntry {
+    AgentActivityEntry {
+        id: prompt.id.clone(),
+        kind: if prompt.context {
+            AgentActivityEntryKind::Context
+        } else {
+            AgentActivityEntryKind::Prompt
+        },
+        timestamp: prompt.timestamp.clone(),
+        text: Some(prompt.text.clone()),
+        tool: None,
+        images: (prompt.images > 0).then_some(prompt.images),
+    }
+}
+
+fn compaction_entry(compaction: &Compaction) -> AgentActivityEntry {
+    AgentActivityEntry {
+        id: compaction.id.clone(),
+        kind: AgentActivityEntryKind::Compaction,
+        timestamp: compaction.timestamp.clone(),
+        text: compaction.text.clone(),
+        tool: None,
+        images: None,
     }
 }
 
@@ -632,6 +762,18 @@ fn message_text(content: Option<&Value>) -> Option<String> {
         _ => return None,
     };
     (!text.is_empty()).then_some(text)
+}
+
+/// How many image blocks a message's content holds.
+fn count_images(content: Option<&Value>) -> u32 {
+    let Some(Value::Array(blocks)) = content else {
+        return 0;
+    };
+    let images = blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+        .count();
+    u32::try_from(images).unwrap_or(u32::MAX)
 }
 
 /// How a tool call reads in the feed, before its result arrives. `intent` is what the agent
