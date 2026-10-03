@@ -273,6 +273,8 @@ pub struct WorkItemInfo {
 pub enum AttentionKind {
     /// An agent waits on you, e.g. for a permission or a question.
     Blocked,
+    /// An agent has been running one shell command for at least `work_items.stuck_after_seconds`.
+    Stuck,
     /// Provisioning a workspace or carrying out a choice failed.
     Failed,
     /// An agent finished its turn and its pane has been left alone since.
@@ -296,7 +298,7 @@ pub struct AttentionInfo {
     pub kind: AttentionKind,
     /// One line for the user, e.g. "Allow running bin/rails db:migrate?".
     pub reason: String,
-    /// The agent's pane, for `blocked` and `finished`.
+    /// The agent's pane, for `blocked`, `stuck` and `finished`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
     /// Unix time in seconds when it entered this kind.

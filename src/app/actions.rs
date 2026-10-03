@@ -1655,6 +1655,7 @@ impl AppState {
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
             AppEvent::WorkItems(_) => Vec::new(),
             AppEvent::AgentTranscriptsLookedUp(_) => Vec::new(),
+            AppEvent::RunningCommandsRead(_) => Vec::new(),
         }
     }
 

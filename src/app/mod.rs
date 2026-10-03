@@ -21,6 +21,7 @@ mod custom_commands;
 mod git_refresh;
 mod ids;
 mod popup;
+mod running_commands;
 mod runtime;
 mod session;
 pub mod state;
@@ -168,6 +169,14 @@ pub struct App {
     work_item_changes: crate::work_items::ItemChanges,
     /// When what needs you must be worked out again.
     attention_schedule: crate::work_items::attention::Schedule,
+    /// The oldest shell command each working agent's transcript showed it running when last
+    /// read, by terminal.
+    running_commands:
+        HashMap<crate::terminal::TerminalId, crate::work_items::attention::RunningCommand>,
+    /// When the transcripts of working agents are read next; `None` while none is working.
+    running_command_check_at: Option<Instant>,
+    /// Whether a read of those transcripts is under way.
+    running_command_check_in_flight: bool,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -648,6 +657,9 @@ impl App {
             work_items,
             work_item_changes: crate::work_items::ItemChanges::default(),
             attention_schedule: crate::work_items::attention::Schedule::default(),
+            running_commands: HashMap::new(),
+            running_command_check_at: None,
+            running_command_check_in_flight: false,
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);

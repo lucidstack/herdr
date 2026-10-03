@@ -1541,6 +1541,12 @@
           "description": "Prompt sent to the Pick next agent before its brief to start it in plan mode, so the brief arrives as its first planning request. Unset sends \"/plan\" when the agent is omp and nothing otherwise; empty sends nothing. Herdr never approves the plan."
         },
         {
+          "key": "work_items.stuck_after_seconds",
+          "type": "integer",
+          "default": "600",
+          "description": "Seconds an agent may run one command before it counts as stuck and needs you, clamped to 60–86400. The agent then needs you with the attention kind stuck, until the command ends or the agent stops working. Only agents whose transcript Herdr reads (omp and Claude Code) can be stuck."
+        },
+        {
           "key": "work_items.github.enabled",
           "type": "boolean",
           "default": "true",

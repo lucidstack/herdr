@@ -39,12 +39,14 @@ mod claude;
 mod history;
 mod image;
 mod omp;
+mod running;
 mod scan;
 #[cfg(test)]
 mod tests;
 
 pub use history::{history, DEFAULT_TURNS, MAX_TURNS};
 pub use image::{find_image, ImageLookup};
+pub use running::running_shell_calls;
 use scan::Scan;
 
 /// Entries returned when a request names no limit.

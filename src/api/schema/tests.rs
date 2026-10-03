@@ -1105,6 +1105,19 @@ fn provisioning_finish_time_is_optional_on_the_wire() {
 }
 
 #[test]
+fn an_agent_stuck_on_a_command_is_attention_kind_stuck_on_the_wire() {
+    let attention = serde_json::json!({
+        "kind": "stuck",
+        "reason": "`cargo test` has been running for over 10 min",
+        "pane_id": "w1:p1",
+        "since": 1_700_000_000,
+    });
+    let info: AttentionInfo = serde_json::from_value(attention.clone()).unwrap();
+    assert_eq!(info.kind, AttentionKind::Stuck);
+    assert_eq!(serde_json::to_value(&info).unwrap(), attention);
+}
+
+#[test]
 fn agent_dismiss_request_takes_the_agent_last_message_params() {
     let json = serde_json::json!({
         "id": "d",

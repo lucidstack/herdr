@@ -53,6 +53,10 @@ impl App {
                 self.finish_agent_transcript_lookups(lookups);
                 false
             }
+            AppEvent::RunningCommandsRead(reads) => {
+                self.finish_running_command_checks(reads);
+                false
+            }
             ev @ AppEvent::TerminalBell { .. } => {
                 self.handle_internal_event(ev);
                 false
@@ -186,6 +190,10 @@ impl App {
         }
         if let AppEvent::AgentTranscriptsLookedUp(lookups) = ev {
             self.finish_agent_transcript_lookups(lookups);
+            return Vec::new();
+        }
+        if let AppEvent::RunningCommandsRead(reads) = ev {
+            self.finish_running_command_checks(reads);
             return Vec::new();
         }
 

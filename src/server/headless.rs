@@ -3318,6 +3318,7 @@ impl HeadlessServer {
             changed = true;
         }
 
+        self.app.run_running_command_check(now);
         changed |= self.run_work_items_tasks_headless(now);
         changed |= self.app.handle_tab_bar_status_tasks(now);
 

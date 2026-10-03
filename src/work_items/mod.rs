@@ -499,6 +499,11 @@ impl WorkItems {
         )
     }
 
+    /// How long an agent may run one command before it counts as stuck and needs you.
+    pub(crate) fn stuck_after(&self) -> Duration {
+        self.config.stuck_after()
+    }
+
     /// Bumped on every visible change; 0 while no source was ever enabled.
     pub(crate) fn revision(&self) -> u64 {
         self.revision

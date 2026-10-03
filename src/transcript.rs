@@ -17,7 +17,8 @@ mod activity;
 mod locate;
 
 pub use activity::{
-    activity, find_image, history, ImageLookup, DEFAULT_LIMIT, DEFAULT_TURNS, MAX_LIMIT, MAX_TURNS,
+    activity, find_image, history, running_shell_calls, ImageLookup, DEFAULT_LIMIT, DEFAULT_TURNS,
+    MAX_LIMIT, MAX_TURNS,
 };
 pub use locate::find_claude_transcript;
 

@@ -199,6 +199,10 @@ pub struct TerminalState {
     /// The `turn_finished_at` of a finished turn the user dismissed: it counts as dealt with,
     /// as if they had typed to the pane after it. A later turn has its own `turn_finished_at`.
     pub dismissed_turn_at: Option<Instant>,
+    /// When the agent last began working, from any other state; `None` while it is not
+    /// working, and for a working agent whose start was not seen, such as one a live
+    /// handoff carried over.
+    pub working_since: Option<Instant>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -244,6 +248,7 @@ impl TerminalState {
             last_agent_completion_seq: None,
             turn_finished_at: None,
             dismissed_turn_at: None,
+            working_since: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2548,6 +2553,7 @@ impl TerminalState {
         self.last_agent_completion_seq = None;
         self.turn_finished_at = None;
         self.dismissed_turn_at = None;
+        self.working_since = None;
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2657,6 +2663,11 @@ impl TerminalState {
                 Some(now)
             }
             AgentState::Idle => self.turn_finished_at,
+            _ => None,
+        };
+        self.working_since = match state {
+            AgentState::Working if previous_state != AgentState::Working => Some(now),
+            AgentState::Working => self.working_since,
             _ => None,
         };
         Some(EffectiveStateChange {
@@ -6769,5 +6780,33 @@ mod tests {
             terminal.hook_authority.as_ref().unwrap().source,
             "custom:pi"
         );
+    }
+
+    #[test]
+    fn working_since_is_when_the_agent_last_began_working() {
+        let mut terminal = test_terminal();
+        let start = Instant::now();
+        let seconds = Duration::from_secs;
+        let mut set = |state, after: u64| {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Claude),
+                state,
+                false,
+                false,
+                false,
+                false,
+                start + seconds(after),
+            );
+            terminal.working_since
+        };
+
+        assert_eq!(set(AgentState::Idle, 0), None);
+        assert_eq!(set(AgentState::Working, 10), Some(start + seconds(10)));
+        // The same stretch of work, however many times it is seen.
+        assert_eq!(set(AgentState::Working, 20), Some(start + seconds(10)));
+        // Waiting on you is not working, and work after it is a new stretch.
+        assert_eq!(set(AgentState::Blocked, 30), None);
+        assert_eq!(set(AgentState::Working, 40), Some(start + seconds(40)));
+        assert_eq!(set(AgentState::Idle, 50), None);
     }
 }
