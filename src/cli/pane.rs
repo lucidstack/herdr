@@ -3,10 +3,10 @@ use crate::api::schema::{
     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneReportMetadataParams, PaneReportRepliesParams, PaneResizeParams, PaneRightClickTarget,
+    PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
+    PaneTarget, PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource,
+    Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -40,6 +40,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "report-agent-session" => pane_report_agent_session(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
+        "report-replies" => pane_report_replies(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
             print_pane_help();
@@ -1669,6 +1670,116 @@ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+fn pane_report_replies(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str = "usage: herdr pane report-replies <pane_id> --source ID (--message TEXT | --message-file PATH|-) [--reply TEXT]...";
+
+    let args = super::expand_equals_args(
+        args,
+        &["--source", "--message", "--message-file", "--reply"],
+    );
+    let mut pane_id = None;
+    let mut source = None;
+    let mut message = None;
+    let mut replies = Vec::new();
+
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --source");
+                    return Ok(2);
+                };
+                source = Some(value.clone());
+                index += 2;
+            }
+            "--message" => {
+                if message.is_some() {
+                    eprintln!("--message and --message-file are mutually exclusive");
+                    return Ok(2);
+                }
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --message");
+                    return Ok(2);
+                };
+                message = Some(value.clone());
+                index += 2;
+            }
+            "--message-file" => {
+                if message.is_some() {
+                    eprintln!("--message and --message-file are mutually exclusive");
+                    return Ok(2);
+                }
+                let Some(path) = args.get(index + 1) else {
+                    eprintln!("missing value for --message-file");
+                    return Ok(2);
+                };
+                message = match read_message_file(path) {
+                    Ok(text) => Some(text),
+                    Err(err) => {
+                        let from = if path == "-" { "standard input" } else { path };
+                        eprintln!("failed to read {from}: {err}");
+                        return Ok(2);
+                    }
+                };
+                index += 2;
+            }
+            "--reply" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --reply");
+                    return Ok(2);
+                };
+                replies.push(value.clone());
+                index += 2;
+            }
+            option if option.starts_with('-') => {
+                eprintln!("unknown option: {option}");
+                return Ok(2);
+            }
+            positional => {
+                if pane_id.is_some() {
+                    eprintln!("unexpected argument: {positional}");
+                    return Ok(2);
+                }
+                pane_id = Some(super::normalize_pane_id(positional));
+                index += 1;
+            }
+        }
+    }
+
+    let Some(pane_id) = pane_id else {
+        eprintln!("{USAGE}");
+        return Ok(2);
+    };
+    let Some(source) = source.and_then(|source| {
+        let source = source.trim().to_string();
+        (!source.is_empty()).then_some(source)
+    }) else {
+        eprintln!("missing required --source");
+        return Ok(2);
+    };
+    let Some(message) = message else {
+        eprintln!("missing required --message or --message-file");
+        return Ok(2);
+    };
+
+    super::send_ok_request(Method::PaneReportReplies(PaneReportRepliesParams {
+        pane_id,
+        source,
+        message,
+        replies,
+    }))
+}
+
+/// The text of `--message-file`: a file, or standard input for `-`.
+fn read_message_file(path: &str) -> std::io::Result<String> {
+    if path == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(path)
+    }
+}
+
 fn print_pane_help() {
     eprintln!("herdr pane commands:");
     eprintln!("  herdr pane list [--workspace <workspace_id>]");
@@ -1702,6 +1813,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+    eprintln!("  herdr pane report-replies <pane_id> --source ID (--message TEXT | --message-file PATH|-) [--reply TEXT]...");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
 
