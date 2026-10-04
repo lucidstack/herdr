@@ -711,6 +711,7 @@ fn pane_command() -> Command {
         .subcommand(report_agent_session_command())
         .subcommand(release_agent_command())
         .subcommand(report_metadata_command())
+        .subcommand(report_replies_command())
 }
 
 fn report_agent_command() -> Command {
@@ -774,6 +775,26 @@ fn report_metadata_command() -> Command {
         .arg(repeatable_option("clear-token", "NAME"))
         .arg(option("seq", "N"))
         .arg(option("ttl-ms", "N"))
+}
+
+fn report_replies_command() -> Command {
+    Command::new("report-replies")
+        .about("Report the replies an agent offers for its last message")
+        .arg(required("pane_id", "PANE_ID"))
+        .arg(option("source", "ID").required(true))
+        .arg(option("message", "TEXT").help("The agent's final message"))
+        .arg(
+            path_option("message-file", "PATH")
+                .help("Read the agent's final message from a file, or from standard input for -"),
+        )
+        .arg(
+            repeatable_option("reply", "TEXT").help("A reply to offer, up to 3, most likely first"),
+        )
+        .group(
+            ArgGroup::new("final_message")
+                .args(["message", "message-file"])
+                .required(true),
+        )
 }
 
 fn terminal_command() -> Command {
@@ -1245,6 +1266,7 @@ mod tests {
             ),
             (&["pane", "release-agent"][..], &["source", "agent"][..]),
             (&["pane", "report-metadata"][..], &["source"][..]),
+            (&["pane", "report-replies"][..], &["source"][..]),
         ] {
             let cmd = command_path(&super::command(), path).clone();
             for option in options {
@@ -1300,6 +1322,19 @@ mod tests {
         assert!(String::from_utf8(help)
             .unwrap()
             .contains("Usage: herdr agent rename <TARGET> <NAME>|--clear"));
+    }
+
+    #[test]
+    fn pane_report_replies_takes_exactly_one_message_source() {
+        let report = ["herdr", "pane", "report-replies", "w1:p1", "--source", "a"];
+        let with = |extra: &[&'static str]| {
+            super::command().try_get_matches_from(report.iter().chain(extra).copied())
+        };
+
+        assert!(with(&["--message", "Hi"]).is_ok());
+        assert!(with(&["--message-file", "-", "--reply", "Yes", "--reply", "No"]).is_ok());
+        assert!(with(&[]).is_err());
+        assert!(with(&["--message", "Hi", "--message-file", "-"]).is_err());
     }
 
     #[test]

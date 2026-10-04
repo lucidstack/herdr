@@ -10,11 +10,11 @@ use crate::api::schema::{
     PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneReportMetadataParams, PaneReportRepliesParams, PaneResizeParams, PaneResizeReason,
+    PaneResizeResult, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1897,6 +1897,42 @@ impl App {
             self.emit_pane_updated(ws_idx, pane_id);
         }
 
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    /// `pane.report_replies`: the replies an agent's session offers for its final message. A
+    /// report replaces the previous one and counts toward the agent's `replies_revision`; a
+    /// report that is refused changes nothing.
+    pub(super) fn handle_pane_report_replies(
+        &mut self,
+        id: String,
+        params: PaneReportRepliesParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if let Err(message) = normalize_metadata_source(params.source) {
+            return encode_error(id, "invalid_params", message);
+        }
+        let Some(message) = crate::agent_replies::MessageKey::of(&params.message) else {
+            return encode_error(
+                id,
+                "invalid_params",
+                "message must contain at least one letter or digit",
+            );
+        };
+        let replies = match crate::agent_replies::normalize_replies(params.replies) {
+            Ok(replies) => replies,
+            Err(message) => return encode_error(id, "invalid_params", message),
+        };
+        let Some(terminal) = self
+            .state
+            .terminal_id_for_pane(ws_idx, pane_id)
+            .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        terminal.agent_replies.report(message, replies);
         encode_success(id, ResponseResult::Ok {})
     }
 
@@ -4499,6 +4535,151 @@ mod tests {
         let second = session_of(&mut app, 2, "second-session", "clear");
         assert_eq!(second.value, "second-session");
         assert_eq!(second.transcript_path, Some(transcript("second-session")));
+    }
+
+    fn app_with_test_agent() -> (App, String) {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.terminal_id_for_pane(0, pane_id).unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        (app, public_pane_id)
+    }
+
+    fn replies_params(pane_id: &str, message: &str, replies: &[&str]) -> PaneReportRepliesParams {
+        PaneReportRepliesParams {
+            pane_id: pane_id.into(),
+            source: "lucidstack.vetch".into(),
+            message: message.into(),
+            replies: replies.iter().map(|reply| reply.to_string()).collect(),
+        }
+    }
+
+    fn report_replies(app: &mut App, params: PaneReportRepliesParams) -> String {
+        app.handle_api_request(crate::api::schema::Request {
+            id: "replies".into(),
+            method: crate::api::schema::Method::PaneReportReplies(params),
+        })
+    }
+
+    fn agent_get(app: &mut App, target: &str) -> String {
+        app.handle_api_request(crate::api::schema::Request {
+            id: "get".into(),
+            method: crate::api::schema::Method::AgentGet(crate::api::schema::AgentTarget {
+                target: target.into(),
+            }),
+        })
+    }
+
+    fn replies_revision(app: &mut App, pane_id: &str) -> u64 {
+        let success: SuccessResponse = serde_json::from_str(&agent_get(app, pane_id)).unwrap();
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info");
+        };
+        agent.replies_revision
+    }
+
+    #[test]
+    fn each_accepted_replies_report_is_acknowledged_and_raises_the_replies_revision() {
+        let (mut app, pane_id) = app_with_test_agent();
+        assert_eq!(replies_revision(&mut app, &pane_id), 0);
+
+        for (expected, replies) in [(1, &["Yes"][..]), (2, &["Yes", "No"][..]), (3, &[][..])] {
+            let response = report_replies(
+                &mut app,
+                replies_params(&pane_id, "Should I proceed?", replies),
+            );
+
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(success.result, ResponseResult::Ok {});
+            assert_eq!(replies_revision(&mut app, &pane_id), expected);
+        }
+    }
+
+    #[test]
+    fn a_refused_replies_report_leaves_the_stored_replies_and_the_revision_as_they_were() {
+        let (mut app, pane_id) = app_with_test_agent();
+        let terminal_id = app
+            .state
+            .terminal_id_for_pane(0, app.parse_pane_id(&pane_id).unwrap().1)
+            .unwrap();
+        let accepted = report_replies(
+            &mut app,
+            replies_params(&pane_id, "Should I proceed?", &["Yes"]),
+        );
+        assert!(serde_json::from_str::<SuccessResponse>(&accepted).is_ok());
+        let stored = app.state.terminals[&terminal_id]
+            .agent_replies
+            .offered()
+            .cloned();
+        assert!(stored.is_some());
+
+        let too_long = "x".repeat(201);
+        let mut bad_source = replies_params(&pane_id, "Another question?", &["Yes"]);
+        bad_source.source = "not a source!".into();
+        for (params, why) in [
+            (
+                replies_params(&pane_id, "Another question?", &["a", "b", "c", "d"]),
+                "at most 3",
+            ),
+            (
+                replies_params(&pane_id, "Another question?", &["Yes", " "]),
+                "replies[1] must not be empty",
+            ),
+            (
+                replies_params(&pane_id, "Another question?", &[too_long.as_str()]),
+                "201 characters",
+            ),
+            (
+                replies_params(&pane_id, "— … !", &["Yes"]),
+                "letter or digit",
+            ),
+            (bad_source, "metadata source may contain only"),
+        ] {
+            let response = report_replies(&mut app, params);
+
+            let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+            assert_eq!(error.error.code, "invalid_params", "{why}");
+            assert!(error.error.message.contains(why), "{}", error.error.message);
+            assert_eq!(replies_revision(&mut app, &pane_id), 1, "{why}");
+            assert_eq!(
+                app.state.terminals[&terminal_id]
+                    .agent_replies
+                    .offered()
+                    .cloned(),
+                stored,
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_replies_report_for_an_unknown_pane_fails_as_a_session_report_does() {
+        let (mut app, _) = app_with_test_agent();
+        let replies = report_replies(&mut app, replies_params("w9:p9", "Hello there", &["Yes"]));
+        let session = app.handle_api_request(crate::api::schema::Request {
+            id: "replies".into(),
+            method: crate::api::schema::Method::PaneReportAgentSession(
+                PaneReportAgentSessionParams {
+                    pane_id: "w9:p9".into(),
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    seq: None,
+                    agent_session_id: Some("session-1".into()),
+                    agent_session_path: None,
+                    session_start_source: None,
+                    resume_argv: None,
+                },
+            ),
+        });
+
+        let replies: ErrorResponse = serde_json::from_str(&replies).unwrap();
+        let session: ErrorResponse = serde_json::from_str(&session).unwrap();
+        assert_eq!(replies.error.code, "pane_not_found");
+        assert_eq!(replies, session);
     }
 
     #[test]

@@ -1,0 +1,16 @@
+**The Moonbase Lantern system illuminates the lunar outpost with revolutionary efficiency.** ✨ The main lighting fixtures, known as `φῶς` units (from ancient Greek meaning light), operate similarly to the Japanese `灯り` concept of radiant warmth.
+
+| Lamp ID | Status |
+|---------|--------|
+| Lamp 7 | Operational, 85% brightness |
+| Lamp 12 | Maintenance mode, reduced output |
+| Lamp 31 | Standby, emergency backup |
+
+The team appreciates how these lamps "turn darkness into opportunity" in the harsh lunar environment.
+
+```json
+{
+  "facility": "Moonbase Lantern",
+  "total_lamps": 47
+}
+```

@@ -3926,6 +3926,37 @@
           ],
           "type": "object"
         },
+        "PaneReportRepliesParams": {
+          "description": "Replies an agent's own session suggests for the message it just finished with.",
+          "properties": {
+            "message": {
+              "description": "The agent's final message as its harness gave it, markdown included. It must hold a letter\nor a digit. `agent.last_message` returns `replies` only for a message with the same letters\nand digits in the same order; whitespace, punctuation and other symbols may differ, but\nletters and digits count wherever they are, a code fence's language included.",
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "replies": {
+              "description": "Up to 3 replies the user is likely to send next, most likely first. Each is trimmed and\nmust then be non-empty and at most 200 characters. An empty array says the agent offers\nnone for this message.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            "source": {
+              "description": "Who reports, for example `lucidstack.vetch`. A source identifier, like the metadata `source`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "message",
+            "replies"
+          ],
+          "type": "object"
+        },
         "PaneResizeParams": {
           "properties": {
             "amount": {
@@ -7361,6 +7392,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_replies",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportRepliesParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.clear_agent_authority",
               "type": "string"
             },
@@ -8603,6 +8650,13 @@
             "pane_id": {
               "type": "string"
             },
+            "replies_revision": {
+              "default": 0,
+              "description": "How many `pane.report_replies` reports the pane has accepted: 0 until the first, then one\nmore for each. Read `agent.last_message` again when it changes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
@@ -8684,6 +8738,14 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "replies": {
+              "default": [],
+              "description": "What the agent's own session offered as the user's next reply to this message, most\nlikely first: up to 3 replies of at most 200 characters, reported with\n`pane.report_replies`. Empty when `status` is not `available`, when nothing was reported,\nand when what was reported was for another message. An older Herdr omits the field.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "status": {
               "$ref": "#/schemas/success_response/$defs/AgentLastMessageStatus"

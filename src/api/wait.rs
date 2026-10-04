@@ -576,6 +576,26 @@ pub(super) fn agent_get(
     agent_from_response(request_id, &response)
 }
 
+/// `agent_get` for `agent.last_message`: the app answers with the agent and also the replies its
+/// session offered, which the caller matches against the message it reads.
+pub(super) fn agent_for_last_message(
+    request_id: &str,
+    target: &str,
+    api_tx: &ApiRequestSender,
+) -> Result<crate::api::schema::AgentInfo, ErrorResponse> {
+    let response = dispatch_to_app_with_timeout(
+        Request {
+            id: format!("{request_id}:agent"),
+            method: Method::AgentLastMessage(crate::api::schema::AgentTarget {
+                target: target.to_string(),
+            }),
+        },
+        api_tx,
+        Some(APP_RESPONSE_TIMEOUT),
+    );
+    agent_from_response(request_id, &response)
+}
+
 fn agent_get_for_prompt(
     request_id: &str,
     target: &str,

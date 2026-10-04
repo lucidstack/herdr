@@ -359,6 +359,19 @@ Metadata text is normalized before storage. Herdr trims surrounding whitespace, 
 
 `--source` and `--applies-to-source` must be 80 characters or fewer and may contain only ASCII letters, digits, colon, dot, underscore, and hyphen. `--ttl-ms` makes metadata expire automatically and must be between `1` and `86400000` milliseconds. Omit it for metadata that should stay until replaced, cleared, or the pane closes. `--seq` lets Herdr ignore stale reports from the same `--source`; stale reports are accepted by the API but ignored by pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
 
+Report the replies an agent's own session suggests for the message it just finished with:
+
+```bash
+herdr pane report-replies <pane_id> \
+  --source ID \
+  (--message TEXT | --message-file PATH|-) \
+  [--reply TEXT]...
+```
+
+`--message` is the agent's final message as its harness gave it. `--message-file` reads it from a file instead, or from standard input for `-`, which suits a message too long for the command line. It must contain a letter or a digit. Each `--reply` is one reply the user is likely to send next, most likely first: at most 3, each trimmed, not empty, and at most 200 characters once trimmed. Without `--reply`, the report says the agent offers none for this message. A report replaces the pane's previous one.
+
+Herdr returns the replies from the `agent.last_message` socket method as `replies`, only while the last message in the agent's transcript has the same letters and digits as `--message`, in the same order. Whitespace, punctuation and other symbols do not matter. Letters and digits do, wherever they are, including a code fence's language and a link's target, so pass the message as the agent's harness gave it, markdown included, not a rendered copy. `agent get` and `agent list` include `replies_revision`, which is 0 until the pane's first accepted report and rises with each one. `--source` follows the same rules as for metadata. Replies are kept in memory only: they are not restored after a server restart and go when the pane closes.
+
 ## Agents
 
 For the pane-versus-agent model and complete orchestration examples, see [Agent automation](/docs/agent-automation/).

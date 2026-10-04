@@ -427,6 +427,24 @@ pub struct PaneReportMetadataParams {
     pub ttl_ms: Option<u64>,
 }
 
+/// Replies an agent's own session suggests for the message it just finished with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportRepliesParams {
+    pub pane_id: String,
+    /// Who reports, for example `lucidstack.vetch`. A source identifier, like the metadata `source`.
+    pub source: String,
+    /// The agent's final message as its harness gave it, markdown included. It must hold a letter
+    /// or a digit. `agent.last_message` returns `replies` only for a message with the same letters
+    /// and digits in the same order; whitespace, punctuation and other symbols may differ, but
+    /// letters and digits count wherever they are, a code fence's language included.
+    pub message: String,
+    /// Up to 3 replies the user is likely to send next, most likely first. Each is trimmed and
+    /// must then be non-empty and at most 200 characters. An empty array says the agent offers
+    /// none for this message.
+    #[schemars(length(max = 3))]
+    pub replies: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneClearAgentAuthorityParams {
     pub pane_id: String,

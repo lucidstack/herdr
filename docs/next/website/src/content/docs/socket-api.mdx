@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.diff`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.report_replies`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.last_message`, `agent.dismiss`, `agent.activity`, `agent.history`, `agent.image`, `agent.notes.take`, `agent.notes.add`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -117,6 +117,12 @@ Raw socket method names use dot notation:
 
 ```json
 {"id":"1","method":"agent.last_message","params":{"target":"w1:p1"}}
+```
+
+The result also carries `replies`, always as an array: up to three replies the user is likely to send next, most likely first, that the agent's own session offered for this message through [`pane.report_replies`](#agent-state-reporting). It is empty unless `status` is `available` and the replies were offered for this very message, so a newer message never shows the replies of an older one. `agent.get` and `agent.list` carry `replies_revision`, which is 0 until the pane's first accepted report and rises with each one, so a client that polls them knows when to read `agent.last_message` again. Older Herdr versions have neither field.
+
+```json
+{"id":"1","result":{"type":"agent_last_message","last_message":{"terminal_id":"term_1","pane_id":"w1:p1","agent":"claude","status":"available","text":"Both lamps are tagged. Should I file the logbook entry as well?","replies":["Yes, file it","Show me the entry first"],"stop_reason":"end_turn","timestamp":"2026-10-04T19:40:03.040Z","transcript_path":"/home/me/.claude/projects/app/session.jsonl"}}}
 ```
 
 `agent.dismiss` counts an agent's finished turn as dealt with, as if you had typed to its pane after it, so the `finished` attention of its [work item](/docs/work-items/) clears. It takes the same `target` as `agent.last_message` and answers `{"type":"ok"}`. An agent that is `blocked` has to be answered instead and fails with `agent_blocked`. One whose turn does not need you yet, because it is working, ended its turn less than two minutes ago, or was dealt with already, is left as it is and still answers `ok`. A target that is not an agent fails with `agent_not_found`, as for the other agent methods.
@@ -855,6 +861,16 @@ Presentation text is normalized before storage. Herdr trims surrounding whitespa
 Use `ttl_ms` for short-lived metadata. It must be between `1` and `86400000` milliseconds. Omit `ttl_ms` for metadata that should stay until replaced, cleared, or the pane/workspace closes. Presentation fields retain their existing source-scoped expiry behavior; each token updated by the call receives its own deadline. Token metadata is not restored after a server restart.
 
 Use `seq` when a hook may send updates out of order. For the same `source`, reports with a sequence number less than or equal to the last accepted sequence are accepted by the API but ignored by the pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
+
+Use `pane.report_replies` when an agent's own session can suggest what the user should answer next, for example from a hook that asks the session for replies once its turn ends. The report carries the agent's final message as its harness gave it, and up to three replies:
+
+```json
+{"id":"req_4","method":"pane.report_replies","params":{"pane_id":"w1:p1","source":"lucidstack.vetch","message":"Both lamps are tagged. Should I file the logbook entry as well?","replies":["Yes, file it","Show me the entry first"]}}
+```
+
+The answer is the same acknowledgement as for the other reports, `{"id":"req_4","result":{"type":"ok"}}`. Herdr does not match the `message` against anything when it takes the report in. It keeps the replies in memory with the pane and returns them from `agent.last_message` only while the message it reads from the transcript has the same letters and digits as `message`, in the same order. Whitespace, punctuation and other symbols are ignored, so line breaks, `#`, `*`, backticks and the way a harness joins the blocks of a message do not matter. Letters and digits count wherever they are, including a code fence's language, a link's target, an HTML tag's name and the numbers of a numbered list, so send the message as the harness gave it, markdown included, not a rendered or flattened copy.
+
+`replies` holds 0 to 3 strings, each trimmed, not empty, and at most 200 characters once trimmed. `message` must contain a letter or a digit. `source` follows the same rules as the metadata `source`. A request that breaks a rule fails with `invalid_params` and a message that says which, and the report is not applied; an unknown pane fails with `pane_not_found`, as for the other reports. An accepted report replaces the pane's previous one and raises the pane's `replies_revision` by one. An empty `replies` array is accepted too: it says the agent offers none for this message. The replies are not restored after a server restart and go when the pane closes.
 
 ## Event subscriptions
 
