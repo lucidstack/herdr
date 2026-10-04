@@ -15,6 +15,7 @@ use crate::config::{
     AgentLaunch, BranchWorkflowConfig, JiraProjectConfig, JiraWorkItemsConfig, OnResolvedConfig,
 };
 
+use super::adf;
 use super::github::{one_line, slug, truncate_chars};
 use super::process::{failure_detail, run_with_input, run_with_timeout};
 use super::provision::find_existing_work;
@@ -214,48 +215,6 @@ pub(crate) struct JiraTransition {
 pub(crate) struct JiraComment {
     pub author: String,
     pub body: String,
-}
-
-/// Plain text of an Atlassian Document Format node.
-fn adf_text(node: &serde_json::Value) -> String {
-    let mut out = String::new();
-    write_adf(node, &mut out);
-    out.trim().to_string()
-}
-
-fn write_adf(node: &serde_json::Value, out: &mut String) {
-    let kind = node
-        .get("type")
-        .and_then(|kind| kind.as_str())
-        .unwrap_or("");
-    let attr = |name: &str| {
-        node.get("attrs")
-            .and_then(|attrs| attrs.get(name))
-            .and_then(|value| value.as_str())
-    };
-    match kind {
-        "text" => out.push_str(
-            node.get("text")
-                .and_then(|text| text.as_str())
-                .unwrap_or(""),
-        ),
-        "hardBreak" => out.push('\n'),
-        "mention" | "emoji" => out.push_str(attr("text").unwrap_or("")),
-        "inlineCard" | "blockCard" => out.push_str(attr("url").unwrap_or("")),
-        "listItem" => out.push_str("- "),
-        _ => {}
-    }
-    if let Some(children) = node.get("content").and_then(|content| content.as_array()) {
-        for child in children {
-            write_adf(child, out);
-        }
-    }
-    if matches!(
-        kind,
-        "paragraph" | "heading" | "listItem" | "codeBlock" | "blockquote" | "rule"
-    ) {
-        out.push('\n');
-    }
 }
 
 /// Branch name from a project's template.
@@ -1109,7 +1068,7 @@ impl WorkItemSource for JiraSource {
             description: fields
                 .description
                 .as_ref()
-                .map(adf_text)
+                .map(adf::markdown)
                 .unwrap_or_default(),
             issue_type: name(fields.issuetype),
             priority: name(fields.priority),
@@ -1129,7 +1088,7 @@ impl WorkItemSource for JiraSource {
                         .author
                         .map(|person| person.display_name)
                         .unwrap_or_else(|| "unknown".into()),
-                    body: comment.body.as_ref().map(adf_text).unwrap_or_default(),
+                    body: comment.body.as_ref().map(adf::markdown).unwrap_or_default(),
                 })
                 .collect(),
             base_branch,
@@ -1384,7 +1343,7 @@ impl WorkItemSource for JiraSource {
         let description = fields
             .description
             .as_ref()
-            .map(adf_text)
+            .map(adf::markdown)
             .unwrap_or_default();
         let comments = fields
             .comment
@@ -1396,7 +1355,7 @@ impl WorkItemSource for JiraSource {
                     .author
                     .map(|person| person.display_name)
                     .unwrap_or_else(|| "unknown".into()),
-                body: comment.body.as_ref().map(adf_text).unwrap_or_default(),
+                body: comment.body.as_ref().map(adf::markdown).unwrap_or_default(),
             })
             .collect();
         let tracker_state = tracker_state(&status_name, assignee.as_deref());
@@ -1808,23 +1767,141 @@ mod tests {
         );
     }
 
-    #[test]
-    fn document_format_becomes_plain_text() {
-        let adf = serde_json::json!({
-            "type": "doc",
-            "content": [
-                {"type": "paragraph", "content": [
-                    {"type": "text", "text": "Hello "},
-                    {"type": "mention", "attrs": {"text": "@Andrea"}}
+    /// An issue as Jira's REST API sends it, its description and comments in document format.
+    #[cfg(unix)]
+    fn issue_json() -> serde_json::Value {
+        let words = |words: &str| serde_json::json!({"type": "text", "text": words});
+        let paragraph = |content: Vec<serde_json::Value>| serde_json::json!({"type": "paragraph", "content": content});
+        let bullet = |text: &str| serde_json::json!({"type": "listItem", "content": [paragraph(vec![words(text)])]});
+        serde_json::json!({
+            "key": "APP-42",
+            "fields": {
+                "summary": "Let drivers enter a vehicle by hand",
+                "updated": "2026-10-02T16:41:09.000+0100",
+                "status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}},
+                "assignee": {"accountId": "me-1", "displayName": "Ada Example"},
+                "description": {"type": "doc", "version": 1, "content": [
+                    {"type": "heading", "attrs": {"level": 2}, "content": [words("Acceptance")]},
+                    {"type": "bulletList", "content": [
+                        bullet("A form asks for make and model"),
+                        bullet("Saved vehicles show up in the picker"),
+                    ]},
+                    {"type": "codeBlock", "attrs": {"language": "swift"}, "content": [words("VehicleForm()")]},
                 ]},
-                {"type": "bulletList", "content": [
-                    {"type": "listItem", "content": [
-                        {"type": "paragraph", "content": [{"type": "text", "text": "one"}]}
-                    ]}
-                ]}
-            ]
+                "comment": {"comments": [{
+                    "author": {"accountId": "gs-1", "displayName": "Grace Sample"},
+                    "body": {"type": "doc", "version": 1, "content": [paragraph(vec![
+                        words("Remember the "),
+                        serde_json::json!({"type": "text", "text": "last make", "marks": [{"type": "strong"}]}),
+                        words("?"),
+                    ])]},
+                }]},
+            },
+        })
+    }
+
+    /// A curl that answers as Jira does for who you are and for issue APP-42, `issue`.
+    #[cfg(unix)]
+    fn fake_curl(name: &str, issue: &serde_json::Value) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("herdr-fake-curl-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("issue.json"), issue.to_string()).unwrap();
+        let script = dir.join("curl");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+request=$(cat)
+case "$request" in
+  *"/rest/api/3/myself"*)
+    printf '{"accountId":"me-1","displayName":"Ada Example"}\n200'
+    ;;
+  *"/rest/api/3/issue/APP-42?"*)
+    cat "$(dirname "$0")/issue.json"
+    printf '\n200'
+    ;;
+  *)
+    printf '{}\n404'
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    fn source_with_curl(curl: &Path) -> JiraSource {
+        // A variable of its own, so that no other test reads or changes it.
+        std::env::set_var("HERDR_TEST_JIRA_MARKDOWN_TOKEN", "token");
+        JiraSource::new(
+            JiraWorkItemsConfig {
+                site: "example.atlassian.net".into(),
+                email: "me@example.test".into(),
+                token_env: "HERDR_TEST_JIRA_MARKDOWN_TOKEN".into(),
+                curl_path: curl.display().to_string(),
+                ..JiraWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_ticket_reads_with_its_description_and_comments_as_markdown() {
+        let curl = fake_curl("show", &issue_json());
+        let detail = source_with_curl(&curl)
+            .fetch("APP-42")
+            .expect("fetch")
+            .expect("found");
+        let _ = std::fs::remove_dir_all(curl.parent().unwrap());
+        assert_eq!(
+            detail.description,
+            "## Acceptance\n\
+             \n\
+             - A form asks for make and model\n\
+             - Saved vehicles show up in the picker\n\
+             \n\
+             ```swift\n\
+             VehicleForm()\n\
+             ```"
+        );
+        assert_eq!(detail.comments.len(), 1);
+        assert_eq!(detail.comments[0].author, "Grace Sample");
+        assert_eq!(detail.comments[0].body, "Remember the **last make**?");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_brief_gives_the_agent_the_description_as_markdown() {
+        let curl = fake_curl("brief", &issue_json());
+        let prepared = source_with_curl(&curl).prepare(&SourceItem {
+            external_id: "APP-42".into(),
+            title: "Let drivers enter a vehicle by hand".into(),
+            context: "APP-42".into(),
+            author: None,
+            url: "https://example.atlassian.net/browse/APP-42".into(),
+            updated_at: "2026-10-02T16:41:09.000+0100".into(),
+            tracker_state: None,
         });
-        assert_eq!(adf_text(&adf), "Hello @Andrea\n- one");
+        let _ = std::fs::remove_dir_all(curl.parent().unwrap());
+        let detail: JiraDetail =
+            serde_json::from_value(prepared.detail.expect("the issue was read")).unwrap();
+        let brief = brief(
+            &item("APP-42", Some(&detail)),
+            &detail,
+            false,
+            "ar/APP-42-form",
+            None,
+        );
+        assert!(
+            brief.contains(
+                "Description:\n## Acceptance\n\n- A form asks for make and model\n- Saved vehicles"
+            ),
+            "{brief}"
+        );
     }
 
     #[test]

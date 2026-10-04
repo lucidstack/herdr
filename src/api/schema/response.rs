@@ -320,9 +320,10 @@ pub enum ResponseResult {
     },
     WorkItemTicket {
         ticket: WorkItemTicketInfo,
-        /// Issue or pull request body as plain text.
+        /// Issue or pull request body as markdown. Jira's document format is converted to it:
+        /// headings, lists, code blocks, quotes, tables, links and text marks come across.
         description: String,
-        /// Oldest first.
+        /// Oldest first. Each comment's body is markdown, like `description`.
         comments: Vec<WorkItemTicketComment>,
     },
     WorkItemAdded {
