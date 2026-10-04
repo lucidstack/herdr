@@ -3,10 +3,17 @@
 //! client to render and for an agent's brief to carry, and text that would otherwise read as
 //! markdown is escaped where it stands, and only there.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 
-/// Columns a table cell may span; past that a span is taken as a mistake.
-const MAX_SPAN: u64 = 64;
+/// Columns of a table in which a cell's spans are followed. A cell past them still comes through,
+/// but what it spans is taken as a mistake: the empty cells that keep columns in line cost a
+/// row of the output each, so a document could otherwise make its markdown many times its size.
+const MAX_COLUMNS: usize = 32;
+
+/// Markdown reads a list item's number from at most nine digits.
+const MAX_LIST_NUMBER: u64 = 999_999_999;
 
 /// `node`, usually a `doc`, as markdown: its blocks separated by blank lines.
 pub(super) fn markdown(node: &Value) -> String {
@@ -139,9 +146,12 @@ fn heading(node: &Value) -> String {
     format!("{} {text}", "#".repeat(level as usize))
 }
 
-/// The number an ordered list starts at.
+/// The number an ordered list starts at: low enough for its last item's number to be read.
 fn order(node: &Value) -> u64 {
-    number_attr(node, "order").unwrap_or(1)
+    let last = children(node).len().saturating_sub(1) as u64;
+    number_attr(node, "order")
+        .unwrap_or(1)
+        .min(MAX_LIST_NUMBER.saturating_sub(last))
 }
 
 /// A bullet list, or an ordered one counting from `start`.
@@ -270,19 +280,28 @@ fn decision_list(node: &Value) -> String {
     items.join("\n")
 }
 
-/// The words of a code block, one line break kind throughout.
+/// The words of a code block, its lines ended by `\n` alone.
 fn code_text(node: &Value) -> String {
     let code: String = children(node)
         .iter()
         .filter_map(|child| child.get("text").and_then(Value::as_str))
         .collect();
-    code.replace("\r\n", "\n")
+    with_line_feeds(&code).into_owned()
+}
+
+/// `text` with each `\r\n` and lone `\r` as `\n`: markdown ends a line at any of them.
+fn with_line_feeds(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 /// Fenced with more backticks than any run inside it, and its language.
 fn code_block(node: &Value) -> String {
     let code = code_text(node);
-    let code = code.trim_end_matches(['\n', '\r']);
+    let code = code.trim_end_matches('\n');
     if code.trim().is_empty() {
         return String::new();
     }
@@ -338,36 +357,64 @@ fn expand(node: &Value) -> String {
 }
 
 /// A GFM table, its first row the header: GFM has no table without one, and in Jira the first
-/// row is a header unless it was switched off. A cell is one line; one spanning columns is
-/// followed by empty ones so that the columns stay in line.
+/// row is a header unless it was switched off. A cell is one line. One spanning columns is
+/// followed by empty cells, and one spanning rows leaves an empty cell in the rows under it, so
+/// that the columns stay in line. Only the header and delimiter rows are as wide as the widest
+/// row: markdown fills a shorter row itself.
 fn table(node: &Value) -> String {
-    let rows: Vec<Vec<String>> = children(node)
-        .iter()
-        .map(|row| {
-            let mut cells = Vec::new();
-            for cell in children(row) {
-                cells.push(cell_text(cell));
-                let span = number_attr(cell, "colspan").unwrap_or(1).clamp(1, MAX_SPAN);
-                cells.extend((1..span).map(|_| String::new()));
+    let row_nodes = children(node);
+    // In each of the first `MAX_COLUMNS` columns, how many more rows a cell above takes.
+    let mut taken: Vec<u64> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::with_capacity(row_nodes.len());
+    for (index, row) in row_nodes.iter().enumerate() {
+        let rows_below = (row_nodes.len() - index - 1) as u64;
+        let mut cells = Vec::new();
+        for cell in children(row) {
+            while taken.get(cells.len()).is_some_and(|&rows| rows > 0) {
+                cells.push(String::new());
             }
-            cells
-        })
-        .filter(|cells| !cells.is_empty())
-        .collect();
+            let column = cells.len();
+            let room = MAX_COLUMNS.saturating_sub(column).max(1);
+            let across = number_attr(cell, "colspan")
+                .unwrap_or(1)
+                .clamp(1, room as u64) as usize;
+            let down = number_attr(cell, "rowspan")
+                .unwrap_or(1)
+                .clamp(1, rows_below + 1);
+            cells.push(cell_text(cell));
+            cells.resize(column + across, String::new());
+            // A cell past the last column followed spans nothing, and takes no row below it.
+            if column < MAX_COLUMNS {
+                if taken.len() < column + across {
+                    taken.resize(column + across, 0);
+                }
+                taken[column..column + across].fill(down);
+            }
+        }
+        for rows in &mut taken {
+            *rows = rows.saturating_sub(1);
+        }
+        if !cells.is_empty() {
+            rows.push(cells);
+        }
+    }
     let Some(columns) = rows.iter().map(Vec::len).max() else {
         return String::new();
     };
-    let line = |cells: &[String]| {
+    let line = |cells: &[String], width: usize| {
         let mut line = String::from("|");
-        for column in 0..columns {
+        for column in 0..width {
             line.push(' ');
             line.push_str(cells.get(column).map_or("", String::as_str));
             line.push_str(" |");
         }
         line
     };
-    let mut lines = vec![line(&rows[0]), format!("|{}", " --- |".repeat(columns))];
-    lines.extend(rows[1..].iter().map(|row| line(row)));
+    let mut lines = vec![
+        line(&rows[0], columns),
+        format!("|{}", " --- |".repeat(columns)),
+    ];
+    lines.extend(rows[1..].iter().map(|row| line(row, row.len())));
     lines.join("\n")
 }
 
@@ -493,22 +540,24 @@ fn date(node: &Value) -> Option<String> {
 
 // MARK: Inline
 
-/// The marks markdown has, in the order they nest, outermost first.
+/// The marks markdown has, in the order they nest, outermost first. A link is innermost: a
+/// reader that styles text from its emphasis drops what is nested inside link text, and keeps
+/// what is around it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Mark {
-    Link(String),
     Strong,
     Em,
     Strike,
+    Link(String),
 }
 
 impl Mark {
     fn rank(&self) -> u8 {
         match self {
-            Mark::Link(_) => 0,
-            Mark::Strong => 1,
-            Mark::Em => 2,
-            Mark::Strike => 3,
+            Mark::Strong => 0,
+            Mark::Em => 1,
+            Mark::Strike => 2,
+            Mark::Link(_) => 3,
         }
     }
 
@@ -572,6 +621,9 @@ struct Writer {
     line_start: bool,
     /// The start of a line is escaped where it would read as a block's marker.
     escape_line_start: bool,
+    /// Where each `*`, `~` and `_` that can take part in emphasis is in `out`, and whether the
+    /// words wrote it rather than a mark: `finish` escapes the words' where it is needed.
+    delimiters: Vec<(usize, bool)>,
 }
 
 impl Writer {
@@ -583,6 +635,7 @@ impl Writer {
             breaks: 0,
             line_start: true,
             escape_line_start: mode == Mode::Block,
+            delimiters: Vec::new(),
         }
     }
 
@@ -590,12 +643,40 @@ impl Writer {
         self.close(0);
         let words = self.out.trim_end().len();
         self.out.truncate(words);
-        self.out
+        escape_emphasis(self.out, &self.delimiters)
     }
 
     fn inline(&mut self, nodes: &[Value]) {
+        // Neighbouring text with the same marks is one run of words. Written apart, two code
+        // spans would run into each other, and a `]` and a `(` would make a link.
+        let mut run: Option<(Vec<Mark>, bool, String)> = None;
         for node in nodes {
-            self.inline_node(node);
+            if kind(node) != "text" {
+                if let Some((marks, code, words)) = run.take() {
+                    self.text(&words, &marks, code);
+                }
+                self.inline_node(node);
+                continue;
+            }
+            let words = node.get("text").and_then(Value::as_str).unwrap_or("");
+            if words.is_empty() {
+                continue;
+            }
+            let (marks, code) = marks(node);
+            match run.as_mut() {
+                Some((open, open_code, text)) if *open == marks && *open_code == code => {
+                    text.push_str(words);
+                }
+                _ => {
+                    if let Some((open, open_code, text)) = run.take() {
+                        self.text(&text, &open, open_code);
+                    }
+                    run = Some((marks, code, words.to_string()));
+                }
+            }
+        }
+        if let Some((marks, code, words)) = run {
+            self.text(&words, &marks, code);
         }
     }
 
@@ -702,11 +783,11 @@ impl Writer {
 
     /// `text` with `marks`, as code when `code`; a line break inside it is a hard break.
     fn text(&mut self, text: &str, marks: &[Mark], code: bool) {
-        for (index, line) in text.split('\n').enumerate() {
+        for (index, line) in with_line_feeds(text).split('\n').enumerate() {
             if index > 0 {
                 self.breaks += 1;
             }
-            self.words(line.trim_end_matches('\r'), marks, code);
+            self.words(line, marks, code);
         }
     }
 
@@ -722,24 +803,22 @@ impl Writer {
         self.flush_breaks();
         let lead = &text[..text.len() - text.trim_start().len()];
         let trail = &text[text.trim_end().len()..];
-        // Marks this text shares with the open ones stay open; the rest close.
+        // The open marks that begin this text's own, in the same order, stay open; the rest
+        // close and this text's others open.
         let keep = self
             .open
             .iter()
-            .take_while(|mark| marks.contains(mark))
+            .zip(marks)
+            .take_while(|(open, mark)| open == mark)
             .count();
         self.close(keep);
         if !self.line_start {
             self.out.push_str(lead);
         }
-        let opening: Vec<Mark> = marks
-            .iter()
-            .filter(|mark| !self.open.contains(mark))
-            .cloned()
-            .collect();
+        let opening = &marks[keep..];
         let opened = !opening.is_empty();
         for mark in opening {
-            self.open_mark(mark);
+            self.open_mark(mark.clone());
         }
         if code {
             self.code_span(core);
@@ -749,10 +828,8 @@ impl Writer {
                 in_link: self.open.iter().any(|mark| matches!(mark, Mark::Link(_))),
                 cell: self.mode == Mode::Cell,
                 before: self.out.chars().next_back(),
-                after: trail.chars().next(),
             };
-            let escaped = escape(core, context);
-            self.out.push_str(&escaped);
+            escape_into(&mut self.out, core, context, &mut self.delimiters);
         }
         self.line_start = false;
         self.out.push_str(trail);
@@ -763,8 +840,19 @@ impl Writer {
         if matches!(mark, Mark::Link(_)) && self.out.ends_with('!') && !self.out.ends_with("\\!") {
             self.out.insert(self.out.len() - 1, '\\');
         }
-        self.out.push_str(mark.opener());
+        self.delimit(mark.opener());
         self.open.push(mark);
+    }
+
+    /// Writes a mark's `delimiter`, noting where its `*` and `~` are: they count when the
+    /// words' own are decided.
+    fn delimit(&mut self, delimiter: &str) {
+        for (offset, character) in delimiter.char_indices() {
+            if matches!(character, '*' | '~') {
+                self.delimiters.push((self.out.len() + offset, false));
+            }
+        }
+        self.out.push_str(delimiter);
     }
 
     /// Closes the open marks past the first `keep`, innermost first.
@@ -785,7 +873,7 @@ impl Writer {
                     self.out.push_str(&destination(&href));
                     self.out.push(')');
                 }
-                Some(mark) => self.out.push_str(mark.opener()),
+                Some(mark) => self.delimit(mark.opener()),
                 None => break,
             }
         }
@@ -848,34 +936,41 @@ struct Context {
     cell: bool,
     /// The character written just before the text, if any.
     before: Option<char>,
-    /// The space that follows the text, if any; otherwise what follows is not known.
-    after: Option<char>,
 }
 
-/// `text` with a backslash before each character that would otherwise read as markdown where
-/// it stands.
-fn escape(text: &str, context: Context) -> String {
+/// Writes `text` to `out` with a backslash before each character that would otherwise read as
+/// markdown where it stands. What follows the text is not known yet (a closing mark, a line
+/// break or more words), so a character that needs knowing is escaped. Whether a `*`, `~` or
+/// `_` needs it depends on all that follows, so each is written as it is and its place added to
+/// `delimiters`, for `escape_emphasis` to decide.
+fn escape_into(
+    out: &mut String,
+    text: &str,
+    context: Context,
+    delimiters: &mut Vec<(usize, bool)>,
+) {
     let chars: Vec<char> = text.chars().collect();
     let marker = if context.line_start {
         block_marker(&chars)
     } else {
         None
     };
-    let mut out = String::with_capacity(text.len() + 4);
     for (index, &character) in chars.iter().enumerate() {
+        if marker != Some(index) && matches!(character, '*' | '~' | '_') {
+            delimiters.push((out.len(), true));
+            out.push(character);
+            continue;
+        }
+        let next = chars.get(index + 1).copied();
         let previous = match index {
             0 => context.before,
             _ => Some(chars[index - 1]),
         };
-        let next = chars.get(index + 1).copied().or(context.after);
         let escaped = marker == Some(index)
             || match character {
                 '\\' => next.is_none_or(|next| next.is_ascii_punctuation()),
                 '`' => true,
-                // Between spaces they can't open or close anything.
-                '*' | '~' => !(is_space(previous) && is_space(next)),
-                '_' => underscore_counts(&chars, index, context),
-                '[' => context.in_link || next == Some('^'),
+                '[' => context.in_link || next == Some('^') || previous == Some('!'),
                 ']' => context.in_link || matches!(next, Some('(' | ':')),
                 // Right after a bracket the text before wrote, these would make it a link.
                 '(' | ':' => index == 0 && context.before == Some(']'),
@@ -891,36 +986,83 @@ fn escape(text: &str, context: Context) -> String {
         }
         out.push(character);
     }
-    out
 }
 
-fn is_space(character: Option<char>) -> bool {
-    character.is_some_and(char::is_whitespace)
-}
-
-fn is_alphanumeric(character: Option<char>) -> bool {
-    character.is_some_and(char::is_alphanumeric)
-}
-
-/// An underscore could open or close emphasis unless its run is inside a word, as in
-/// `snake_case`, or stands between spaces.
-fn underscore_counts(chars: &[char], index: usize, context: Context) -> bool {
-    let start = chars[..index]
-        .iter()
-        .rposition(|&character| character != '_')
-        .map_or(0, |position| position + 1);
-    let end = chars[index..]
-        .iter()
-        .position(|&character| character != '_')
-        .map_or(chars.len(), |position| index + position);
-    let previous = match start {
-        0 => context.before,
-        _ => Some(chars[start - 1]),
-    };
-    let next = chars.get(end).copied().or(context.after);
-    let inside_word = is_alphanumeric(previous) && is_alphanumeric(next);
-    let between_spaces = is_space(previous) && is_space(next);
-    !(inside_word || between_spaces)
+/// `out` with a backslash before each run of `*`, `~` or `_` that the words wrote and that
+/// could make emphasis where it stands. `delimiters` has the byte offset in `out` of each such
+/// character that takes part in emphasis, and whether the words wrote it rather than a mark.
+/// A run that a later delimiter could close, or that stands beside a mark's own (which it would
+/// join), is escaped. One with nothing after it to close it, one between spaces and an `_` in
+/// the middle of a word read as themselves, so paths and wildcards keep their characters. That
+/// can only be told once everything after a run is written.
+fn escape_emphasis(out: String, delimiters: &[(usize, bool)]) -> String {
+    if !delimiters.iter().any(|&(_, from_words)| from_words) {
+        return out;
+    }
+    let chars: Vec<char> = out.chars().collect();
+    // For each character: `Some(true)` when the words wrote it as a delimiter, `Some(false)`
+    // when a mark did, `None` when it is not one.
+    let mut written_by: Vec<Option<bool>> = vec![None; chars.len()];
+    let mut offsets = out.char_indices().enumerate();
+    for &(place, from_words) in delimiters {
+        if let Some((index, _)) = offsets.find(|&(_, (byte, _))| byte == place) {
+            written_by[index] = Some(from_words);
+        }
+    }
+    let at = |index: usize| chars.get(index).copied();
+    // The start and the end of the text count as spaces.
+    let space = |character: Option<char>| character.is_none_or(char::is_whitespace);
+    let alphanumeric = |character: Option<char>| character.is_some_and(char::is_alphanumeric);
+    let mut escaped = vec![false; chars.len()];
+    // For `*`, `~` and `_`: whether a delimiter that could close emphasis comes after the place
+    // reached, going from the end.
+    let mut closer_after = [false; 3];
+    let mut end = chars.len();
+    while end > 0 {
+        let Some(from_words) = written_by[end - 1] else {
+            end -= 1;
+            continue;
+        };
+        let character = chars[end - 1];
+        let kind = match character {
+            '*' => 0,
+            '~' => 1,
+            _ => 2,
+        };
+        // The words' run of it; a mark's delimiters are taken one at a time.
+        let mut start = end - 1;
+        while from_words
+            && start > 0
+            && chars[start - 1] == character
+            && written_by[start - 1] == Some(true)
+        {
+            start -= 1;
+        }
+        let before = start.checked_sub(1).and_then(at);
+        let after = at(end);
+        let inert = (space(before) && space(after))
+            || (character == '_' && alphanumeric(before) && alphanumeric(after));
+        // Beside a mark's own delimiter, a run would join it or stop it from closing.
+        let touches_a_mark = start
+            .checked_sub(1)
+            .is_some_and(|index| written_by[index] == Some(false))
+            || written_by.get(end) == Some(&Some(false));
+        let joins_another = before == Some(character) || after == Some(character) || touches_a_mark;
+        if from_words && (joins_another || (!inert && closer_after[kind])) {
+            escaped[start..end].fill(true);
+        } else {
+            closer_after[kind] |= !inert && !space(before);
+        }
+        end = start;
+    }
+    let mut escaped_out = String::with_capacity(out.len() + delimiters.len());
+    for (character, escape) in chars.into_iter().zip(escaped) {
+        if escape {
+            escaped_out.push('\\');
+        }
+        escaped_out.push(character);
+    }
+    escaped_out
 }
 
 /// `&amp;`, `&#123;`: an ampersand that would start a character reference.
@@ -959,7 +1101,18 @@ fn block_marker(chars: &[char]) -> Option<usize> {
             (hashes <= 6 && ends_marker(hashes)).then_some(0)
         }
         '>' => Some(0),
-        '-' | '+' | '*' => (ends_marker(1) || only(first)).then_some(0),
+        '-' | '+' | '*' => {
+            (ends_marker(1) || only(first) || is_table_delimiter(chars)).then_some(0)
+        }
+        '|' | ':' => is_table_delimiter(chars).then_some(0),
+        // Three tildes open a code fence.
+        '~' => {
+            let tildes = chars
+                .iter()
+                .take_while(|&&character| character == '~')
+                .count();
+            (tildes >= 3).then_some(0)
+        }
         '=' | '_' => only(first).then_some(0),
         '[' => {
             let boxed = matches!(chars.get(1), Some(' ' | 'x' | 'X')) && chars.get(2) == Some(&']');
@@ -974,6 +1127,16 @@ fn block_marker(chars: &[char]) -> Option<usize> {
             ((1..=9).contains(&digits) && delimited && ends_marker(digits + 1)).then_some(digits)
         }
     }
+}
+
+/// A line of dashes, colons and pipes with a pipe and a dash in it. Under a line with a pipe it
+/// would be a table's delimiter row.
+fn is_table_delimiter(chars: &[char]) -> bool {
+    chars
+        .iter()
+        .all(|character| matches!(character, '-' | ':' | '|' | ' ' | '\t'))
+        && chars.contains(&'|')
+        && chars.contains(&'-')
 }
 
 #[cfg(test)]
@@ -1000,6 +1163,22 @@ mod tests {
 
     fn item(content: serde_json::Value) -> serde_json::Value {
         json!({"type": "listItem", "content": content})
+    }
+
+    fn table_of(rows: serde_json::Value) -> serde_json::Value {
+        doc(json!([{"type": "table", "content": rows}]))
+    }
+
+    fn row(cells: serde_json::Value) -> serde_json::Value {
+        json!({"type": "tableRow", "content": cells})
+    }
+
+    fn cell(words: &str) -> serde_json::Value {
+        json!({"type": "tableCell", "content": [paragraph(json!([text(words)]))]})
+    }
+
+    fn spanning(words: &str, spans: serde_json::Value) -> serde_json::Value {
+        json!({"type": "tableCell", "attrs": spans, "content": [paragraph(json!([text(words)]))]})
     }
 
     #[test]
@@ -1156,10 +1335,24 @@ mod tests {
         let adf = doc(json!([paragraph(json!([
             text("Ship"),
             marked(" today ", json!([{"type": "strong"}])),
-            text("or "),
-            marked("never", json!([{"type": "em"}, {"type": "strike"}])),
+            text("or"),
         ]))]));
-        assert_eq!(markdown(&adf), "Ship **today** or *~~never~~*");
+        assert_eq!(markdown(&adf), "Ship **today** or");
+    }
+
+    #[test]
+    fn marks_on_the_same_text_nest_in_a_fixed_order() {
+        let adf = doc(json!([
+            paragraph(json!([marked(
+                "one",
+                json!([{"type": "em"}, {"type": "strike"}])
+            )])),
+            paragraph(json!([marked(
+                "two",
+                json!([{"type": "strike"}, {"type": "em"}])
+            )])),
+        ]));
+        assert_eq!(markdown(&adf), "*~~one~~*\n\n*~~two~~*");
     }
 
     #[test]
@@ -1233,23 +1426,98 @@ mod tests {
 
     #[test]
     fn a_table_keeps_its_rows_under_the_first_as_header() {
-        let cell = |kind: &str, words: &str| json!({"type": kind, "content": [paragraph(json!([text(words)]))]});
-        let adf = doc(json!([{"type": "table", "content": [
-            {"type": "tableRow", "content": [cell("tableHeader", "Field"), cell("tableHeader", "Rule")]},
-            {"type": "tableRow", "content": [cell("tableCell", "Plate"), cell("tableCell", "A|B or C")]},
-            {"type": "tableRow", "content": [
-                {"type": "tableCell", "attrs": {"colspan": 2}, "content": [
-                    paragraph(json!([text("Both")])),
-                    paragraph(json!([text("columns")])),
-                ]},
-            ]},
-        ]}]));
+        let header = |words: &str| json!({"type": "tableHeader", "content": [paragraph(json!([text(words)]))]});
+        let adf = table_of(json!([
+            row(json!([header("Field"), header("Rule")])),
+            row(json!([cell("Plate"), cell("Up to 8 characters")])),
+            row(json!([cell("Make"), cell("Free text")])),
+        ]));
         assert_eq!(
             markdown(&adf),
             "| Field | Rule |\n\
              | --- | --- |\n\
-             | Plate | A\\|B or C |\n\
-             | Both columns |  |"
+             | Plate | Up to 8 characters |\n\
+             | Make | Free text |"
+        );
+    }
+
+    #[test]
+    fn a_pipe_in_a_table_cell_is_escaped() {
+        let adf = table_of(json!([
+            row(json!([cell("Rule")])),
+            row(json!([cell("A|B or C")]))
+        ]));
+        assert_eq!(markdown(&adf), "| Rule |\n| --- |\n| A\\|B or C |");
+    }
+
+    #[test]
+    fn a_cell_spanning_columns_is_followed_by_empty_ones() {
+        let adf = table_of(json!([
+            row(json!([cell("Field"), cell("Rule")])),
+            row(json!([spanning("Both columns", json!({"colspan": 2}))])),
+        ]));
+        assert_eq!(
+            markdown(&adf),
+            "| Field | Rule |\n| --- | --- |\n| Both columns |  |"
+        );
+    }
+
+    #[test]
+    fn a_cell_spanning_rows_leaves_an_empty_cell_in_each_row_it_spans() {
+        let adf = table_of(json!([
+            row(json!([cell("Field"), cell("Rule"), cell("Example")])),
+            row(json!([
+                spanning("Plate", json!({"rowspan": 2})),
+                cell("Letters"),
+                cell("AB")
+            ])),
+            row(json!([cell("Digits"), cell("12")])),
+        ]));
+        assert_eq!(
+            markdown(&adf),
+            "| Field | Rule | Example |\n\
+             | --- | --- | --- |\n\
+             | Plate | Letters | AB |\n\
+             |  | Digits | 12 |"
+        );
+    }
+
+    #[test]
+    fn a_row_shorter_than_the_header_keeps_its_own_cells() {
+        let adf = table_of(json!([
+            row(json!([cell("A"), cell("B"), cell("C")])),
+            row(json!([cell("1")])),
+        ]));
+        assert_eq!(markdown(&adf), "| A | B | C |\n| --- | --- | --- |\n| 1 |");
+    }
+
+    #[test]
+    fn one_wide_row_does_not_widen_the_rows_beside_it() {
+        let mut rows = vec![row(json!((0..150).map(|_| cell("x")).collect::<Vec<_>>()))];
+        rows.extend((0..150).map(|_| row(json!([cell("x")]))));
+        let adf = table_of(json!(rows));
+        let markdown = markdown(&adf);
+        assert!(
+            markdown.len() < adf.to_string().len(),
+            "{} bytes of markdown for {} bytes of document",
+            markdown.len(),
+            adf.to_string().len()
+        );
+        assert!(markdown.ends_with("\n| x |"));
+    }
+
+    #[test]
+    fn spans_past_the_columns_followed_add_no_more_empty_cells() {
+        let hostile = spanning("x", json!({"colspan": 1_000_000, "rowspan": 1_000_000}));
+        let adf = table_of(json!((0..200)
+            .map(|_| row(json!([hostile.clone()])))
+            .collect::<Vec<_>>()));
+        let markdown = markdown(&adf);
+        assert!(
+            markdown.len() < adf.to_string().len(),
+            "{} bytes of markdown for {} bytes of document",
+            markdown.len(),
+            adf.to_string().len()
         );
     }
 
@@ -1299,23 +1567,44 @@ mod tests {
     }
 
     #[test]
-    fn text_that_would_read_as_markdown_is_escaped() {
+    fn a_line_that_would_start_a_block_is_escaped() {
         let adf = doc(json!([
             paragraph(json!([text("# Not a heading")])),
-            paragraph(json!([text(
-                "1. Not a list, *not emphasis*, __nor__ `code`"
-            )])),
-            paragraph(json!([text(
-                "> Not a quote, [not](a link) & not &amp; <b>bold</b>"
-            )])),
+            paragraph(json!([text("1. Not a list")])),
+            paragraph(json!([text("> Not a quote")])),
+            paragraph(json!([text("- Not a bullet")])),
         ]));
         assert_eq!(
             markdown(&adf),
-            "\\# Not a heading\n\
-             \n\
-             1\\. Not a list, \\*not emphasis\\*, \\_\\_nor\\_\\_ \\`code\\`\n\
-             \n\
-             \\> Not a quote, [not\\](a link) & not \\&amp; \\<b>bold\\</b>"
+            "\\# Not a heading\n\n1\\. Not a list\n\n\\> Not a quote\n\n\\- Not a bullet"
+        );
+    }
+
+    #[test]
+    fn backticks_in_the_words_are_escaped() {
+        let adf = doc(json!([paragraph(json!([text("Run `make` first")]))]));
+        assert_eq!(markdown(&adf), "Run \\`make\\` first");
+    }
+
+    #[test]
+    fn brackets_tags_and_entities_the_words_could_make_are_escaped() {
+        let adf = doc(json!([paragraph(json!([text(
+            "[not](a link) & not &amp; <b>bold</b>"
+        )]))]));
+        assert_eq!(
+            markdown(&adf),
+            "[not\\](a link) & not \\&amp; \\<b>bold\\</b>"
+        );
+    }
+
+    #[test]
+    fn emphasis_the_words_could_make_is_escaped_up_to_its_closing_mark() {
+        let adf = doc(json!([paragraph(json!([text(
+            "Use *this* and __that__ or ~~those~~"
+        )]))]));
+        assert_eq!(
+            markdown(&adf),
+            "Use \\*this* and \\_\\_that__ or \\~\\~those~~"
         );
     }
 
@@ -1361,11 +1650,39 @@ mod tests {
     #[test]
     fn a_backslash_ending_a_line_is_kept_apart_from_the_break_after_it() {
         let adf = doc(json!([paragraph(json!([
-            text("C:\\"),
+            text("path\\ "),
             {"type": "hardBreak"},
             text("next"),
         ]))]));
-        assert_eq!(markdown(&adf), "C:\\\\\\\nnext");
+        assert_eq!(markdown(&adf), "path\\\\\\\nnext");
+    }
+
+    #[test]
+    fn a_backslash_ending_bold_text_does_not_swallow_the_closing_mark() {
+        let adf = doc(json!([paragraph(json!([
+            marked("C:\\ ", json!([{"type": "strong"}])),
+            text("done"),
+        ]))]));
+        assert_eq!(markdown(&adf), "**C:\\\\** done");
+    }
+
+    #[test]
+    fn a_backslash_ending_link_text_does_not_swallow_the_closing_bracket() {
+        let link = json!({"type": "link", "attrs": {"href": "https://e.test/l"}});
+        let adf = doc(json!([paragraph(json!([
+            marked("dir\\ ", json!([link])),
+            text("after"),
+        ]))]));
+        assert_eq!(markdown(&adf), "[dir\\\\](https://e.test/l) after");
+    }
+
+    #[test]
+    fn a_star_ending_bold_text_does_not_join_the_closing_mark() {
+        let adf = doc(json!([paragraph(json!([
+            marked("a * ", json!([{"type": "strong"}])),
+            text("b"),
+        ]))]));
+        assert_eq!(markdown(&adf), "**a \\*** b");
     }
 
     #[test]
@@ -1426,13 +1743,115 @@ mod tests {
     }
 
     #[test]
-    fn emphasis_characters_are_escaped_only_where_they_could_emphasise() {
-        let adf = doc(json!([paragraph(json!([text(
-            "_private, a_b_c, *args, 2*3, 2 * 3 and __dunder__"
-        )]))]));
+    fn paths_and_wildcards_are_left_alone() {
+        let words = "Edit ~/projects/herdr, src/_app.tsx, *.swift and user_id";
+        let adf = doc(json!([paragraph(json!([text(words)]))]));
+        assert_eq!(markdown(&adf), words);
+    }
+
+    #[test]
+    fn neighbouring_code_with_the_same_marks_is_one_code_span() {
+        let adf = doc(json!([paragraph(json!([
+            marked("make", json!([{"type": "code"}])),
+            marked("-test", json!([{"type": "code"}])),
+        ]))]));
+        assert_eq!(markdown(&adf), "`make-test`");
+    }
+
+    #[test]
+    fn neighbouring_plain_text_is_read_as_one_run() {
+        let adf = doc(json!([paragraph(json!([
+            text("see [docs]"),
+            text("(here)")
+        ]))]));
+        assert_eq!(markdown(&adf), "see [docs\\](here)");
+    }
+
+    #[test]
+    fn emphasis_wraps_a_link_so_that_a_reader_keeps_both() {
+        let link = json!({"type": "link", "attrs": {"href": "https://e.test/guide"}});
+        let adf = doc(json!([paragraph(json!([marked(
+            "the guide",
+            json!([link, {"type": "strong"}])
+        ),]))]));
+        assert_eq!(markdown(&adf), "**[the guide](https://e.test/guide)**");
+    }
+
+    #[test]
+    fn text_that_adds_emphasis_to_a_link_part_way_closes_the_link_first() {
+        let link = json!({"type": "link", "attrs": {"href": "https://e.test/guide"}});
+        let adf = doc(json!([paragraph(json!([
+            marked("read ", json!([link])),
+            marked("this", json!([link, {"type": "strong"}])),
+        ]))]));
         assert_eq!(
             markdown(&adf),
-            "\\_private, a_b_c, \\*args, 2\\*3, 2 * 3 and \\_\\_dunder\\_\\_"
+            "[read](https://e.test/guide) **[this](https://e.test/guide)**"
         );
+    }
+
+    #[test]
+    fn a_tilde_before_a_closing_mark_is_escaped_so_that_the_mark_closes() {
+        let adf = doc(json!([paragraph(json!([
+            marked("about ~", json!([{"type": "em"}])),
+            text(" a day"),
+        ]))]));
+        assert_eq!(markdown(&adf), "*about \\~* a day");
+    }
+
+    #[test]
+    fn three_tildes_opening_a_line_are_not_a_code_fence() {
+        let adf = doc(json!([paragraph(json!([text("~~~ not code")]))]));
+        assert_eq!(markdown(&adf), "\\~\\~\\~ not code");
+    }
+
+    #[test]
+    fn a_line_of_dashes_and_pipes_is_not_a_table_delimiter() {
+        let adf = doc(json!([paragraph(json!([
+            text("a | b"),
+            {"type": "hardBreak"},
+            text("--- | ---"),
+        ]))]));
+        assert_eq!(markdown(&adf), "a | b\\\n\\--- | ---");
+    }
+
+    #[test]
+    fn brackets_after_an_exclamation_mark_do_not_start_an_image() {
+        let link = json!({"type": "link", "attrs": {"href": "https://e.test/x"}});
+        let adf = doc(json!([paragraph(json!([
+            text("![alt "),
+            marked("see", json!([link])),
+        ]))]));
+        assert_eq!(markdown(&adf), "!\\[alt [see](https://e.test/x)");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_ends_a_line_like_any_other() {
+        let adf = doc(json!([paragraph(json!([text("foo\r# bar")]))]));
+        assert_eq!(markdown(&adf), "foo\\\n\\# bar");
+    }
+
+    #[test]
+    fn a_lone_carriage_return_in_code_ends_a_line() {
+        let adf = doc(json!([{"type": "codeBlock", "content": [text("make\rmake test")]}]));
+        assert_eq!(markdown(&adf), "```\nmake\nmake test\n```");
+    }
+
+    #[test]
+    fn list_numbers_stay_within_the_nine_digits_markdown_reads() {
+        let adf = doc(json!([
+            {"type": "orderedList", "attrs": {"order": 1_000_000_000_u64}, "content": [
+                item(json!([paragraph(json!([text("a")]))])),
+                item(json!([paragraph(json!([text("b")]))])),
+            ]},
+        ]));
+        assert_eq!(markdown(&adf), "999999998. a\n999999999. b");
+    }
+
+    #[test]
+    fn a_very_long_run_of_underscores_is_escaped_in_one_pass() {
+        let run = "_".repeat(100_000);
+        let adf = doc(json!([paragraph(json!([text(&run)]))]));
+        assert_eq!(markdown(&adf), "\\_".repeat(100_000));
     }
 }
