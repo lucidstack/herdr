@@ -44,16 +44,35 @@ impl App {
     }
 
     pub(super) fn handle_agent_get(&mut self, id: String, target: AgentTarget) -> String {
-        self.reconcile_managed_agent_target(&target.target);
-        if let Ok(resolved) = self.resolve_agent_target(&target.target) {
-            self.look_up_agent_transcript(resolved.ws_idx, resolved.pane_id);
-        }
+        self.prepare_agent_read(&target.target);
         let agent = match self.agent_info_for_target(&target.target) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    /// The app's half of `agent.last_message`. The API server answers that method itself, so a
+    /// transcript of tens of megabytes never stalls the app, and asks the app only for what the
+    /// app owns: the agent, like `agent.get`, plus the replies its session offered, which the
+    /// server matches against the message it reads.
+    pub(super) fn handle_agent_last_message(&mut self, id: String, target: AgentTarget) -> String {
+        self.prepare_agent_read(&target.target);
+        let agent = match self.agent_info_with_offered_replies(&target.target) {
+            Ok(agent) => agent,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+
+        encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    /// What the app settles before it describes an agent that a client is about to read from.
+    fn prepare_agent_read(&mut self, target: &str) {
+        self.reconcile_managed_agent_target(target);
+        if let Ok(resolved) = self.resolve_agent_target(target) {
+            self.look_up_agent_transcript(resolved.ws_idx, resolved.pane_id);
+        }
     }
 
     /// `agent.notes.take`: the agent's queued notes, oldest first, leaving none.

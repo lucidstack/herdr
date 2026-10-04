@@ -1172,12 +1172,8 @@ impl App {
                     "agent.wait is handled by the api server",
                 );
             }
-            Method::AgentLastMessage(_) => {
-                return responses::encode_error(
-                    request.id,
-                    "invalid_request",
-                    "agent.last_message is handled by the api server",
-                );
+            Method::AgentLastMessage(target) => {
+                return self.handle_agent_last_message(request.id, target);
             }
             Method::AgentActivity(_) => {
                 return responses::encode_error(
@@ -1266,6 +1262,9 @@ impl App {
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
+            }
+            Method::PaneReportReplies(params) => {
+                return self.handle_pane_report_replies(request.id, params);
             }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);

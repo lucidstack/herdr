@@ -226,6 +226,17 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
     pub revision: u64,
+    /// How many `pane.report_replies` reports the pane has accepted: 0 until the first, then one
+    /// more for each. Read `agent.last_message` again when it changes.
+    #[serde(default)]
+    pub replies_revision: u64,
+    /// Only the app's own answer to the API server's `agent.last_message` request carries this:
+    /// the replies reported for the pane, and the message they were reported for, so the server
+    /// can match them against the message it reads. Clients never receive it, and it is not part
+    /// of the schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub(crate) offered_replies: Option<crate::agent_replies::OfferedReplies>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -272,6 +283,12 @@ pub struct AgentLastMessageInfo {
     /// truncated. Present when `status` is `available`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// What the agent's own session offered as the user's next reply to this message, most
+    /// likely first: up to 3 replies of at most 200 characters, reported with
+    /// `pane.report_replies`. Empty when `status` is not `available`, when nothing was reported,
+    /// and when what was reported was for another message. An older Herdr omits the field.
+    #[serde(default)]
+    pub replies: Vec<String>,
     /// Why the model stopped, as the transcript records it, e.g. "stop", "end_turn", "aborted".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,

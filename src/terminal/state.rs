@@ -166,6 +166,9 @@ pub struct TerminalState {
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
+    /// What the agent's session offered as replies to its final message. In memory only, so it
+    /// goes with the terminal when its pane closes and is not restored after a restart.
+    pub agent_replies: crate::agent_replies::AgentReplies,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     /// The transcript file reported for a session whose reference is an id. It counts only
     /// while that session is the terminal's current one.
@@ -224,6 +227,7 @@ impl TerminalState {
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            agent_replies: crate::agent_replies::AgentReplies::default(),
             persisted_agent_session: None,
             agent_transcript: None,
             transcript_lookup: None,

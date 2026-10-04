@@ -1,0 +1,16 @@
+## Lamp Entry Filing Guide
+
+- File entries under the lamp's numerical ID (1–40), sorted chronologically by date.
+- Record the lamp's status and any maintenance notes in the logbook section.
+- Use consistent formatting to ensure quick lookups across all entries.
+
+**Tagging a Broken Lamp:**
+
+1. Assess the lamp and document the failure mode.
+2. Affix a red tag to the lamp's record and update the logbook accordingly.
+
+```bash
+lamp-log --add-entry lamp-23 --status broken --date 2026-10-04
+```
+
+All staff can grab a café break whilst reviewing the logbook — these procedures keep the moonbase running smoothly. Which tag colour would you prefer to start with?

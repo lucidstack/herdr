@@ -72,6 +72,27 @@ impl App {
             })
     }
 
+    /// `agent_info_for_target` for the API server's own `agent.last_message`: the same agent,
+    /// with the replies its session offered, which the server matches against the message it
+    /// reads from the transcript.
+    pub(super) fn agent_info_with_offered_replies(
+        &self,
+        target: &str,
+    ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
+        let resolved = self.resolve_agent_target(target)?;
+        let mut agent = self
+            .agent_info(resolved.ws_idx, resolved.pane_id)
+            .ok_or_else(|| TerminalTargetError::NotFound {
+                target: target.to_string(),
+            })?;
+        agent.offered_replies = self
+            .state
+            .terminal_id_for_pane(resolved.ws_idx, resolved.pane_id)
+            .and_then(|terminal_id| self.state.terminals.get(&terminal_id))
+            .and_then(|terminal| terminal.agent_replies.offered().cloned());
+        Ok(agent)
+    }
+
     pub(super) fn focus_agent_target(
         &mut self,
         target: &str,
@@ -399,6 +420,8 @@ impl App {
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
             revision: pane.revision,
+            replies_revision: terminal.agent_replies.revision(),
+            offered_replies: None,
         })
     }
 

@@ -1,0 +1,16 @@
+**Moonbase Lantern lamps represent humanity's first permanent illumination system on the lunar surface.** 🌙
+
+| Lamp ID | Brightness (lumens) | Installation Date |
+|---------|-------------------|------------------|
+| 7 | 450 | 2024-03-15 |
+| 12 | 520 | 2024-05-22 |
+| 31 | 380 | 2024-08-10 |
+
+The ancient Greek `φῶς` (light) and Japanese `灯り` (akari, lamp) both capture the essence of these installations. As mission control noted, "the lanterns transformed our lunar habitat into a welcoming sanctuary."
+
+```json
+{
+  "facility": "Moonbase Lantern",
+  "operational_lamps": 31
+}
+```

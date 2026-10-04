@@ -1,0 +1,16 @@
+## Moonbase Lantern System
+
+How to file lamp entries:
+- Organise by lamp number (1–40) as the primary category
+- Record the entry date beneath each lamp's section
+- Document maintenance details and current status for each entry
+
+Steps for tagging a broken lamp:
+1. Locate the lamp's entry in the logbook under its assigned number
+2. Attach a red tag to indicate the lamp requires repair
+
+```sh
+logbook-tag lamp-27 --status broken --colour red
+```
+
+When your lamps need attention — whether café maintenance or emergency repairs — proper tagging ensures the team stays organised. Which tag colour would you like to start with?
