@@ -4,6 +4,7 @@
 //! The runtime holder here is source-agnostic; sources implement
 //! [`source::WorkItemSource`]. Nothing runs unless a source is configured.
 
+mod adf;
 pub(crate) mod attention;
 pub(crate) mod changes;
 pub(crate) mod github;

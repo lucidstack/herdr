@@ -12903,14 +12903,14 @@
             {
               "properties": {
                 "comments": {
-                  "description": "Oldest first.",
+                  "description": "Oldest first. Each comment's body is markdown, like `description`.",
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/WorkItemTicketComment"
                   },
                   "type": "array"
                 },
                 "description": {
-                  "description": "Issue or pull request body as plain text.",
+                  "description": "Issue or pull request body as markdown. Jira's document format is converted to it:\nheadings, lists, code blocks, quotes, tables, links and text marks come across.",
                   "type": "string"
                 },
                 "ticket": {

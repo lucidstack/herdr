@@ -176,7 +176,7 @@ If the same pull request is also in the inbox on its own, for example because it
 
 While a pull request is open, the ticket no longer offers to start its work: **Ask agent to implement it** is gone, and so is **Continue on…** once the ticket has a workspace. Without a workspace, **Continue on…** stays so that you can reopen the worktree, and its brief tells the agent that the pull request is open and to wait for your instructions, rather than to propose a plan for starting the issue. **Open pull request** is the default unless a choice above it asks for that: a merge, the draft waiting on you or the start reminder's fix. A merged or closed pull request changes none of this. The same goes for GitHub issues assigned to you: once their pull request is open, **Work on it locally** and **Ask agent to implement it** are gone.
 
-Issues of a mapped project can be worked on locally on a new branch from `base_branch`, or from the remote's default branch when unset. When the clone already has a worktree or local branch whose name contains the issue key (from Orca, `git worktree add` or another Herdr), the choice reads **Continue on <branch>** and reopens that work instead of starting a new branch. A worktree that is already open as a workspace in this Herdr is linked as it is, without new tabs or agent. The agent brief carries the description, type, priority, status, labels and comments. Issues of unmapped projects can only be opened in Jira.
+Issues of a mapped project can be worked on locally on a new branch from `base_branch`, or from the remote's default branch when unset. When the clone already has a worktree or local branch whose name contains the issue key (from Orca, `git worktree add` or another Herdr), the choice reads **Continue on <branch>** and reopens that work instead of starting a new branch. A worktree that is already open as a workspace in this Herdr is linked as it is, without new tabs or agent. The agent brief carries the description (as markdown), type, priority, status, labels and comments. Issues of unmapped projects can only be opened in Jira.
 
 ### Tickets named in pull request titles
 
@@ -285,7 +285,7 @@ herdr work-item add github acme/app#42
 herdr work-item add jira APP-7
 ```
 
-`search` takes GitHub search syntax for the `github` source and JQL for `jira`, and returns each match's key, title, status, assignee and update time. `show` returns one ticket's full details: description, status, assignee and comments (the pull request or issue body for GitHub).
+`search` takes GitHub search syntax for the `github` source and JQL for `jira`, and returns each match's key, title, status, assignee and update time. `show` returns one ticket's full details: description, status, assignee and comments (the pull request or issue body for GitHub). The description and each comment are markdown. For Jira they come from its document format: headings, lists, code blocks, quotes, tables, links and bold, italic, strikethrough and code marks carry over, and an attachment becomes a line naming it.
 
 A screenshot pasted into a GitHub issue or pull request is an attachment on github.com, which only someone signed in to GitHub can read when the repository is private. `work_item.image` fetches one for a client through the source's credentials, as `agent.image` does for an agent's transcript:
 
