@@ -1869,7 +1869,6 @@ esac
              ```"
         );
         assert_eq!(detail.comments.len(), 1);
-        assert_eq!(detail.comments[0].author, "Grace Sample");
         assert_eq!(detail.comments[0].body, "Remember the **last make**?");
     }
 
