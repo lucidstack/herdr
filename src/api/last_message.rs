@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn the_replies_are_matched_to_the_message_whatever_the_harness_made_of_its_markup() {
+    fn replies_match_a_message_that_differs_only_in_symbols_punctuation_and_whitespace() {
         let (mut app, pane_id) = app_with_claude_transcript(&fixture("claude-tool-turn.jsonl"));
         let flattened = stop_hook_message()
             .replace(['#', '*', '`', '-'], "")

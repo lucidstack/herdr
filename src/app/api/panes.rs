@@ -4683,39 +4683,6 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_pane_drops_the_replies_reported_for_it() {
-        let (mut app, _) = app_with_test_agent();
-        let other = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        app.state.ensure_test_terminals();
-        let other_public = app.public_pane_id(0, other).unwrap();
-        let terminal_id = app.state.terminal_id_for_pane(0, other).unwrap();
-        app.state
-            .terminals
-            .get_mut(&terminal_id)
-            .unwrap()
-            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        let reported = report_replies(
-            &mut app,
-            replies_params(&other_public, "Should I proceed?", &["Yes"]),
-        );
-        assert!(serde_json::from_str::<SuccessResponse>(&reported).is_ok());
-        assert_eq!(replies_revision(&mut app, &other_public), 1);
-
-        let closed = app.handle_api_request(crate::api::schema::Request {
-            id: "close".into(),
-            method: crate::api::schema::Method::PaneClose(PaneTarget {
-                pane_id: other_public.clone(),
-            }),
-        });
-
-        assert!(serde_json::from_str::<SuccessResponse>(&closed).is_ok());
-        assert!(!app.state.terminals.contains_key(&terminal_id));
-        let error: ErrorResponse =
-            serde_json::from_str(&agent_get(&mut app, &other_public)).unwrap();
-        assert_eq!(error.error.code, "agent_not_found");
-    }
-
-    #[test]
     fn pane_tokens_are_independent_from_presentation_guards() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();

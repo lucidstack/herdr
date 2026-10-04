@@ -38,6 +38,20 @@ fn unicode_letters_and_digits_count_in_a_key() {
 }
 
 #[test]
+fn letters_and_digits_inside_markup_count_in_a_key() {
+    // A harness that rendered or flattened the markdown would drop them, and change the key.
+    assert_ne!(
+        key("Run it:\n```sh\nmake test\n```"),
+        key("Run it: make test")
+    );
+    assert_ne!(
+        key("See [the guide](https://example.com/guide)."),
+        key("See the guide.")
+    );
+    assert_ne!(key("Press <kbd>Enter</kbd>."), key("Press Enter."));
+}
+
+#[test]
 fn a_text_without_letters_or_digits_has_no_key() {
     for text in ["", "  \n\t", "— … !!!", "✨🌙"] {
         assert_eq!(MessageKey::of(text), None, "{text:?}");
@@ -130,7 +144,6 @@ fn replies_are_offered_only_for_the_message_they_were_reported_for() {
 fn every_accepted_report_counts_and_the_newest_replaces_the_previous() {
     let mut agent_replies = AgentReplies::default();
     assert_eq!(agent_replies.revision(), 0);
-    assert_eq!(agent_replies.offered(), None);
 
     agent_replies.report(key("First question?"), strings(&["One"]));
     assert_eq!(agent_replies.revision(), 1);

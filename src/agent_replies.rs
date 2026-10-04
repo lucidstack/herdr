@@ -5,10 +5,12 @@
 //! memory with the pane's terminal and hands them out only through `agent.last_message`, and only
 //! while the message it reads from the transcript is the one they were offered for.
 //!
-//! "The same message" cannot mean equal text. The harness and Herdr's transcript reader join
-//! content blocks, trim and escape differently, so two renderings of one message are told apart
-//! from two messages by their letters and digits alone: whitespace, punctuation, markdown and the
-//! way blocks are joined all drop out of the [`MessageKey`].
+//! "The same message" cannot mean equal text: a harness may trim a message, join its content
+//! blocks or escape it differently from Herdr's transcript reader. Two copies of one message are
+//! told from two messages by their letters and digits alone, in order: whitespace, punctuation
+//! and other symbols drop out of the [`MessageKey`]. Letters and digits count wherever they are,
+//! including a code fence's language, a link's target and an HTML tag's name, so a reporter has
+//! to send the message as the harness wrote it, markdown included, not a rendered copy.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

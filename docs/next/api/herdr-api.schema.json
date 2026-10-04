@@ -3930,7 +3930,7 @@
           "description": "Replies an agent's own session suggests for the message it just finished with.",
           "properties": {
             "message": {
-              "description": "The agent's final message, as its harness gave it. It must hold a letter or a digit.\n`agent.last_message` returns `replies` only for a message whose letters and digits, and\nnothing else, equal this message's, so the harness's rendering need not match the\ntranscript's.",
+              "description": "The agent's final message as its harness gave it, markdown included. It must hold a letter\nor a digit. `agent.last_message` returns `replies` only for a message with the same letters\nand digits in the same order; whitespace, punctuation and other symbols may differ, but\nletters and digits count wherever they are, a code fence's language included.",
               "type": "string"
             },
             "pane_id": {
