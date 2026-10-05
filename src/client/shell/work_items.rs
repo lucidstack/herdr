@@ -1887,6 +1887,9 @@ impl ClientShellState {
             item_id: overlay.item.item_id.clone(),
             choice_id: choice.choice_id.clone(),
             options: overlay.chosen_options(&choice),
+            // The dialog sets no model or effort: the agent starts as configured.
+            model: None,
+            effort: None,
         });
         match choice.action {
             WorkItemChoiceAction::OpenUrl { url } => {

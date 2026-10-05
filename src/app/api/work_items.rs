@@ -87,6 +87,21 @@ impl App {
                 );
             }
         };
+        // Checked like the options: a misspelt model never starts the agent as configured.
+        let model = params.model.as_deref();
+        let effort = params.effort.as_deref();
+        if let Err((code, message)) =
+            crate::work_items::agent_settings::check(choice.agent.as_ref(), model, effort)
+        {
+            return encode_error(
+                id,
+                code,
+                format!(
+                    "{message} for choice {} of {}",
+                    params.choice_id, params.item_id
+                ),
+            );
+        }
         if choice.choice_id == crate::work_items::source::MUTE_START_REMINDER_CHOICE_ID {
             return match self.work_items.mute_start_reminder(&params.item_id) {
                 Ok(()) => encode_success(id, ResponseResult::Ok {}),
@@ -109,6 +124,7 @@ impl App {
                     &params.item_id,
                     &params.choice_id,
                     &options,
+                    (model, effort),
                 ) {
                     Ok(()) => encode_success(id, ResponseResult::Ok {}),
                     Err((code, message)) => encode_error(id, code, message),

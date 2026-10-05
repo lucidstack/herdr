@@ -675,6 +675,7 @@ impl GithubSource {
             disabled_reason: None,
             confirm: None,
             options: Vec::new(),
+            agent: None,
         })
     }
 
@@ -2221,6 +2222,9 @@ impl WorkItemSource for GithubSource {
             .map(|(repo, _)| repo)
             .unwrap_or(&item.external_id);
         let mapped = self.repo(repo).is_some();
+        let settings = self.settings(event, repo);
+        let agent_info =
+            super::agent_settings::choice_agent_info(settings.agent, settings.agent_args);
         let mut choices: Vec<WorkItemChoiceInfo> = event
             .modes()
             .iter()
@@ -2240,6 +2244,7 @@ impl WorkItemSource for GithubSource {
                 ),
                 confirm: None,
                 options: mode.options(mapped),
+                agent: agent_info.clone(),
             })
             .collect();
         if let Some(link) = self.link_choice(event, repo, mapped) {
@@ -2277,6 +2282,7 @@ impl WorkItemSource for GithubSource {
                     .then(|| "Work on it locally first".into()),
                 confirm: None,
                 options: Vec::new(),
+                agent: None,
             });
         }
         if event == Event::ReadyToMerge {
@@ -2456,6 +2462,7 @@ impl WorkItemSource for GithubSource {
                 disabled_reason: None,
                 confirm: None,
                 options: Vec::new(),
+                agent: None,
             },
         })
     }
@@ -2908,6 +2915,7 @@ fn merge_choices(detail: Option<&GithubDetail>, mut work: Vec<WorkItemChoiceInfo
                 "Merge #{number} into {base}? This cannot be undone. Press ↵ again to merge."
             )),
             options: Vec::new(),
+            agent: None,
         })
         .collect();
     let default = methods

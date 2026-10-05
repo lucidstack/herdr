@@ -1384,10 +1384,59 @@
             }
           ]
         },
+        "WorkItemChoiceAgentInfo": {
+          "description": "How the agent a choice starts can be started, e.g. Claude Code with `--model` and\n`--effort`.",
+          "properties": {
+            "configured_effort": {
+              "description": "The effort level the agent's configured arguments name; omitted when they name none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "configured_model": {
+              "description": "The model the agent's configured arguments name; omitted when they name none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "efforts": {
+              "description": "Effort levels, least first, e.g. \"low\".",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "models": {
+              "description": "Model names the agent understands, e.g. \"opus\".",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "models",
+            "efforts"
+          ],
+          "type": "object"
+        },
         "WorkItemChoiceInfo": {
           "properties": {
             "action": {
               "$ref": "#/schemas/event/$defs/WorkItemChoiceAction"
+            },
+            "agent": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkItemChoiceAgentInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The models and effort levels `work_item.choose` can start the choice's agent with.\nOmitted when the choice starts no agent, or one Herdr passes neither to."
             },
             "choice_id": {
               "type": "string"
@@ -5318,8 +5367,22 @@
             "choice_id": {
               "type": "string"
             },
+            "effort": {
+              "description": "Effort level the choice's agent starts with, one of `WorkItemChoiceInfo.agent.efforts`,\nin place of the one its configuration names. Absent: as configured. A choice without\n`agent`, or an effort it does not list, is an `unknown_effort` error.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "item_id": {
               "type": "string"
+            },
+            "model": {
+              "description": "Model the choice's agent starts with, one of `WorkItemChoiceInfo.agent.models`, in\nplace of the one its configuration names. Absent: as configured. A choice without\n`agent`, or a model it does not list, is an `unknown_model` error.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "options": {
               "description": "Ids of the choice's options to switch on, from `WorkItemChoiceInfo.options`. Absent:\neach option's `default`. An id the choice does not offer is an `unknown_option` error.",
@@ -13288,10 +13351,59 @@
             }
           ]
         },
+        "WorkItemChoiceAgentInfo": {
+          "description": "How the agent a choice starts can be started, e.g. Claude Code with `--model` and\n`--effort`.",
+          "properties": {
+            "configured_effort": {
+              "description": "The effort level the agent's configured arguments name; omitted when they name none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "configured_model": {
+              "description": "The model the agent's configured arguments name; omitted when they name none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "efforts": {
+              "description": "Effort levels, least first, e.g. \"low\".",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "models": {
+              "description": "Model names the agent understands, e.g. \"opus\".",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "models",
+            "efforts"
+          ],
+          "type": "object"
+        },
         "WorkItemChoiceInfo": {
           "properties": {
             "action": {
               "$ref": "#/schemas/success_response/$defs/WorkItemChoiceAction"
+            },
+            "agent": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemChoiceAgentInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The models and effort levels `work_item.choose` can start the choice's agent with.\nOmitted when the choice starts no agent, or one Herdr passes neither to."
             },
             "choice_id": {
               "type": "string"

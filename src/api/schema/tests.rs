@@ -1080,6 +1080,8 @@ fn work_item_choose_request_round_trips() {
             item_id: "github:o/r#1".into(),
             choice_id: "merge_squash".into(),
             options: None,
+            model: None,
+            effort: None,
         })
     );
     assert_eq!(serde_json::to_value(request).unwrap(), json);

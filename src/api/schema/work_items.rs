@@ -15,6 +15,16 @@ pub struct WorkItemChooseParams {
     /// each option's `default`. An id the choice does not offer is an `unknown_option` error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<String>>,
+    /// Model the choice's agent starts with, one of `WorkItemChoiceInfo.agent.models`, in
+    /// place of the one its configuration names. Absent: as configured. A choice without
+    /// `agent`, or a model it does not list, is an `unknown_model` error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Effort level the choice's agent starts with, one of `WorkItemChoiceInfo.agent.efforts`,
+    /// in place of the one its configuration names. Absent: as configured. A choice without
+    /// `agent`, or an effort it does not list, is an `unknown_effort` error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -169,6 +179,26 @@ pub struct WorkItemChoiceInfo {
     /// switched on. Omitted when the choice has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<WorkItemChoiceOptionInfo>,
+    /// The models and effort levels `work_item.choose` can start the choice's agent with.
+    /// Omitted when the choice starts no agent, or one Herdr passes neither to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<WorkItemChoiceAgentInfo>,
+}
+
+/// How the agent a choice starts can be started, e.g. Claude Code with `--model` and
+/// `--effort`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemChoiceAgentInfo {
+    /// Model names the agent understands, e.g. "opus".
+    pub models: Vec<String>,
+    /// Effort levels, least first, e.g. "low".
+    pub efforts: Vec<String>,
+    /// The model the agent's configured arguments name; omitted when they name none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_model: Option<String>,
+    /// The effort level the agent's configured arguments name; omitted when they name none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_effort: Option<String>,
 }
 
 /// A switch of a choice, e.g. whether reviewing a pull request creates a worktree.

@@ -853,12 +853,14 @@ impl App {
     }
 
     /// Validates and starts local provisioning for `key`. `options` are the ids of the choice's
-    /// options switched on. Errors are `(code, message)`.
+    /// options switched on; `(model, effort)` replace the agent's configured ones, each `None`
+    /// keeping it. Errors are `(code, message)`.
     pub(super) fn start_work_item_provisioning(
         &mut self,
         key: &str,
         choice_id: &str,
         options: &[String],
+        (model, effort): (Option<&str>, Option<&str>),
     ) -> Result<(), (&'static str, String)> {
         if self.work_items.has_job(key) {
             return Err(("work_item_busy", format!("{key} is already being prepared")));
@@ -879,9 +881,15 @@ impl App {
         let Some(source) = self.work_items.source(&item.source_id).cloned() else {
             return Err(("work_item_not_found", format!("unknown work item {key}")));
         };
-        let plan = source
+        let mut plan = source
             .provision_plan(&item, choice_id, options, &self.state.worktree_directory)
             .map_err(|message| ("work_item_unavailable", message))?;
+        plan.layout.agent_args = crate::work_items::agent_settings::with_settings(
+            &plan.layout.agent,
+            &plan.layout.agent_args,
+            model,
+            effort,
+        );
         let workspace_source = plan.source.clone();
         let job_id = self
             .work_items
@@ -1933,6 +1941,8 @@ mod tests {
                 item_id: "fake:a".into(),
                 choice_id: "do".into(),
                 options: None,
+                model: None,
+                effort: None,
             })))
         };
 
@@ -2022,6 +2032,8 @@ mod tests {
                 item_id: "fake:a".into(),
                 choice_id: choice_id.into(),
                 options: None,
+                model: None,
+                effort: None,
             })))
         };
         let fixed = choose(&mut app, START_WORK_CHOICE_ID);
@@ -2064,6 +2076,8 @@ mod tests {
                     item_id: "fake:a".into(),
                     choice_id: "brief".into(),
                     options: None,
+                    model: None,
+                    effort: None,
                 })));
             serde_json::from_str::<ErrorResponse>(&response)
                 .expect("error response")
@@ -2121,6 +2135,8 @@ mod tests {
                 item_id: "tracker:T-1".into(),
                 choice_id: "pull_request:do".into(),
                 options: None,
+                model: None,
+                effort: None,
             }),
         )
         .expect("carried choice accepted");
@@ -2183,6 +2199,8 @@ mod tests {
                 item_id: "tracker:T-1".into(),
                 choice_id: "pull_request:brief".into(),
                 options: None,
+                model: None,
+                effort: None,
             }),
         )
         .expect("carried brief accepted");
@@ -2210,6 +2228,8 @@ mod tests {
                 item_id: "fake:a".into(),
                 choice_id: "web".into(),
                 options: None,
+                model: None,
+                effort: None,
             })));
         assert!(
             serde_json::from_str::<SuccessResponse>(&response).is_ok(),
@@ -2243,6 +2263,8 @@ mod tests {
             item_id: "fake:a".into(),
             choice_id: "web".into(),
             options: None,
+            model: None,
+            effort: None,
         })));
         source.set_items(Vec::new());
         app.work_items.schedule_all_for_test(Instant::now());
@@ -2432,6 +2454,8 @@ mod tests {
                 item_id: "fake:1".into(),
                 choice_id: "local".into(),
                 options: None,
+                model: None,
+                effort: None,
             }),
         )
     }
@@ -2563,6 +2587,8 @@ mod tests {
                 item_id: "fake:1".into(),
                 choice_id: PULL_REQUEST_READY_CHOICE_ID.into(),
                 options: None,
+                model: None,
+                effort: None,
             }),
         )
         .expect("ready accepted");
@@ -2646,6 +2672,8 @@ mod tests {
                 item_id: "fake:1".into(),
                 choice_id: CLOSE_TICKET_CHOICE_ID.into(),
                 options: None,
+                model: None,
+                effort: None,
             }),
         )
         .expect("closing accepted");
@@ -2875,6 +2903,8 @@ mod tests {
                 item_id: "fake:1".into(),
                 choice_id: "do".into(),
                 options: None,
+                model: None,
+                effort: None,
             }),
         )
         .expect("action accepted");
@@ -3341,6 +3371,8 @@ mod tests {
                 item_id: "fake:1".into(),
                 choice_id: choice_id.into(),
                 options: options.map(|ids| ids.iter().map(|id| id.to_string()).collect()),
+                model: None,
+                effort: None,
             }),
         )
     }
@@ -3388,6 +3420,8 @@ mod tests {
                 item_id: "fake:1".into(),
                 choice_id: "local".into(),
                 options: Some(vec!["worktree".into(), "teleport".into()]),
+                model: None,
+                effort: None,
             })));
         let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
         assert_eq!(error.error.code, "unknown_option");
@@ -3399,6 +3433,119 @@ mod tests {
 
         // A refused request leaves the item as it was.
         assert!(source.provisioned_with.lock().unwrap().is_empty());
+        assert_eq!(list(&mut app)[0].phase, WorkItemPhase::Pending);
+    }
+
+    /// An app whose fake source's "local" choice starts Claude Code, configured with Opus at
+    /// low effort and one other argument, in a scratch directory.
+    fn app_with_claude() -> App {
+        use crate::work_items::source::{ProvisionPlan, WorkspaceLayout, WorkspaceSource};
+
+        let mut app = test_app();
+        let source = FakeSource::with_items(vec![source_item("1")]);
+        *source.plan.lock().unwrap() = Some(ProvisionPlan {
+            source: WorkspaceSource::Scratch(std::env::temp_dir().join("herdr-model-effort")),
+            workspace_label: "Title 1".into(),
+            agent_name_hint: "one".into(),
+            brief: "brief".into(),
+            plan_command: String::new(),
+            layout: WorkspaceLayout {
+                agent: "claude".into(),
+                agent_args: ["--model", "opus", "--verbose", "--effort", "low"]
+                    .map(String::from)
+                    .to_vec(),
+                tabs: Vec::new(),
+                diff_command: String::new(),
+            },
+            delete_branch: false,
+        });
+        app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
+        run_until(&mut app, |app| !list(app).is_empty());
+        app
+    }
+
+    fn choose_local_with(
+        app: &mut App,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<ResponseResult, String> {
+        api(
+            app,
+            Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: "local".into(),
+                options: None,
+                model: model.map(String::from),
+                effort: effort.map(String::from),
+            }),
+        )
+    }
+
+    #[test]
+    fn a_choice_starting_claude_lists_its_models_and_efforts_with_the_configured_ones() {
+        let mut app = app_with_claude();
+        let items = list(&mut app);
+        let local = items[0]
+            .choices
+            .iter()
+            .find(|choice| choice.choice_id == "local")
+            .expect("local choice");
+        let agent = local
+            .agent
+            .as_ref()
+            .expect("claude takes a model and effort");
+        assert_eq!(agent.models, ["haiku", "sonnet", "opus", "fable"]);
+        assert_eq!(agent.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(agent.configured_model.as_deref(), Some("opus"));
+        assert_eq!(agent.configured_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn the_chosen_model_and_effort_start_the_agent_in_place_of_the_configured_ones() {
+        let mut app = app_with_claude();
+        choose_local_with(&mut app, Some("fable"), Some("max")).expect("choice accepted");
+        let job = app.work_items.job(1).expect("provisioning started");
+        assert_eq!(
+            job.plan.layout.agent_args,
+            ["--verbose", "--model", "fable", "--effort", "max"]
+        );
+    }
+
+    #[test]
+    fn without_a_model_or_effort_the_agent_starts_as_configured() {
+        let mut app = app_with_claude();
+        choose_local_with(&mut app, None, None).expect("choice accepted");
+        let job = app.work_items.job(1).expect("provisioning started");
+        assert_eq!(
+            job.plan.layout.agent_args,
+            ["--model", "opus", "--verbose", "--effort", "low"]
+        );
+    }
+
+    #[test]
+    fn a_model_or_effort_the_choice_does_not_offer_is_refused_before_anything_runs() {
+        let mut app = app_with_claude();
+        assert_eq!(
+            choose_local_with(&mut app, Some("gpt-5"), None),
+            Err("unknown_model".to_string())
+        );
+        assert_eq!(
+            choose_local_with(&mut app, None, Some("extreme")),
+            Err("unknown_effort".to_string())
+        );
+        // "web" opens a page and starts no agent, so it takes neither.
+        let response =
+            app.handle_api_request(request(Method::WorkItemChoose(WorkItemChooseParams {
+                item_id: "fake:1".into(),
+                choice_id: "web".into(),
+                options: None,
+                model: Some("opus".into()),
+                effort: None,
+            })));
+        let error: ErrorResponse = serde_json::from_str(&response).expect("error response");
+        assert_eq!(error.error.code, "unknown_model");
+
+        assert!(app.work_items.job(1).is_none());
         assert_eq!(list(&mut app)[0].phase, WorkItemPhase::Pending);
     }
 

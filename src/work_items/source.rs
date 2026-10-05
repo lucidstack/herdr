@@ -447,6 +447,7 @@ mod tests {
                     default: *default,
                 })
                 .collect(),
+            agent: None,
         }
     }
 

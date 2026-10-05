@@ -5,6 +5,7 @@
 //! [`source::WorkItemSource`]. Nothing runs unless a source is configured.
 
 mod adf;
+pub(crate) mod agent_settings;
 pub(crate) mod attention;
 pub(crate) mod changes;
 pub(crate) mod github;
@@ -1240,6 +1241,7 @@ impl WorkItems {
                     disabled_reason: None,
                     confirm: None,
                     options: Vec::new(),
+                    agent: None,
                 },
             );
         }
@@ -1274,6 +1276,7 @@ impl WorkItems {
                         disabled_reason: None,
                         confirm: None,
                         options: Vec::new(),
+                        agent: None,
                     },
                 );
                 at += 1;
@@ -1304,6 +1307,7 @@ impl WorkItems {
                     disabled_reason: None,
                     confirm: None,
                     options: Vec::new(),
+                    agent: None,
                 },
             );
             if !default_chosen && item.open_pull_request().is_some() {

@@ -31,6 +31,8 @@ pub(super) fn run_work_item_command(args: &[String]) -> std::io::Result<i32> {
                     item_id: item_id.clone(),
                     choice_id: choice_id.clone(),
                     options: None,
+                    model: None,
+                    effort: None,
                 }),
             ),
             _ => usage("herdr work-item choose ITEM_ID CHOICE_ID"),

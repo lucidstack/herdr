@@ -241,6 +241,8 @@ herdr work-item link 'jira:APP-7' w3
 
 `herdr work-item choose` runs a choice with its options at their defaults. `work_item.list` shows each choice's options as `{ "option_id", "label", "description", "default" }`, and `work_item.choose` takes `options`, the ids to switch on: leave it out for the defaults, or send `[]` to switch every option off. The review choice has the options `worktree` and `post`. An id the choice does not offer fails with `unknown_option`, and nothing runs.
 
+A choice that starts Claude Code or omp also has an `agent`: the `models` (`haiku`, `sonnet`, `opus`, `fable`) and `efforts` (`low` to `max`) it can start the agent with, and the `configured_model` and `configured_effort` its `agent_args` already name, if any. `work_item.choose` takes `model` and `effort` from those lists; Herdr passes them as `--model` and, for Claude Code, `--effort` or, for omp, `--thinking`, in place of any the configuration gives. Leave either out to start the agent as configured. A value the choice does not list, or one sent to a choice without `agent`, fails with `unknown_model` or `unknown_effort`, and nothing runs.
+
 Preparing a workspace is reported as the item's `provisioning`: its `steps`, whether they are `finished` and, once they are, `finished_at`, the Unix time in seconds at which the last one ended.
 
 ### What needs you

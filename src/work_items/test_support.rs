@@ -167,6 +167,7 @@ impl WorkItemSource for FakeSource {
                 disabled_reason: None,
                 confirm: None,
                 options: Vec::new(),
+                agent: None,
             },
         })
     }
@@ -191,6 +192,7 @@ impl WorkItemSource for FakeSource {
                     disabled_reason: None,
                     confirm: None,
                     options: Vec::new(),
+                    agent: None,
                 },
             })
     }
@@ -217,6 +219,18 @@ impl WorkItemSource for FakeSource {
                     disabled_reason: None,
                     confirm: None,
                     options: self.local_options.lock().expect("fake source lock").clone(),
+                    // As the real sources do: what the agent its plan starts takes.
+                    agent: self
+                        .plan
+                        .lock()
+                        .expect("fake source lock")
+                        .as_ref()
+                        .and_then(|plan| {
+                            super::agent_settings::choice_agent_info(
+                                &plan.layout.agent,
+                                &plan.layout.agent_args,
+                            )
+                        }),
                 },
                 WorkItemChoiceInfo {
                     choice_id: "web".into(),
@@ -228,6 +242,7 @@ impl WorkItemSource for FakeSource {
                     disabled_reason: None,
                     confirm: None,
                     options: Vec::new(),
+                    agent: None,
                 },
                 WorkItemChoiceInfo {
                     choice_id: "do".into(),
@@ -237,6 +252,7 @@ impl WorkItemSource for FakeSource {
                     disabled_reason: None,
                     confirm: Some("Sure?".into()),
                     options: Vec::new(),
+                    agent: None,
                 },
                 WorkItemChoiceInfo {
                     choice_id: "brief".into(),
@@ -250,6 +266,7 @@ impl WorkItemSource for FakeSource {
                         .clone(),
                     confirm: None,
                     options: Vec::new(),
+                    agent: None,
                 },
             ],
             default_choice_id: Some(
