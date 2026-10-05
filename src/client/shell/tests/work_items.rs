@@ -32,6 +32,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
                 disabled_reason: None,
                 confirm: None,
                 options: Vec::new(),
+                agent: None,
             },
             WorkItemChoiceInfo {
                 choice_id: "open".into(),
@@ -43,6 +44,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
                 disabled_reason: None,
                 confirm: None,
                 options: Vec::new(),
+                agent: None,
             },
         ],
         default_choice_id: Some("open".into()),
@@ -295,6 +297,7 @@ fn dialog_lists_choices_and_arrow_keys_skip_disabled_ones() {
             disabled_reason: Some("Work on it locally first".into()),
             confirm: None,
             options: Vec::new(),
+            agent: None,
         },
     );
     blocked.default_choice_id = Some("review".into());
@@ -900,6 +903,7 @@ fn item_menu_leads_with_a_started_items_tracker_fix() {
             disabled_reason: None,
             confirm: None,
             options: Vec::new(),
+            agent: None,
         },
     );
     started.default_choice_id = Some("start_work".into());
@@ -982,6 +986,7 @@ fn irreversible_choice_runs_only_after_a_second_confirm() {
             disabled_reason: None,
             confirm: Some("Merge #7 into main? This cannot be undone.".into()),
             options: Vec::new(),
+            agent: None,
         },
     );
     ready.default_choice_id = Some("merge_squash".into());
@@ -1027,6 +1032,7 @@ fn performed_choice_shows_its_outcome_and_retries_only_after_failure() {
             disabled_reason: None,
             confirm: None,
             options: Vec::new(),
+            agent: None,
         },
     );
     started.default_choice_id = Some("start_work".into());
@@ -1094,6 +1100,7 @@ fn briefing_the_agent_closes_the_dialog_and_asks_the_server() {
             disabled_reason: None,
             confirm: None,
             options: Vec::new(),
+            agent: None,
         },
     );
     local.default_choice_id = Some("push_reply".into());
@@ -1118,6 +1125,7 @@ fn choice(id: &str, label: &str, action: WorkItemChoiceAction) -> WorkItemChoice
         disabled_reason: None,
         confirm: None,
         options: Vec::new(),
+        agent: None,
     }
 }
 

@@ -356,6 +356,7 @@ fn start_reminder_for(detail: &JiraDetail) -> Option<StartReminder> {
             disabled_reason,
             confirm: None,
             options: Vec::new(),
+            agent: None,
         },
     })
 }
@@ -1136,11 +1137,15 @@ impl WorkItemSource for JiraSource {
             .project(project)
             .is_none()
             .then(|| format!("No local checkout configured for Jira project {project}"));
-        let no_agent = self
-            .workflow(project)
-            .agent(&self.default_agent)
+        let workflow = self.workflow(project);
+        let agent = workflow.agent(&self.default_agent);
+        let no_agent = agent
             .is_empty()
             .then(|| format!("No agent configured for Jira project {project}"));
+        let agent_info = super::agent_settings::choice_agent_info(
+            agent,
+            workflow.agent_args(&self.default_agent),
+        );
         let existing = item_detail(item).and_then(|detail| {
             detail
                 .existing_branch
@@ -1181,6 +1186,7 @@ impl WorkItemSource for JiraSource {
                 disabled_reason: unmapped.clone(),
                 confirm: None,
                 options: Vec::new(),
+                agent: agent_info.clone(),
             });
         }
         if pull_request.is_none() {
@@ -1194,6 +1200,7 @@ impl WorkItemSource for JiraSource {
                 disabled_reason: unmapped.clone().or(no_agent),
                 confirm: None,
                 options: Vec::new(),
+                agent: agent_info,
             });
         }
         choices.push(WorkItemChoiceInfo {
@@ -1206,6 +1213,7 @@ impl WorkItemSource for JiraSource {
             disabled_reason: None,
             confirm: None,
             options: Vec::new(),
+            agent: None,
         });
         ItemChoices {
             choices,
@@ -1461,6 +1469,7 @@ impl WorkItemSource for JiraSource {
                 disabled_reason: None,
                 confirm: None,
                 options: Vec::new(),
+                agent: None,
             },
         })
     }

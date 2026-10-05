@@ -303,11 +303,13 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
-        // `work_item.choose` gained the optional `options`. A client sends it only for a choice
-        // whose projection lists options, which a server without them never does.
+        // `work_item.choose` gained the optional `options`, then `model` and `effort`. A client
+        // sends `options` only for a choice whose projection lists options, and `model` and
+        // `effort` only for one whose projection has `agent`, which a server without them never
+        // does.
         assert_eq!(
             actual.remove("work_item.choose").as_deref(),
-            Some("3e7c45bd5dc2cd486cc8601b167ab6be7be0606e4d4b355231898d50f6f92014")
+            Some("0c48b6ef401179a0a17b5a6c41b8377d76d9be62b28263af4c8e5b6599e178c3")
         );
         assert_eq!(
             actual.remove("work_item.mark_seen").as_deref(),
