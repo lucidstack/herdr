@@ -43,6 +43,8 @@ pub(crate) struct PendingResponse {
 pub(crate) struct BriefConfirmation {
     pub sent: Instant,
     pub next_check: Instant,
+    /// How many times Enter was pressed again because the agent stayed idle.
+    pub resubmits: u8,
 }
 
 #[derive(Debug)]
