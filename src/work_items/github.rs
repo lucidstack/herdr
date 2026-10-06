@@ -314,6 +314,9 @@ struct RestIssue {
     assignee: Option<SearchUser>,
     #[serde(default)]
     assignees: Vec<SearchUser>,
+    /// Who opened it.
+    #[serde(default)]
+    user: Option<SearchUser>,
 }
 
 #[derive(Deserialize)]
@@ -2746,11 +2749,19 @@ impl WorkItemSource for GithubSource {
             updated_at: issue.updated_at.clone(),
             url: issue.html_url.clone(),
         };
+        // Added by hand, a pull request is one to review, as if its review were requested of
+        // you: it gets the review choice, not an issue's "Work on it locally". Its id is then
+        // the review request's own, so the poll that finds the request finds this item.
+        let (event, author) = if issue.pull_request.is_some() {
+            (Event::ReviewRequested, issue.user.map(|user| user.login))
+        } else {
+            (Event::Assigned, assignee)
+        };
         let source_item = SourceItem {
-            external_id: format!("{}{ticket_key}", Event::Assigned.id_prefix()),
+            external_id: format!("{}{ticket_key}", event.id_prefix()),
             title: issue.title,
             context: format!("#{number} {repo}"),
-            author: assignee,
+            author,
             url: issue.html_url,
             updated_at: issue.updated_at,
             tracker_state: None,
@@ -4658,6 +4669,15 @@ case "$*" in
              "updated_at":"2026-01-01T00:00:00Z","html_url":"https://github.com/o/r/issues/5",
              "assignees":[{"login":"alice"}]}'
     ;;
+  *"repos/o/r/issues/6/comments"*)
+    printf '[]'
+    ;;
+  *"repos/o/r/issues/6"*)
+    printf '{"number":6,"title":"Add the thing","body":"","state":"open",
+             "updated_at":"2026-01-01T00:00:00Z","html_url":"https://github.com/o/r/pull/6",
+             "user":{"login":"tony"},"assignees":[{"login":"alice"}],
+             "pull_request":{"merged_at":null}}'
+    ;;
   *"repos/o/r/issues/404"*)
     echo "gh: Not Found (HTTP 404)" >&2
     exit 1
@@ -4692,6 +4712,30 @@ esac
         assert_eq!(detail.comments.len(), 1);
         assert_eq!(detail.comments[0].author, "carol");
         assert_eq!(detail.source_item.external_id, "assigned:o/r#5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_makes_a_pull_request_one_to_review() {
+        let gh = fake_gh_issue("fetch-pull");
+        let source = GithubSource::new(
+            GithubWorkItemsConfig {
+                gh_path: gh.display().to_string(),
+                ..GithubWorkItemsConfig::default()
+            },
+            AgentLaunch::default(),
+        );
+        let detail = source.fetch("o/r#6").expect("fetch").expect("found");
+        let _ = std::fs::remove_dir_all(gh.parent().unwrap());
+        // The review request's own id, so its choice is Review, not "Work on it locally".
+        assert_eq!(detail.source_item.external_id, "o/r#6");
+        assert_eq!(
+            Event::of(&detail.source_item.external_id),
+            Event::ReviewRequested
+        );
+        // Like a polled review request, it names who opened it, not who it is assigned to.
+        assert_eq!(detail.source_item.author.as_deref(), Some("tony"));
+        assert!(!detail.ticket.done);
     }
 
     #[cfg(unix)]
