@@ -545,7 +545,9 @@ pub(super) fn render_items_section<'a>(
                 _ => 1,
             })
             .sum::<u16>();
-    // Tickets keep at least one row below the header; the footer gives way first.
+    // Tickets keep at least one row below the header; the footer gives way first. The
+    // blank rows around the "Pick next" rows are not reserved: they take from the
+    // following section rather than from the tickets.
     let footer_rows = discovery_rows + repository_rows + 1;
     let items_limit = limit
         .saturating_sub(footer_rows)
@@ -681,6 +683,62 @@ pub(super) fn render_items_section<'a>(
             nested_workspace_ids.push(workspace.workspace_id.as_str());
         }
     }
+    // Blank row setting the "Pick next" rows apart from the tickets.
+    y = y.saturating_add(1).min(area.bottom());
+    for (item, workspace) in discovery {
+        if let Some(workspace_id) = item.workspace_id.as_deref() {
+            nested_workspace_ids.push(workspace_id);
+        }
+        if y >= area.bottom() {
+            continue;
+        }
+        let row = Rect::new(area.x, y, width, 1);
+        let focused = workspace.is_some_and(|(_, workspace)| workspace.focused);
+        // Starting: the provisioning spinner; open: the agent's status, like a space.
+        let glyph = match workspace {
+            Some((_, workspace)) => (
+                status_icon(workspace.agent_status, config.status_indicators),
+                status_color(workspace.agent_status, palette),
+            ),
+            None => (
+                SPINNER_FRAMES[view.spinner_frame % SPINNER_FRAMES.len()],
+                palette.yellow,
+            ),
+        };
+        render_footer_row(buffer, row, glyph, &item.title, None, focused, palette);
+        hits.work_items.push(WorkItemHit {
+            rect: row,
+            item_id: item.item_id.clone(),
+        });
+        y += 1;
+        if let Some((workspace_index, workspace)) = workspace.filter(|_| focused) {
+            y += render_nested_workspace(
+                buffer,
+                Rect::new(area.x, y, width, area.bottom().saturating_sub(y)),
+                workspace_index,
+                workspace,
+                config,
+                endpoint_id,
+                hits,
+            );
+        }
+    }
+    if y < area.bottom() {
+        hits.inbox.pick_next = Rect::new(area.x, y, width, 1);
+        put_text(
+            buffer,
+            area.x,
+            y,
+            width,
+            " + Pick next task…",
+            Style::default().fg(palette.overlay0),
+        );
+        y += 1;
+    }
+    // Blank row separating them from the repositories.
+    if !repositories.is_empty() {
+        y = y.saturating_add(1).min(area.bottom());
+    }
     if !repositories.is_empty() && y < area.bottom() {
         put_text(
             buffer,
@@ -734,56 +792,6 @@ pub(super) fn render_items_section<'a>(
                 hits,
             );
         }
-    }
-    for (item, workspace) in discovery {
-        if let Some(workspace_id) = item.workspace_id.as_deref() {
-            nested_workspace_ids.push(workspace_id);
-        }
-        if y >= area.bottom() {
-            continue;
-        }
-        let row = Rect::new(area.x, y, width, 1);
-        let focused = workspace.is_some_and(|(_, workspace)| workspace.focused);
-        // Starting: the provisioning spinner; open: the agent's status, like a space.
-        let glyph = match workspace {
-            Some((_, workspace)) => (
-                status_icon(workspace.agent_status, config.status_indicators),
-                status_color(workspace.agent_status, palette),
-            ),
-            None => (
-                SPINNER_FRAMES[view.spinner_frame % SPINNER_FRAMES.len()],
-                palette.yellow,
-            ),
-        };
-        render_footer_row(buffer, row, glyph, &item.title, None, focused, palette);
-        hits.work_items.push(WorkItemHit {
-            rect: row,
-            item_id: item.item_id.clone(),
-        });
-        y += 1;
-        if let Some((workspace_index, workspace)) = workspace.filter(|_| focused) {
-            y += render_nested_workspace(
-                buffer,
-                Rect::new(area.x, y, width, area.bottom().saturating_sub(y)),
-                workspace_index,
-                workspace,
-                config,
-                endpoint_id,
-                hits,
-            );
-        }
-    }
-    if y < area.bottom() {
-        hits.inbox.pick_next = Rect::new(area.x, y, width, 1);
-        put_text(
-            buffer,
-            area.x,
-            y,
-            width,
-            " + Pick next task…",
-            Style::default().fg(palette.overlay0),
-        );
-        y += 1;
     }
     // Blank separator before the spaces list.
     let used = (y + 1).min(area.bottom()) - area.y;
