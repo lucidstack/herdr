@@ -83,6 +83,14 @@ A review request offers one choice, **Review**. The agent always reviews: it rea
 
 GitHub items offer no choice that only opens them in the browser. What you do on GitHub reaches Herdr through the pull request's own events, so the item updates anyway. To read the pull request there, use **Open #12 on GitHub** in the item's right-click menu.
 
+### Stacked pull requests
+
+A pull request that is part of a [GitHub stack](https://docs.github.com/en/pull-requests/how-tos/stacked-pull-requests) shows its place in it in front of its number, for example `≡ 2/3 #812 acme/app` for the second of three pull requests counting from the bottom. Merged ones count too. The choices dialog also names it, for example `2 of 3 in a stack`. Herdr reads stacks with the pull request state, so they appear within a minute. Only stacks created with GitHub's stacked pull requests are recognised; a chain built by hand or with another tool shows as separate pull requests.
+
+When you review one pull request of a stack, the agent is told which stack it is in and is given the list of the other pull requests. Because a stacked pull request's base is the pull request below it, its diff holds only its own changes, and the agent is told to review only those, reading the rest of the stack for context.
+
+When every open pull request of the stack asks for your review, each of them also offers **Review the whole stack (N PRs)**, with the same two switches as **Review**. It prepares one workspace for the whole stack. Its worktree is on a branch `review/stack-<stack number>` at the head of the top pull request, with every open pull request's head fetched. The agent reviews each pull request on its own diff, from the bottom up, and reports its findings grouped by pull request. With **Post to GitHub** switched on, it posts one review comment on each pull request. All the review requests share the workspace, so opening any of them focuses it. Each one leaves the inbox when its own review is done. With `on_resolved = "remove"`, the workspace is removed only once the last of them has gone. The choice is unavailable while one of the pull requests already has a workspace of its own.
+
 ### Sending feedback back to reviewers
 
 When the agent addresses review feedback or fixes failing checks, it commits on the branch but never pushes. Once you are happy with the commit, open the item again and choose **Ask agent to push and reply** (or **Ask agent to push the fix** for failing checks). Herdr sends the agent already in the item's workspace a follow-up and focuses it. The agent pushes with a plain `git push` (never a force-push), replies once in each review thread it addressed, and asks the reviewers who requested changes to review again. It does not resolve threads or post other comments. Herdr itself writes nothing to GitHub: every command runs in the agent's pane, so you approve each one in the agent's own permission prompts.

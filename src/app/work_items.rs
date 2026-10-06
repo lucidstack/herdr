@@ -890,6 +890,16 @@ impl App {
             model,
             effort,
         );
+        if let Some(busy) = plan
+            .shared_with
+            .iter()
+            .find(|shared| self.work_items.has_job(shared))
+        {
+            return Err((
+                "work_item_busy",
+                format!("{busy} is already being prepared"),
+            ));
+        }
         let workspace_source = plan.source.clone();
         let job_id = self
             .work_items
@@ -2113,6 +2123,7 @@ mod tests {
             url: "https://example.test/o/r/pull/5".into(),
             is_draft: false,
             status: "approved".into(),
+            stack: None,
         });
         app.work_items = WorkItems::for_test(vec![pulls.clone(), tracker.clone()], Instant::now());
         run_until(&mut app, |app| {
@@ -2441,6 +2452,7 @@ mod tests {
                 diff_command: String::new(),
             },
             delete_branch: true,
+            shared_with: Vec::new(),
         });
         app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
         run_until(&mut app, |app| !list(app).is_empty());
@@ -2555,6 +2567,7 @@ mod tests {
             url: "https://example.test/o/r/pull/5".into(),
             is_draft: true,
             status: "draft".into(),
+            stack: None,
         });
         // The pull request also has its own inbox item, e.g. CI failing on it.
         source.set_items(vec![source_item("1"), source_item("pr:5")]);
@@ -2629,6 +2642,7 @@ mod tests {
             url: "https://example.test/o/r/pull/5".into(),
             is_draft: false,
             status: "merged".into(),
+            stack: None,
         });
         source.set_items(vec![source_item("1")]);
         app.work_items.schedule_all_for_test(Instant::now());
@@ -2705,6 +2719,7 @@ mod tests {
             url: "https://example.test/o/r/pull/5".into(),
             is_draft: false,
             status: "merged".into(),
+            stack: None,
         });
         // Arrives once its branch is known, as a ticket whose details name one.
         source.set_items(vec![source_item("2")]);
@@ -2794,6 +2809,7 @@ mod tests {
                 diff_command: String::new(),
             },
             delete_branch: false,
+            shared_with: Vec::new(),
         });
         app.start_pick_next("fake", "").expect("pick next starts");
         let pick_next_workspace = |app: &mut App| {
@@ -2989,6 +3005,7 @@ mod tests {
                 diff_command: String::new(),
             },
             delete_branch: true,
+            shared_with: Vec::new(),
         };
         let job_id = app.work_items.start_job("fake:1", plan).unwrap();
         app.work_items.job_mut(job_id).unwrap().agent_name = Some("review-1".into());
@@ -3316,6 +3333,7 @@ mod tests {
                 diff_command: String::new(),
             },
             delete_branch: false,
+            shared_with: Vec::new(),
         });
 
         assert!(app.start_pick_next("fake", "look into the backlog").is_ok());
@@ -3458,6 +3476,7 @@ mod tests {
                 diff_command: String::new(),
             },
             delete_branch: false,
+            shared_with: Vec::new(),
         });
         app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
         run_until(&mut app, |app| !list(app).is_empty());

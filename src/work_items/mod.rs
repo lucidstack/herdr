@@ -950,11 +950,22 @@ impl WorkItems {
     }
 
     /// Queues workspace removal for items that just resolved, when their source wants that.
+    /// A workspace shared with items still unresolved, e.g. a stack's, waits for the last one.
     fn queue_resolutions(&mut self) {
         for key in self.state.take_newly_resolved() {
             let should_remove = self
                 .state
                 .get(&key)
+                .filter(|item| {
+                    let Some(workspace_id) = item.workspace_id.as_deref() else {
+                        return true;
+                    };
+                    !self.state.items().iter().any(|other| {
+                        other.key != item.key
+                            && !other.resolved
+                            && other.workspace_id.as_deref() == Some(workspace_id)
+                    })
+                })
                 .and_then(|item| {
                     self.source(&item.source_id)
                         .map(|source| source.remove_on_resolved(item))
@@ -1220,6 +1231,26 @@ impl WorkItems {
             );
         };
         let mut choices = source.choices(item);
+        // A stack the item's pull request is part of may offer a choice covering all of it.
+        if let Some((repo, stack_number)) = item
+            .own_pull_request
+            .as_ref()
+            .and_then(|pull| Some((&pull.repo, pull.stack.as_ref()?.number)))
+        {
+            let members: Vec<&WorkItem> = self
+                .state
+                .items()
+                .iter()
+                .filter(|other| other.key != item.key && other.source_id == item.source_id)
+                .filter(|other| {
+                    other.own_pull_request.as_ref().is_some_and(|pull| {
+                        pull.repo.eq_ignore_ascii_case(repo)
+                            && pull.stack.as_ref().map(|stack| stack.number) == Some(stack_number)
+                    })
+                })
+                .collect();
+            choices.choices.extend(source.stack_choice(item, &members));
+        }
         let close = self.close_ticket(item);
         // Once the work has landed there is no work left to start.
         let reminder =
@@ -1477,8 +1508,13 @@ impl WorkItems {
         self.changed();
     }
 
+    /// Whether `key` is being provisioned, on its own or as part of another item's workspace.
     pub(crate) fn has_job(&self, key: &str) -> bool {
         self.jobs.contains_key(key)
+            || self
+                .jobs
+                .values()
+                .any(|job| job.plan.shared_with.iter().any(|shared| shared == key))
     }
 
     /// Starts provisioning `key`; returns the new job id.
@@ -1607,18 +1643,32 @@ impl WorkItems {
         self.state.get(&job.key)?.provisioning.as_ref()
     }
 
-    /// Records the provisioned workspace on the job and its item.
+    /// Records the provisioned workspace on the job, its item and the items sharing it that
+    /// have none yet.
     pub(crate) fn link_workspace(&mut self, job_id: u64, workspace_id: &str) {
         let Some(job) = self.job_mut(job_id) else {
             return;
         };
         job.workspace_id = Some(workspace_id.to_string());
         let key = job.key.clone();
-        if let Some(item) = self.state.get_mut(&key) {
-            item.workspace_id = Some(workspace_id.to_string());
-            self.request_pull_request_lookup(Instant::now());
-            self.changed();
+        let shared_with = job.plan.shared_with.clone();
+        let Some(item) = self.state.get_mut(&key) else {
+            return;
+        };
+        item.workspace_id = Some(workspace_id.to_string());
+        for shared in shared_with {
+            if let Some(item) = self
+                .state
+                .get_mut(&shared)
+                .filter(|item| item.workspace_id.is_none())
+            {
+                item.workspace_id = Some(workspace_id.to_string());
+                item.phase = WorkItemPhase::Local;
+                item.seen = true;
+            }
         }
+        self.request_pull_request_lookup(Instant::now());
+        self.changed();
     }
 
     pub(crate) fn take_notices(&mut self) -> Vec<WorkItemNotice> {
@@ -1710,6 +1760,18 @@ impl WorkItems {
             .into_iter()
             .map(|(pane_id, candidate)| (Subject::Pane(pane_id), candidate))
             .collect();
+        // A workspace shared by several items, e.g. a stack's, reports its agents through one
+        // of them, preferably one still unresolved, so its needs are not counted once per item.
+        let mut reporters: HashMap<&str, &WorkItem> = HashMap::new();
+        for item in self.state.items() {
+            let Some(workspace_id) = item.workspace_id.as_deref() else {
+                continue;
+            };
+            let reporter = reporters.entry(workspace_id).or_insert(item);
+            if reporter.resolved && !item.resolved {
+                *reporter = item;
+            }
+        }
         for item in self.state.items() {
             if self.folded_into(item, &hosts).is_some() {
                 continue;
@@ -1717,6 +1779,11 @@ impl WorkItems {
             let verdict = item
                 .workspace_id
                 .as_deref()
+                .filter(|workspace_id| {
+                    reporters
+                        .get(workspace_id)
+                        .is_some_and(|reporter| reporter.key == item.key)
+                })
                 .and_then(|workspace_id| agents.get(workspace_id))
                 .unwrap_or(&idle);
             let signals = ItemSignals {
@@ -2239,6 +2306,7 @@ projects = [
             url: "https://example.test/o/r/pull/5".into(),
             is_draft: status == "draft",
             status: status.into(),
+            stack: None,
         }
     }
 
@@ -2569,6 +2637,7 @@ projects = [
                         url: "https://github.com/o/r/pull/5".into(),
                         is_draft: false,
                         status: "approved".into(),
+                        stack: None,
                     })),
                 )],
                 own: Vec::new(),
@@ -2928,6 +2997,7 @@ projects = [
                 diff_command: String::new(),
             },
             delete_branch: false,
+            shared_with: Vec::new(),
         };
         let job_id = items.start_job("fake:a", plan).expect("job");
         items.update_progress(job_id, |progress| {
@@ -2954,5 +3024,102 @@ projects = [
             2_000,
         );
         assert_eq!(attention_of_a(&items), None);
+    }
+
+    #[test]
+    fn a_workspace_shared_by_several_items_is_removed_only_once_the_last_one_resolves() {
+        let source = FakeSource::with_items(Vec::new());
+        source
+            .remove_on_resolved
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut items = WorkItems::for_test(vec![source], Instant::now());
+        poll(&mut items, &["a", "b", "c"]);
+        let plan = ProvisionPlan {
+            source: source::WorkspaceSource::Scratch(PathBuf::from("/scratch")),
+            workspace_label: "#a–#b".into(),
+            agent_name_hint: "review-stack".into(),
+            brief: "brief".into(),
+            plan_command: String::new(),
+            layout: source::WorkspaceLayout {
+                agent: "claude".into(),
+                agent_args: Vec::new(),
+                tabs: Vec::new(),
+                diff_command: String::new(),
+            },
+            delete_branch: false,
+            shared_with: vec!["fake:b".into()],
+        };
+        let job_id = items.start_job("fake:a", plan).expect("job");
+        assert!(
+            items.has_job("fake:b"),
+            "b cannot get a workspace of its own meanwhile"
+        );
+        items.link_workspace(job_id, "w1");
+        let workspace = |items: &WorkItems, key: &str| {
+            items.get(key).and_then(|item| item.workspace_id.clone())
+        };
+        assert_eq!(workspace(&items, "fake:a").as_deref(), Some("w1"));
+        assert_eq!(workspace(&items, "fake:b").as_deref(), Some("w1"));
+        assert_eq!(workspace(&items, "fake:c"), None);
+
+        // b's review is done first: a still works in the workspace.
+        poll(&mut items, &["a", "c"]);
+        assert!(items.get("fake:b").is_some_and(|item| item.resolved));
+        assert_eq!(items.take_pending_resolutions(), Vec::<String>::new());
+
+        poll(&mut items, &["c"]);
+        assert_eq!(items.take_pending_resolutions(), ["fake:a"]);
+
+        // Removing it takes both resolved items along.
+        items.workspace_closed("w1");
+        assert!(items.get("fake:a").is_none());
+        assert!(items.get("fake:b").is_none());
+    }
+
+    #[test]
+    fn closing_a_shared_workspace_returns_every_unresolved_item_to_the_inbox() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        poll(&mut items, &["a", "b"]);
+        for key in ["fake:a", "fake:b"] {
+            let item = items.state.get_mut(key).expect("item");
+            item.workspace_id = Some("w1".into());
+            item.phase = WorkItemPhase::Local;
+        }
+        items.workspace_closed("w1");
+        for key in ["fake:a", "fake:b"] {
+            let item = items.get(key).expect("kept");
+            assert_eq!(
+                (item.workspace_id.as_deref(), item.phase),
+                (None, WorkItemPhase::Pending)
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_in_a_shared_workspace_needs_you_through_one_item() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        poll(&mut items, &["a", "b"]);
+        for key in ["fake:a", "fake:b"] {
+            items.state.get_mut(key).expect("item").workspace_id = Some("w1".into());
+        }
+        items.state.get_mut("fake:a").expect("item").resolved = true;
+        let blocked = HashMap::from([(
+            "w1".to_string(),
+            attention::AgentVerdict {
+                need: Some(attention::Need::new(AttentionKind::Blocked, "allow?")),
+                ..attention::AgentVerdict::default()
+            },
+        )]);
+        items.update_attention(&blocked, Vec::new(), 1_000);
+        let kind = |key: &str| {
+            items
+                .attention(&attention::Subject::Item(key.into()))
+                .map(|attention| attention.kind)
+        };
+        // Through the one still under review, not once per item.
+        assert_eq!(kind("fake:b"), Some(AttentionKind::Blocked));
+        assert_eq!(kind("fake:a"), None);
     }
 }

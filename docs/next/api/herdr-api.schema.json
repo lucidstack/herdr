@@ -1794,6 +1794,17 @@
               "description": "Source hosting it, e.g. \"github\".",
               "type": "string"
             },
+            "stack": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/WorkItemPullRequestStackInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The GitHub stack it belongs to, when it is part of one."
+            },
             "status": {
               "description": "One line for the user, e.g. \"draft\", \"awaiting review · checks running\", \"merged\".",
               "type": "string"
@@ -1809,6 +1820,73 @@
             "url",
             "is_draft",
             "status"
+          ],
+          "type": "object"
+        },
+        "WorkItemPullRequestStackEntry": {
+          "description": "One pull request of a stack.",
+          "properties": {
+            "head": {
+              "description": "Its head branch.",
+              "type": "string"
+            },
+            "number": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "description": "\"open\", \"merged\" or \"closed\".",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "title",
+            "url",
+            "head",
+            "state"
+          ],
+          "type": "object"
+        },
+        "WorkItemPullRequestStackInfo": {
+          "description": "A stack of pull requests, each based on the one below it, that a pull request is part of.",
+          "properties": {
+            "base": {
+              "description": "Branch the bottom of the stack targets, e.g. \"main\".",
+              "type": "string"
+            },
+            "entries": {
+              "description": "Every pull request in the stack, bottom first, merged ones included.",
+              "items": {
+                "$ref": "#/schemas/event/$defs/WorkItemPullRequestStackEntry"
+              },
+              "type": "array"
+            },
+            "number": {
+              "description": "Number of the stack in its repository.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "position": {
+              "description": "This pull request's place in the stack, 1 being the bottom.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "number",
+            "base",
+            "position",
+            "entries"
           ],
           "type": "object"
         },
@@ -13859,6 +13937,17 @@
               "description": "Source hosting it, e.g. \"github\".",
               "type": "string"
             },
+            "stack": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/WorkItemPullRequestStackInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The GitHub stack it belongs to, when it is part of one."
+            },
             "status": {
               "description": "One line for the user, e.g. \"draft\", \"awaiting review · checks running\", \"merged\".",
               "type": "string"
@@ -13874,6 +13963,73 @@
             "url",
             "is_draft",
             "status"
+          ],
+          "type": "object"
+        },
+        "WorkItemPullRequestStackEntry": {
+          "description": "One pull request of a stack.",
+          "properties": {
+            "head": {
+              "description": "Its head branch.",
+              "type": "string"
+            },
+            "number": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "description": "\"open\", \"merged\" or \"closed\".",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "number",
+            "title",
+            "url",
+            "head",
+            "state"
+          ],
+          "type": "object"
+        },
+        "WorkItemPullRequestStackInfo": {
+          "description": "A stack of pull requests, each based on the one below it, that a pull request is part of.",
+          "properties": {
+            "base": {
+              "description": "Branch the bottom of the stack targets, e.g. \"main\".",
+              "type": "string"
+            },
+            "entries": {
+              "description": "Every pull request in the stack, bottom first, merged ones included.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkItemPullRequestStackEntry"
+              },
+              "type": "array"
+            },
+            "number": {
+              "description": "Number of the stack in its repository.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "position": {
+              "description": "This pull request's place in the stack, 1 being the bottom.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "number",
+            "base",
+            "position",
+            "entries"
           ],
           "type": "object"
         },

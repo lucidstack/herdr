@@ -1288,6 +1288,7 @@ impl WorkItemSource for JiraSource {
                 diff_command: String::new(),
             },
             delete_branch: workflow.delete_branch,
+            shared_with: Vec::new(),
         })
     }
 
@@ -1513,6 +1514,7 @@ impl WorkItemSource for JiraSource {
                 diff_command: String::new(),
             },
             delete_branch: false,
+            shared_with: Vec::new(),
         })
     }
 }
@@ -1643,6 +1645,7 @@ mod tests {
             url: "https://example.test/o/r/pull/12".into(),
             is_draft: false,
             status: "merged".into(),
+            stack: None,
         };
         let close = source()
             .close_ticket(&item("TECH-7", Some(&detail())), &merged)
@@ -2011,6 +2014,7 @@ esac
             url: "https://example.test/o/r/pull/12".into(),
             is_draft: status == "draft",
             status: status.into(),
+            stack: None,
         }
     }
 

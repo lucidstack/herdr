@@ -414,6 +414,7 @@ impl WorkItemSource for FakeSource {
                         url: format!("https://example.test/{repo}/pull/{number}"),
                         is_draft: status == "draft",
                         status,
+                        stack: None,
                     })
             })
             .collect())
