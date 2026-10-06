@@ -561,20 +561,23 @@ impl WorkItemsState {
             .min()
     }
 
+    /// Every item the workspace belonged to, more than one when shared, loses it: resolved
+    /// ones go, the rest wait to be worked on again.
     pub(crate) fn workspace_closed(&mut self, workspace_id: &str) -> bool {
-        let Some(index) = self
-            .items
-            .iter()
-            .position(|item| item.workspace_id.as_deref() == Some(workspace_id))
-        else {
-            return false;
-        };
-        if self.items[index].resolved {
-            self.items.remove(index);
-        } else {
-            self.items[index].unlink_workspace();
-        }
-        true
+        let before = self.items.len();
+        let mut unlinked = false;
+        self.items.retain_mut(|item| {
+            if item.workspace_id.as_deref() != Some(workspace_id) {
+                return true;
+            }
+            if item.resolved {
+                return false;
+            }
+            item.unlink_workspace();
+            unlinked = true;
+            true
+        });
+        unlinked || self.items.len() != before
     }
 
     pub(crate) fn reconcile_workspaces(&mut self, existing: &HashSet<&str>) -> bool {

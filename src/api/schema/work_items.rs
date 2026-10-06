@@ -408,6 +408,40 @@ pub struct WorkItemPullRequestInfo {
     pub is_draft: bool,
     /// One line for the user, e.g. "draft", "awaiting review · checks running", "merged".
     pub status: String,
+    /// The GitHub stack it belongs to, when it is part of one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<WorkItemPullRequestStackInfo>,
+}
+
+/// A stack of pull requests, each based on the one below it, that a pull request is part of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemPullRequestStackInfo {
+    /// Number of the stack in its repository.
+    pub number: u64,
+    /// Branch the bottom of the stack targets, e.g. "main".
+    pub base: String,
+    /// This pull request's place in the stack, 1 being the bottom.
+    pub position: u32,
+    /// Every pull request in the stack, bottom first, merged ones included.
+    pub entries: Vec<WorkItemPullRequestStackEntry>,
+}
+
+/// One pull request of a stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemPullRequestStackEntry {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    /// Its head branch.
+    pub head: String,
+    /// "open", "merged" or "closed".
+    pub state: String,
+}
+
+impl WorkItemPullRequestStackEntry {
+    pub fn is_open(&self) -> bool {
+        self.state == "open"
+    }
 }
 
 /// A tracker ticket named in the title of an item from another source.

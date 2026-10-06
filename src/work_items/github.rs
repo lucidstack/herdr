@@ -9,7 +9,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo};
+use crate::api::schema::{
+    WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo,
+    WorkItemPullRequestStackInfo,
+};
 use crate::config::{
     AgentLaunch, BranchWorkflowConfig, GithubRepoConfig, GithubWorkItemsConfig, OnResolvedConfig,
     ReviewRequestedConfig,
@@ -587,6 +590,116 @@ impl GithubSource {
         None
     }
 
+    /// The plan for reviewing every open pull request of the stack `item`, pull request
+    /// `number` of `repo`, is part of: one workspace at the top of the stack, shared with the
+    /// other open pull requests' review requests.
+    fn stack_plan(
+        &self,
+        item: &WorkItem,
+        repo: &str,
+        number: u64,
+        switches: ReviewSwitches,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String> {
+        let event = Event::ReviewRequested;
+        let mapped = self.repo(repo);
+        if let Some(reason) = self.mode_unavailable(
+            ReviewMode::ReviewStack,
+            switches,
+            event,
+            repo,
+            mapped.is_some(),
+        ) {
+            return Err(reason);
+        }
+        let stack = item
+            .own_pull_request
+            .as_ref()
+            .and_then(|pull| pull.stack.as_ref())
+            .ok_or_else(|| "the stack is not known yet; try again shortly".to_string())?;
+        let open: Vec<_> = stack
+            .entries
+            .iter()
+            .filter(|entry| entry.is_open())
+            .collect();
+        let (Some(bottom), Some(top)) = (open.first(), open.last()) else {
+            return Err("the stack has no open pull requests".into());
+        };
+        let top = top.number;
+        let settings = self.settings(event, repo);
+        let mut layout = WorkspaceLayout {
+            agent: settings.agent.to_string(),
+            agent_args: settings.agent_args.to_vec(),
+            tabs: settings.tabs.to_vec(),
+            diff_command: settings.diff_command.to_string(),
+        };
+        let (source, base) = match mapped.filter(|_| switches.worktree) {
+            Some(clone) => {
+                let (base_refspec, base) = review_base(clone, &stack.base);
+                for tab in &mut layout.tabs {
+                    tab.command = tab.command.replace("{base}", &base);
+                    tab.fallback = tab.fallback.replace("{base}", &base);
+                }
+                let below = open
+                    .iter()
+                    .filter(|entry| entry.number != top)
+                    .map(|entry| pull_refspec(entry.number));
+                let source = WorkspaceSource::Worktree(WorktreeSpec {
+                    repo_path: crate::worktree::expand_tilde_absolute_path(&clone.path),
+                    remote: clone.remote.clone(),
+                    fetch_refspec: pull_refspec(top),
+                    base_ref: format!("refs/herdr/pull/{top}"),
+                    branch: format!("review/stack-{}", stack.number),
+                    reuse_branch: false,
+                    extra_fetch_refspecs: base_refspec.into_iter().chain(below).collect(),
+                    adopt_branch_for: None,
+                });
+                (source, base)
+            }
+            None => {
+                let short_name = repo.rsplit('/').next().unwrap_or(repo);
+                let source = WorkspaceSource::Download(DownloadSpec {
+                    directory: crate::worktree::default_checkout_path(
+                        worktree_directory,
+                        short_name,
+                        &format!("stack-{}-agent", stack.number),
+                    ),
+                    program: self.config.gh_path.clone(),
+                    args: vec![
+                        "pr".into(),
+                        "diff".into(),
+                        top.to_string(),
+                        "--repo".into(),
+                        repo.into(),
+                        "--color".into(),
+                        "never".into(),
+                    ],
+                    env: gh_env(),
+                    file_name: diff_file_name(top),
+                });
+                (source, stack.base.clone())
+            }
+        };
+        let shared_with = open
+            .iter()
+            .filter(|entry| entry.number != number)
+            .map(|entry| super::state::item_key(self.id(), &format!("{repo}#{}", entry.number)))
+            .collect();
+        Ok(ProvisionPlan {
+            source,
+            workspace_label: truncate_chars(
+                &format!("#{}–#{top} {}", bottom.number, bottom.title),
+                MAX_WORKSPACE_LABEL_CHARS,
+            ),
+            agent_name_hint: format!("review-stack-{}", stack.number),
+            brief: stack_brief(repo, stack, &base, switches),
+            plan_command: String::new(),
+            layout,
+            delete_branch: settings.delete_branch,
+            shared_with,
+        })
+    }
+
     /// Your login, asked once.
     fn viewer_login(&self) -> Result<String, String> {
         if let Some(login) = self.viewer.lock().ok().and_then(|login| login.clone()) {
@@ -936,6 +1049,8 @@ fn parse_branch_pull_request(
         ),
         url: pull.url,
         is_draft: open && pull.is_draft,
+        // Branch pull requests are linked to tickets, which show no stack.
+        stack: None,
     }))
 }
 
@@ -944,7 +1059,10 @@ fn parse_branch_pull_request(
 const PULL_REQUEST_STATUS_FIELDS: &str = "number url state isDraft reviewDecision \
     latestReviews(first: 50) { nodes { state author { login } } } \
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } \
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } \
+    stackEntry { position } \
+    stack { number baseRefName entries(first: 30) { nodes { position \
+    pullRequest { number title url state headRefName } } } }";
 
 /// Pull requests read per GraphQL query, keeping each well under GitHub's node limits.
 const PULL_REQUEST_STATUS_BATCH: usize = 40;
@@ -1012,6 +1130,47 @@ fn parse_pull_request_statuses(
         review_requests: Option<ReviewRequests>,
         #[serde(default)]
         commits: Option<Commits>,
+        #[serde(default)]
+        stack_entry: Option<StackEntry>,
+        #[serde(default)]
+        stack: Option<Stack>,
+    }
+    #[derive(Deserialize)]
+    struct StackEntry {
+        position: u32,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Stack {
+        number: u64,
+        #[serde(default)]
+        base_ref_name: String,
+        entries: StackEntries,
+    }
+    #[derive(Deserialize)]
+    struct StackEntries {
+        #[serde(default)]
+        nodes: Vec<Option<StackNode>>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StackNode {
+        position: u32,
+        #[serde(default)]
+        pull_request: Option<StackPull>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct StackPull {
+        number: u64,
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        head_ref_name: String,
     }
     #[derive(Deserialize)]
     struct ReviewRequests {
@@ -1076,6 +1235,26 @@ fn parse_pull_request_statuses(
                 matches!(rollup.as_str(), "PENDING" | "EXPECTED"),
             );
             let open = pull.state.eq_ignore_ascii_case("open");
+            let stack = pull.stack.zip(pull.stack_entry).map(|(stack, entry)| {
+                let mut nodes: Vec<StackNode> = stack.entries.nodes.into_iter().flatten().collect();
+                nodes.sort_by_key(|node| node.position);
+                crate::api::schema::WorkItemPullRequestStackInfo {
+                    number: stack.number,
+                    base: stack.base_ref_name,
+                    position: entry.position,
+                    entries: nodes
+                        .into_iter()
+                        .filter_map(|node| node.pull_request)
+                        .map(|pull| crate::api::schema::WorkItemPullRequestStackEntry {
+                            number: pull.number,
+                            title: pull.title,
+                            url: pull.url,
+                            head: pull.head_ref_name,
+                            state: pull.state.to_ascii_lowercase(),
+                        })
+                        .collect(),
+                }
+            });
             Some(crate::api::schema::WorkItemPullRequestInfo {
                 source_id: source_id.to_string(),
                 repo: repo.clone(),
@@ -1093,6 +1272,7 @@ fn parse_pull_request_statuses(
                 ),
                 url: pull.url,
                 is_draft: open && pull.is_draft,
+                stack,
             })
         })
         .collect())
@@ -1172,6 +1352,9 @@ enum ReviewMode {
     /// The agent reviews the pull request and reports back. The choice's switches decide how:
     /// see `ReviewSwitches`.
     Review,
+    /// The agent reviews every open pull request of the stack the item is part of, one after
+    /// another, in one workspace. Offered by `stack_choice`, with the review's switches.
+    ReviewStack,
     /// Worktree on the pull request branch; the agent summarises the feedback and waits.
     Address,
     /// Worktree on the pull request branch; the agent addresses the feedback.
@@ -1216,8 +1399,9 @@ impl ReviewSwitches {
 }
 
 impl ReviewMode {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Review,
+        Self::ReviewStack,
         Self::Address,
         Self::AddressAgent,
         Self::FixChecks,
@@ -1230,6 +1414,7 @@ impl ReviewMode {
     fn choice_id(self) -> &'static str {
         match self {
             Self::Review => "review",
+            Self::ReviewStack => "review_stack",
             Self::Address => "address",
             Self::AddressAgent => "address_agent",
             Self::FixChecks => "fix_checks",
@@ -1249,6 +1434,7 @@ impl ReviewMode {
     fn label(self) -> &'static str {
         match self {
             Self::Review => "Review",
+            Self::ReviewStack => "Review the whole stack",
             Self::Address | Self::FixChecks | Self::StartIssue => "Work on it locally",
             Self::AddressAgent => "Ask agent to address the feedback",
             Self::FixChecksAgent => "Ask agent to fix the checks",
@@ -1260,6 +1446,9 @@ impl ReviewMode {
     fn description(self) -> &'static str {
         match self {
             Self::Review => "The agent reviews the pull request and reports back to you",
+            Self::ReviewStack => {
+                "One workspace for the stack; the agent reviews each pull request in turn"
+            }
             Self::Address => "Worktree on the PR branch; the agent sums up the feedback and waits",
             Self::AddressAgent => {
                 "Worktree on the PR branch; the agent makes the changes, no commit or push"
@@ -1283,7 +1472,7 @@ impl ReviewMode {
     /// the choice that review defaulted to before the switches always had one. Posting on
     /// GitHub is visible to others, so it is off unless switched on.
     fn options(self, mapped: bool) -> Vec<WorkItemChoiceOptionInfo> {
-        if self != Self::Review {
+        if !matches!(self, Self::Review | Self::ReviewStack) {
             return Vec::new();
         }
         let mut options = Vec::new();
@@ -1316,7 +1505,7 @@ impl ReviewMode {
     /// worktree switch makes that a choice.
     fn checks_out(self, switches: ReviewSwitches) -> bool {
         match self {
-            Self::Review => switches.worktree,
+            Self::Review | Self::ReviewStack => switches.worktree,
             Self::ThreadAgent => false,
             _ => true,
         }
@@ -1846,6 +2035,8 @@ fn brief(
                  Only comment: never approve or request changes."
             ),
         },
+        // Briefed from the stack by `stack_brief`.
+        ReviewMode::ReviewStack => return format!("{} {}", item.title, item.url),
         ReviewMode::Address | ReviewMode::AddressAgent => {
             return changes_brief(repo, item, detail, mode)
         }
@@ -1857,10 +2048,30 @@ fn brief(
             return format!("{} {}", item.title, item.url)
         }
     };
+    let stack = item
+        .own_pull_request
+        .as_ref()
+        .and_then(|pull| pull.stack.as_ref())
+        .map(|stack| {
+            format!(
+                "\nThis pull request is {position} of {size} in a GitHub stack targeting {target}, \
+                 bottom first:\n\
+                 {entries}\n\
+                 Its base branch is the pull request below it, so its diff holds only its own \
+                 changes. Review only those; read the rest of the stack for context when it \
+                 helps, but do not review it.\n",
+                position = stack.position,
+                size = stack.entries.len(),
+                target = stack.base,
+                entries = stack_entry_lines(stack, Some(number)),
+            )
+        })
+        .unwrap_or_default();
     format!(
         "You are reviewing GitHub pull request {repo}#{number}: {title}\n\
          Author: @{author} · {url}\n\
          Base {base} ← head {head_ref} ({head})\n\
+         {stack}\
          \n\
          Description:\n\
          {body}\n\
@@ -1876,6 +2087,114 @@ fn brief(
         additions = detail.additions,
         deletions = detail.deletions,
         files = changed_files_list(detail),
+    )
+}
+
+/// One line per pull request of `stack`, bottom first, e.g.
+/// "  2. #812 Add retry budget (open) https://…"; `this` is marked as the one under review.
+fn stack_entry_lines(stack: &WorkItemPullRequestStackInfo, this: Option<u64>) -> String {
+    stack
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let state = if Some(entry.number) == this {
+                "this pull request".to_string()
+            } else {
+                entry.state.clone()
+            };
+            format!(
+                "  {}. #{} {} ({state}) {}",
+                index + 1,
+                entry.number,
+                entry.title,
+                entry.url
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The brief for reviewing every open pull request of `stack` in `repo` at once. `base` is
+/// where the stack's target branch was fetched to in the worktree, e.g. "origin/main".
+fn stack_brief(
+    repo: &str,
+    stack: &WorkItemPullRequestStackInfo,
+    base: &str,
+    switches: ReviewSwitches,
+) -> String {
+    let open: Vec<_> = stack
+        .entries
+        .iter()
+        .filter(|entry| entry.is_open())
+        .collect();
+    let top = open.last().map_or(0, |entry| entry.number);
+    let mut below = base.to_string();
+    let diffs = open
+        .iter()
+        .map(|entry| {
+            let command = if switches.worktree {
+                let head = format!("refs/herdr/pull/{}", entry.number);
+                let command = format!("git diff {below}...{head}");
+                below = head;
+                command
+            } else {
+                format!("gh pr diff {} --repo {repo}", entry.number)
+            };
+            format!("  #{}: `{command}`", entry.number)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let review = "Review each pull request for correctness, security, missing tests and design \
+                  problems, on its own diff and bottom first, using the rest of the stack for \
+                  context: a problem one pull request introduces and a later one fixes is still \
+                  worth a note on the first. Order each pull request's findings by severity and \
+                  cite file:line for each.";
+    let setting = if switches.worktree {
+        format!(
+            "This directory is a worktree checked out at the head of the top pull request, #{top}, \
+             so it holds the whole stack."
+        )
+    } else {
+        format!(
+            "There is no checkout of the repository. ./{file} holds the diff of the top pull \
+             request, #{top}; use `gh pr view <number> --repo {repo} --comments` and \
+             `gh api repos/{repo}/contents/<path>?ref=<head branch>` for more context.",
+            file = diff_file_name(top),
+        )
+    };
+    let outcome = if switches.post {
+        let clean = if switches.worktree {
+            " Write those files outside this worktree, for example under the system temp \
+             directory (`mktemp`), so the worktree stays clean and can be removed."
+        } else {
+            ""
+        };
+        format!(
+            "When you are done, show me the findings, then post each pull request's findings as \
+             one review comment on it with \
+             `gh pr review <number> --repo {repo} --comment --body-file <file>`.{clean} \
+             Only comment: never approve or request changes. Do not modify files or commit."
+        )
+    } else {
+        "Report the findings to me here, grouped by pull request. Do not modify files, commit, \
+         or post anything to GitHub."
+            .to_string()
+    };
+    format!(
+        "You are reviewing a GitHub stack in {repo}: {count} open pull requests, each based on \
+         the one below it, targeting {target}. Bottom first:\n\
+         {entries}\n\
+         \n\
+         {setting}\n\
+         Each pull request's own changes:\n\
+         {diffs}\n\
+         \n\
+         Start reviewing now. {review}\n\
+         {outcome}",
+        count = open.len(),
+        target = stack.base,
+        entries = stack_entry_lines(stack, None),
     )
 }
 
@@ -2316,11 +2635,17 @@ impl WorkItemSource for GithubSource {
     ) -> Result<ProvisionPlan, String> {
         let event = Event::of(&item.external_id);
         let mode = ReviewMode::from_choice_id(choice_id)
-            .filter(|mode| event.modes().contains(mode))
+            .filter(|mode| {
+                event.modes().contains(mode)
+                    || (*mode == ReviewMode::ReviewStack && event == Event::ReviewRequested)
+            })
             .ok_or_else(|| format!("choice {choice_id} does not provision a workspace"))?;
         let switches = ReviewSwitches::from_options(options);
         let (repo_name, number) = parse_external_id(&item.external_id)
             .ok_or_else(|| format!("unrecognised GitHub id {}", item.external_id))?;
+        if mode == ReviewMode::ReviewStack {
+            return self.stack_plan(item, repo_name, number, switches, worktree_directory);
+        }
         let mapped = self.repo(repo_name);
         if let Some(reason) =
             self.mode_unavailable(mode, switches, event, repo_name, mapped.is_some())
@@ -2434,6 +2759,7 @@ impl WorkItemSource for GithubSource {
             plan_command: String::new(),
             layout,
             delete_branch: settings.delete_branch,
+            shared_with: Vec::new(),
         })
     }
 
@@ -2632,6 +2958,61 @@ impl WorkItemSource for GithubSource {
         Ok(statuses)
     }
 
+    /// Offered on a review request whose pull request is in a stack while every other open
+    /// pull request of that stack requests your review too.
+    fn stack_choice(&self, item: &WorkItem, members: &[&WorkItem]) -> Option<WorkItemChoiceInfo> {
+        if item.is_pick_next || Event::of(&item.external_id) != Event::ReviewRequested {
+            return None;
+        }
+        let (repo, number) = parse_external_id(&item.external_id)?;
+        let stack = item.own_pull_request.as_ref()?.stack.as_ref()?;
+        let open: Vec<u64> = stack
+            .entries
+            .iter()
+            .filter(|entry| entry.is_open())
+            .map(|entry| entry.number)
+            .collect();
+        if open.len() < 2 || !open.contains(&number) {
+            return None;
+        }
+        let mut reviewed = Vec::with_capacity(open.len());
+        for &other in &open {
+            if other == number {
+                reviewed.push((other, item));
+                continue;
+            }
+            let external_id = format!("{repo}#{other}");
+            let request = members.iter().find(|member| {
+                !member.resolved && member.external_id.eq_ignore_ascii_case(&external_id)
+            })?;
+            reviewed.push((other, *request));
+        }
+        let mapped = self.repo(repo).is_some();
+        let settings = self.settings(Event::ReviewRequested, repo);
+        let busy = reviewed
+            .iter()
+            .find(|(_, member)| member.workspace_id.is_some())
+            .map(|(other, _)| format!("#{other} already has a workspace"));
+        Some(WorkItemChoiceInfo {
+            choice_id: ReviewMode::ReviewStack.choice_id().into(),
+            label: format!("{} ({} PRs)", ReviewMode::ReviewStack.label(), open.len()),
+            description: Some(ReviewMode::ReviewStack.description().into()),
+            action: WorkItemChoiceAction::ProvisionWorkspace,
+            disabled_reason: busy.or_else(|| {
+                self.mode_unavailable(
+                    ReviewMode::ReviewStack,
+                    ReviewSwitches::default(),
+                    Event::ReviewRequested,
+                    repo,
+                    mapped,
+                )
+            }),
+            confirm: None,
+            options: ReviewMode::ReviewStack.options(mapped),
+            agent: super::agent_settings::choice_agent_info(settings.agent, settings.agent_args),
+        })
+    }
+
     fn follow_up_brief(&self, item: &WorkItem, choice_id: &str) -> Result<String, String> {
         let event = Event::of(&item.external_id);
         let briefs = matches!(
@@ -2822,6 +3203,7 @@ impl WorkItemSource for GithubSource {
                 diff_command: String::new(),
             },
             delete_branch: false,
+            shared_with: Vec::new(),
         })
     }
 }
@@ -4030,6 +4412,168 @@ mod tests {
         assert!(!both.brief.contains("Do not post anything to GitHub"));
     }
 
+    /// Review request `number` of o/r whose pull request is in stack 9 targeting main, made
+    /// of `entries` as (number, state), bottom first.
+    fn stacked_review(number: u64, entries: &[(u64, &str)]) -> WorkItem {
+        let mut item = work_item("o/r", Some(&detail(&[("src/a.rs", 40, 2)])));
+        item.key = format!("github:o/r#{number}");
+        item.external_id = format!("o/r#{number}");
+        item.own_pull_request = Some(crate::api::schema::WorkItemPullRequestInfo {
+            source_id: "github".into(),
+            repo: "o/r".into(),
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            is_draft: false,
+            status: "awaiting your review".into(),
+            stack: Some(WorkItemPullRequestStackInfo {
+                number: 9,
+                base: "main".into(),
+                position: entries
+                    .iter()
+                    .position(|(entry, _)| *entry == number)
+                    .map_or(0, |index| index as u32 + 1),
+                entries: entries
+                    .iter()
+                    .map(
+                        |(entry, state)| crate::api::schema::WorkItemPullRequestStackEntry {
+                            number: *entry,
+                            title: format!("Part {entry}"),
+                            url: format!("https://github.com/o/r/pull/{entry}"),
+                            head: format!("part-{entry}"),
+                            state: state.to_string(),
+                        },
+                    )
+                    .collect(),
+            }),
+        });
+        item
+    }
+
+    const STACK: [(u64, &str); 4] = [(4, "merged"), (5, "open"), (6, "open"), (7, "open")];
+
+    #[test]
+    fn statuses_carry_the_stack_bottom_first() {
+        let pulls = vec![("o/r".to_string(), 5)];
+        let json = br#"{"data":{"p0":{"pullRequest":{"number":5,"url":"u5","state":"OPEN",
+            "isDraft":false,"stackEntry":{"position":2},
+            "stack":{"number":9,"baseRefName":"main","entries":{"nodes":[
+                {"position":3,"pullRequest":{"number":6,"title":"Six","url":"u6",
+                    "state":"OPEN","headRefName":"six"}},
+                {"position":1,"pullRequest":{"number":4,"title":"Four","url":"u4",
+                    "state":"MERGED","headRefName":"four"}},
+                {"position":2,"pullRequest":{"number":5,"title":"Five","url":"u5",
+                    "state":"OPEN","headRefName":"five"}}]}}}}}}"#;
+        let statuses = parse_pull_request_statuses(json, "github", &pulls, None).expect("parses");
+        let stack = statuses[0]
+            .as_ref()
+            .and_then(|pull| pull.stack.as_ref())
+            .expect("stack");
+        assert_eq!(
+            (stack.number, stack.base.as_str(), stack.position),
+            (9, "main", 2)
+        );
+        let entries: Vec<(u64, &str, &str)> = stack
+            .entries
+            .iter()
+            .map(|entry| (entry.number, entry.state.as_str(), entry.head.as_str()))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                (4, "merged", "four"),
+                (5, "open", "five"),
+                (6, "open", "six")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_whole_stack_is_offered_only_while_every_open_pull_request_asks_for_your_review() {
+        let source = mapped_source(repo_config());
+        let item = stacked_review(5, &STACK);
+        let six = stacked_review(6, &STACK);
+        let mut seven = stacked_review(7, &STACK);
+
+        // #4 is merged and needs no review; #7 has not asked you.
+        assert_eq!(source.stack_choice(&item, &[&six]), None);
+
+        let choice = source
+            .stack_choice(&item, &[&six, &seven])
+            .expect("every open pull request asks for your review");
+        assert_eq!(choice.choice_id, "review_stack");
+        assert_eq!(choice.label, "Review the whole stack (3 PRs)");
+        assert_eq!(choice.disabled_reason, None);
+
+        seven.resolved = true;
+        assert_eq!(
+            source.stack_choice(&item, &[&six, &seven]),
+            None,
+            "a review request that went away no longer counts"
+        );
+
+        seven.resolved = false;
+        seven.workspace_id = Some("w7".into());
+        let busy = source
+            .stack_choice(&item, &[&six, &seven])
+            .expect("still offered");
+        assert_eq!(
+            busy.disabled_reason.as_deref(),
+            Some("#7 already has a workspace")
+        );
+    }
+
+    #[test]
+    fn a_stack_review_checks_out_the_top_and_diffs_each_pull_request_against_the_one_below() {
+        let source = mapped_source(repo_config());
+        let item = stacked_review(5, &STACK);
+        let plan = source
+            .provision_plan(
+                &item,
+                "review_stack",
+                &options(&["worktree"]),
+                Path::new("/worktrees"),
+            )
+            .expect("plan");
+        let WorkspaceSource::Worktree(spec) = &plan.source else {
+            panic!("worktree");
+        };
+        assert_eq!(spec.base_ref, "refs/herdr/pull/7");
+        assert_eq!(spec.fetch_refspec, pull_refspec(7));
+        assert_eq!(spec.branch, "review/stack-9");
+        assert_eq!(
+            spec.extra_fetch_refspecs,
+            [
+                "+refs/heads/main:refs/remotes/origin/main".to_string(),
+                pull_refspec(5),
+                pull_refspec(6),
+            ]
+        );
+        assert_eq!(plan.shared_with, ["github:o/r#6", "github:o/r#7"]);
+        for diff in [
+            "`git diff origin/main...refs/herdr/pull/5`",
+            "`git diff refs/herdr/pull/5...refs/herdr/pull/6`",
+            "`git diff refs/herdr/pull/6...refs/herdr/pull/7`",
+        ] {
+            assert!(plan.brief.contains(diff), "{diff} in {}", plan.brief);
+        }
+    }
+
+    #[test]
+    fn a_review_of_one_stacked_pull_request_tells_the_agent_about_the_stack() {
+        let source = mapped_source(repo_config());
+        let item = stacked_review(5, &STACK);
+        let plan = source
+            .provision_plan(&item, "review", &options(&["worktree"]), Path::new("/w"))
+            .expect("plan");
+        assert!(plan
+            .brief
+            .contains("2 of 4 in a GitHub stack targeting main"));
+        assert!(plan
+            .brief
+            .contains("3. #6 Part 6 (open) https://github.com/o/r/pull/6"));
+        assert!(plan.brief.contains("2. #5 Part 5 (this pull request)"));
+    }
+
     #[test]
     fn agent_led_choices_are_disabled_without_an_agent() {
         let source = GithubSource::new(
@@ -4524,6 +5068,7 @@ mod tests {
                 url: "https://github.com/o/r/pull/9".into(),
                 is_draft: status == "draft",
                 status: status.into(),
+                stack: None,
             }),
             workspace_id: Some("w1".into()),
             ..event_item(

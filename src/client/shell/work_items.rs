@@ -943,6 +943,12 @@ fn service_mark(icons: crate::config::ServiceIcons, source_id: &str) -> Option<&
     }
 }
 
+/// The mark in front of a pull request's context while it is part of a stack: its place and
+/// the stack's size, e.g. "≡ 2/3 ".
+fn stack_mark(stack: &crate::api::schema::WorkItemPullRequestStackInfo) -> String {
+    format!("≡ {}/{} ", stack.position, stack.entries.len())
+}
+
 #[allow(clippy::too_many_arguments)] // Row inputs; a struct would only rename them.
 fn render_item_rows(
     buffer: &mut Buffer,
@@ -993,11 +999,27 @@ fn render_item_rows(
             .fg(palette.mauve)
             .add_modifier(Modifier::BOLD)
     };
+    let mut x = x.saturating_add(1);
+    let context_right = rect.right().saturating_sub(status_width);
+    if let Some(stack) = item
+        .own_pull_request
+        .as_ref()
+        .and_then(|pull| pull.stack.as_ref())
+    {
+        x = put_segment(
+            buffer,
+            x,
+            rect.y,
+            context_right,
+            &stack_mark(stack),
+            Style::default().fg(palette.blue),
+        );
+    }
     put_segment(
         buffer,
-        x.saturating_add(1),
+        x,
         rect.y,
-        rect.right().saturating_sub(status_width),
+        context_right,
         &item.context,
         context_style,
     );

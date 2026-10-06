@@ -563,6 +563,7 @@ mod tests {
                 diff_command: String::new(),
             },
             delete_branch: true,
+            shared_with: Vec::new(),
         }
     }
 

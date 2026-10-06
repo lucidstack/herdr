@@ -196,6 +196,9 @@ pub(crate) struct ProvisionPlan {
     pub layout: WorkspaceLayout,
     /// Delete the review branch when its worktree is removed.
     pub delete_branch: bool,
+    /// Other items that get the workspace too, e.g. the rest of a stack reviewed at once.
+    /// It is removed on resolution only once every one of them has resolved.
+    pub shared_with: Vec<String>,
 }
 
 /// Choice that brings the tracker up to date with work already started, e.g. assigning
@@ -376,6 +379,17 @@ pub(crate) trait WorkItemSource: Send + Sync {
         pulls: &[(String, u64)],
     ) -> Result<Vec<Option<crate::api::schema::WorkItemPullRequestInfo>>, String> {
         Ok(vec![None; pulls.len()])
+    }
+    /// Pure: a choice working on the whole stack `item`'s own pull request is part of, when
+    /// offered. `members` are the other items of this source whose own pull requests are in
+    /// that stack. Its plan lists in `ProvisionPlan::shared_with` the members that share the
+    /// workspace.
+    fn stack_choice(
+        &self,
+        _item: &WorkItem,
+        _members: &[&WorkItem],
+    ) -> Option<crate::api::schema::WorkItemChoiceInfo> {
+        None
     }
     /// Pure: the key of one of this source's tickets that `title`, the title of another
     /// source's item, starts with, e.g. `TECH-12` for "[TECH-12] Fix login".

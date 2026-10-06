@@ -219,6 +219,7 @@ fn pull_request_item_shows_its_own_state_on_a_line_of_its_own() {
         url: "https://github.com/o/r/pull/8".into(),
         is_draft: false,
         status: "approved · CI failing".into(),
+        stack: None,
     });
     let mut state = shell_with(vec![pull, item("9")]);
     state.compose(106, 30).expect("frame");
@@ -234,6 +235,43 @@ fn pull_request_item_shows_its_own_state_on_a_line_of_its_own() {
 }
 
 #[test]
+fn stacked_pull_request_shows_its_place_in_the_stack_before_its_context() {
+    use crate::api::schema::{WorkItemPullRequestStackEntry, WorkItemPullRequestStackInfo};
+
+    let entry = |number: u64, state: &str| WorkItemPullRequestStackEntry {
+        number,
+        title: format!("Part {number}"),
+        url: format!("https://github.com/o/r/pull/{number}"),
+        head: format!("part-{number}"),
+        state: state.into(),
+    };
+    let mut pull = item("8");
+    pull.own_pull_request = Some(crate::api::schema::WorkItemPullRequestInfo {
+        source_id: "github".into(),
+        repo: "o/r".into(),
+        number: 8,
+        url: "https://github.com/o/r/pull/8".into(),
+        is_draft: false,
+        status: "awaiting your review".into(),
+        stack: Some(WorkItemPullRequestStackInfo {
+            number: 3,
+            base: "main".into(),
+            position: 2,
+            entries: vec![entry(7, "merged"), entry(8, "open"), entry(9, "open")],
+        }),
+    });
+    let context = pull.context.clone();
+    let mut state = shell_with(vec![pull]);
+    state.compose(106, 30).expect("frame");
+    let text = screen_text(&mut state);
+    assert!(text.contains(&format!("≡ 2/3 {context}")), "{text}");
+
+    click_item(&mut state, 0);
+    let text = screen_text(&mut state);
+    assert!(text.contains("2 of 3 in a stack"), "{text}");
+}
+
+#[test]
 fn pull_request_item_dialog_heading_says_where_it_stands() {
     let mut pull = item("8");
     pull.own_pull_request = Some(crate::api::schema::WorkItemPullRequestInfo {
@@ -243,6 +281,7 @@ fn pull_request_item_dialog_heading_says_where_it_stands() {
         url: "https://github.com/o/r/pull/8".into(),
         is_draft: true,
         status: "draft".into(),
+        stack: None,
     });
     let mut state = shell_with(vec![pull]);
     state.compose(106, 30).expect("frame");
@@ -823,6 +862,7 @@ fn ticket_shows_a_status_line_per_service_and_its_pull_request_folds_in() {
         url: "https://github.com/o/r/pull/8".into(),
         is_draft: true,
         status: "draft".into(),
+        stack: None,
     });
     // The pull request's own inbox item shows with the ticket, not on its own.
     let mut pull = item("8");

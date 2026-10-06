@@ -59,6 +59,13 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
     }
     if let Some(pull_request) = &item.own_pull_request {
         heading.push_str(&format!(" · {}", pull_request.status));
+        if let Some(stack) = &pull_request.stack {
+            heading.push_str(&format!(
+                " · {} of {} in a stack",
+                stack.position,
+                stack.entries.len()
+            ));
+        }
     }
     if let Some(author) = &item.author {
         heading.push_str(&format!(" · @{author}"));
