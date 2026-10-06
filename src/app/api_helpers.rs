@@ -49,12 +49,16 @@ pub(super) fn encode_api_submission_parts(
     runtime: &crate::terminal::TerminalRuntime,
     text: &str,
 ) -> (Vec<u8>, Vec<u8>) {
-    let text = encode_api_text(runtime, text);
+    (encode_api_text(runtime, text), encode_api_enter(runtime))
+}
+
+/// The Enter that submits what is in an agent's input.
+pub(super) fn encode_api_enter(runtime: &crate::terminal::TerminalRuntime) -> Vec<u8> {
     let enter = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Enter,
         crossterm::event::KeyModifiers::NONE,
     );
-    (text, runtime.encode_terminal_key(enter.into()))
+    runtime.encode_terminal_key(enter.into())
 }
 
 pub(super) fn encode_api_submission(

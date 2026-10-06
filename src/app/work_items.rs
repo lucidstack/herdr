@@ -60,6 +60,12 @@ const AGENT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BRIEF_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// How long a briefed agent may stay idle before the brief counts as not submitted.
 const BRIEF_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a briefed agent may stay idle before Enter is pressed again. An agent still
+/// reading a long paste can take the first Enter as part of it, or as a newline, and leave
+/// the brief unsent in its input.
+const BRIEF_RESUBMIT_INTERVAL: Duration = Duration::from_secs(4);
+/// How many times Enter is pressed again before `BRIEF_START_TIMEOUT` gives up.
+const MAX_BRIEF_RESUBMITS: u8 = 2;
 /// How often a deferred worktree request is checked for its response.
 const RESPONSE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_AGENT_NAME_SUFFIX: usize = 9;
@@ -1657,6 +1663,7 @@ impl App {
                     job.brief_confirmation = Some(BriefConfirmation {
                         sent: now,
                         next_check: now + BRIEF_POLL_INTERVAL,
+                        resubmits: 0,
                     });
                 }
                 self.set_work_item_agent_step(
@@ -1692,9 +1699,16 @@ impl App {
     }
 
     /// A submitted prompt is only proof the text reached the pane. The step completes when the
-    /// agent is seen working (or asking for permission); an agent still idle after
-    /// `BRIEF_START_TIMEOUT` most likely has the brief sitting unsent in its input.
+    /// agent is seen working (or asking for permission). An agent that stays idle most likely
+    /// has the brief sitting unsent in its input, so Enter is pressed again every
+    /// `BRIEF_RESUBMIT_INTERVAL`, up to `MAX_BRIEF_RESUBMITS` times; one still idle after
+    /// `BRIEF_START_TIMEOUT` fails the step.
     fn confirm_work_item_brief(&mut self, job_id: u64, now: Instant) {
+        enum Outcome {
+            Settled(WorkItemStepStatus, Option<String>),
+            Resubmit(String),
+            Wait,
+        }
         let Some(job) = self.work_items.job(job_id) else {
             return;
         };
@@ -1704,47 +1718,77 @@ impl App {
         if confirmation.next_check > now {
             return;
         }
-        let started = job.agent_name.as_deref().is_some_and(|name| {
-            self.resolve_agent_target(name)
-                .ok()
-                .and_then(|target| {
-                    let workspace = self.state.workspaces.get(target.ws_idx)?;
-                    self.state
-                        .terminals
-                        .get(workspace.terminal_id(target.pane_id)?)
-                })
-                .is_some_and(|terminal| {
-                    matches!(
-                        terminal.state,
-                        crate::detect::AgentState::Working | crate::detect::AgentState::Blocked
-                    )
-                })
-        });
-        let outcome = if started {
-            Some((WorkItemStepStatus::Done, None))
-        } else if now.saturating_duration_since(confirmation.sent) >= BRIEF_START_TIMEOUT {
-            Some((
+        let agent_name = job.agent_name.clone();
+        let state = agent_name
+            .as_deref()
+            .and_then(|name| self.work_item_agent_state(name));
+        let idle_for = now.saturating_duration_since(confirmation.sent);
+        let outcome = match state {
+            Some(crate::detect::AgentState::Working | crate::detect::AgentState::Blocked) => {
+                Outcome::Settled(WorkItemStepStatus::Done, None)
+            }
+            _ if idle_for >= BRIEF_START_TIMEOUT => Outcome::Settled(
                 WorkItemStepStatus::Failed,
                 Some(format!(
                     "agent still idle {} s after the brief; check its input",
                     BRIEF_START_TIMEOUT.as_secs()
                 )),
-            ))
-        } else {
-            None
-        };
-        let Some(job) = self.work_items.job_mut(job_id) else {
-            return;
+            ),
+            Some(crate::detect::AgentState::Idle)
+                if confirmation.resubmits < MAX_BRIEF_RESUBMITS
+                    && idle_for
+                        >= BRIEF_RESUBMIT_INTERVAL * (u32::from(confirmation.resubmits) + 1) =>
+            {
+                match agent_name {
+                    Some(name) => Outcome::Resubmit(name),
+                    None => Outcome::Wait,
+                }
+            }
+            _ => Outcome::Wait,
         };
         match outcome {
-            Some((status, detail)) => {
-                job.brief_confirmation = None;
-                self.set_work_item_agent_step(job_id, status, detail);
-            }
-            None => {
-                if let Some(confirmation) = job.brief_confirmation.as_mut() {
-                    confirmation.next_check = now + BRIEF_POLL_INTERVAL;
+            Outcome::Settled(status, detail) => {
+                if let Some(job) = self.work_items.job_mut(job_id) {
+                    job.brief_confirmation = None;
                 }
+                self.set_work_item_agent_step(job_id, status, detail);
+                return;
+            }
+            Outcome::Resubmit(name) => {
+                self.press_work_item_agent_enter(&name);
+                if let Some(confirmation) = self
+                    .work_items
+                    .job_mut(job_id)
+                    .and_then(|job| job.brief_confirmation.as_mut())
+                {
+                    confirmation.resubmits += 1;
+                }
+            }
+            Outcome::Wait => {}
+        }
+        if let Some(confirmation) = self
+            .work_items
+            .job_mut(job_id)
+            .and_then(|job| job.brief_confirmation.as_mut())
+        {
+            confirmation.next_check = now + BRIEF_POLL_INTERVAL;
+        }
+    }
+
+    /// Presses Enter in the agent's pane, for a brief left unsent in its input.
+    fn press_work_item_agent_enter(&self, agent_name: &str) {
+        let Some(runtime) = self
+            .resolve_agent_target(agent_name)
+            .ok()
+            .and_then(|target| self.lookup_runtime_sender(target.ws_idx, target.pane_id))
+        else {
+            return;
+        };
+        let enter = crate::app::api_helpers::encode_api_enter(runtime);
+        match runtime.try_send_bytes(bytes::Bytes::from(enter)) {
+            Ok(()) => tracing::info!(agent = agent_name, "pressed enter again for an idle brief"),
+            Err(err) => {
+                tracing::warn!(agent = agent_name, %err, "failed to press enter for a brief")
             }
         }
     }
@@ -3225,6 +3269,7 @@ mod tests {
             Some(super::BriefConfirmation {
                 sent,
                 next_check: sent,
+                resubmits: 0,
             });
         app.set_work_item_agent_step(job_id, WorkItemStepStatus::Running, None);
     }
@@ -3267,6 +3312,51 @@ mod tests {
         let (status, detail) = brief_step(&mut app);
         assert_eq!(status, WorkItemStepStatus::Failed);
         assert!(detail.is_some_and(|detail| detail.contains("still idle")));
+    }
+
+    #[tokio::test]
+    async fn an_idle_briefed_agent_gets_enter_pressed_again_until_it_starts() {
+        use bytes::Bytes;
+
+        let Briefing {
+            mut app,
+            job_id,
+            terminal_id,
+            mut pty_rx,
+            ..
+        } = briefing();
+        let sent = Instant::now();
+        await_confirmation(&mut app, job_id, sent);
+        let mut enters_by = |app: &mut App, at: Duration| {
+            app.confirm_work_item_brief(job_id, sent + at);
+            std::iter::from_fn(|| pty_rx.try_recv().ok()).collect::<Vec<_>>()
+        };
+
+        assert!(enters_by(&mut app, Duration::from_secs(1)).is_empty());
+        let interval = super::BRIEF_RESUBMIT_INTERVAL;
+        assert_eq!(
+            enters_by(&mut app, interval),
+            vec![Bytes::from_static(b"\r")]
+        );
+        assert!(enters_by(&mut app, interval + Duration::from_secs(1)).is_empty());
+        assert_eq!(
+            enters_by(&mut app, interval * 2),
+            vec![Bytes::from_static(b"\r")]
+        );
+        // Enter is pressed again only so many times, however long the agent stays idle.
+        assert!(enters_by(&mut app, interval * 3).is_empty());
+        assert_eq!(brief_step(&mut app).0, WorkItemStepStatus::Running);
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Working,
+            );
+        assert!(enters_by(&mut app, interval * 3 + Duration::from_secs(1)).is_empty());
+        assert_eq!(brief_step(&mut app), (WorkItemStepStatus::Done, None));
     }
 
     #[test]
