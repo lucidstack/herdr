@@ -2,8 +2,8 @@
 //! combine them with the items' own state, and publishes `attention.changed`.
 //!
 //! Worked out only when something it depends on changed (an agent's status, a pane or
-//! workspace closing, the items themselves) or a finished turn's quiet period ends, never
-//! per render or per byte of output.
+//! workspace closing, the items themselves) or a running command reaches the stuck period,
+//! never per render or per byte of output.
 
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime};
@@ -40,7 +40,7 @@ impl App {
         }
     }
 
-    /// When a finished turn's quiet period ends and attention must be worked out again.
+    /// When a running command reaches the stuck period and attention must be worked out again.
     pub(crate) fn attention_deadline(&self) -> Option<Instant> {
         self.attention_schedule.recheck_at()
     }
@@ -172,8 +172,7 @@ impl App {
 
     /// Whether the agent in the pane `pane_id` of workspace `ws_idx`, attached to
     /// `terminal_id`, has a finished turn that needs you at `now`: the turn `agent.dismiss`
-    /// deals with. Not while the agent works or waits on you, within the quiet period after
-    /// its turn, nor once the turn was dealt with.
+    /// deals with. Not while the agent works or waits on you, nor once the turn was dealt with.
     pub(super) fn agent_turn_needs_you(
         &self,
         ws_idx: usize,
@@ -388,10 +387,11 @@ mod tests {
         assert_eq!(attention.kind, AttentionKind::Blocked);
         assert_eq!(attention.reason, "Allow?");
 
-        // Answered: the agent is idle, and its finished turn waits for the quiet period.
+        // Answered: the agent is idle after its turn, which needs you at once.
         report(&mut app, 1, PaneAgentState::Idle, None);
-        assert_eq!(list(&mut app).1[0].attention, None);
-        assert!(app.attention_deadline().is_some());
+        let attention = list(&mut app).1[0].attention.clone().expect("finished");
+        assert_eq!(attention.kind, AttentionKind::Finished);
+        assert_eq!(app.attention_deadline(), None);
 
         let pane_events: Vec<_> = attention_events(&hub)
             .into_iter()
@@ -401,7 +401,7 @@ mod tests {
             pane_events,
             vec![
                 (None, pane_public.clone(), Some(AttentionKind::Blocked)),
-                (None, pane_public, None),
+                (None, pane_public, Some(AttentionKind::Finished)),
             ]
         );
     }
@@ -513,22 +513,6 @@ mod tests {
     }
 
     #[test]
-    fn dismissing_a_turn_that_does_not_need_you_yet_changes_nothing() {
-        let (mut app, _hub) = app_with_item();
-        // The turn just ended: it needs you only once the pane was left alone for the quiet
-        // period, so there is nothing to deal with yet.
-        finish_turn_minutes_ago(&mut app, 1, 0);
-        assert_eq!(list(&mut app).1[0].attention, None);
-        assert!(is_ok(&dismiss(&mut app, 1)));
-
-        // Nothing was dismissed, so the turn needs you once that period is over.
-        let quiet_period = crate::work_items::attention::FINISHED_QUIET_PERIOD;
-        app.update_attention(Instant::now() + quiet_period + Duration::from_secs(1));
-        let attention = list(&mut app).1[0].attention.clone().expect("finished");
-        assert_eq!(attention.kind, AttentionKind::Finished);
-    }
-
-    #[test]
     fn dismissing_an_unknown_pane_is_not_found() {
         let (mut app, _hub) = app_with_item();
         let unknown = app.handle_api_request(request(Method::AgentDismiss(AgentTarget {
@@ -568,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_in_an_items_workspace_needs_you_once_one_command_ran_too_long_and_not_after() {
+    fn an_agent_in_an_items_workspace_is_stuck_once_one_command_ran_too_long_then_finished() {
         let (mut app, hub) = app_with_item();
         let item_id = Some("fake:a".to_string());
         let workspace_id = app.state.workspaces[0].id.clone();
@@ -589,8 +573,10 @@ mod tests {
         // The agent is in the item's workspace, so it is not listed on its own.
         assert!(list(&mut app).1.is_empty());
 
+        // The command ended with the turn: no longer stuck, the finished turn needs you instead.
         report(&mut app, 0, PaneAgentState::Idle, None);
-        assert_eq!(list(&mut app).0[0].attention, None);
+        let attention = list(&mut app).0[0].attention.clone().expect("finished");
+        assert_eq!(attention.kind, AttentionKind::Finished);
 
         assert_eq!(
             attention_events(&hub),
@@ -598,7 +584,7 @@ mod tests {
                 (item_id.clone(), None, Some(AttentionKind::New)),
                 (item_id.clone(), None, None),
                 (item_id.clone(), None, Some(AttentionKind::Stuck)),
-                (item_id, None, None),
+                (item_id, None, Some(AttentionKind::Finished)),
             ]
         );
     }
@@ -621,7 +607,8 @@ mod tests {
         assert_eq!(attention.pane_id, pane_public);
 
         report(&mut app, 1, PaneAgentState::Idle, None);
-        assert_eq!(list(&mut app).1[0].attention, None);
+        let attention = list(&mut app).1[0].attention.clone().expect("finished");
+        assert_eq!(attention.kind, AttentionKind::Finished);
 
         let pane_events: Vec<_> = attention_events(&hub)
             .into_iter()
@@ -631,7 +618,7 @@ mod tests {
             pane_events,
             vec![
                 (None, pane_public.clone(), Some(AttentionKind::Stuck)),
-                (None, pane_public, None),
+                (None, pane_public, Some(AttentionKind::Finished)),
             ]
         );
     }

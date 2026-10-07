@@ -3732,11 +3732,12 @@ mod tests {
 
         // That turn ended before the brief failed, so it does not count.
         assert_eq!(attention(&mut app), Some(AttentionKind::Failed));
-        // The agent working is not yet a turn taken; finishing one is.
+        // The agent working is not yet a turn taken; finishing one is, and that turn is what
+        // needs you now.
         set_state(&mut app, AgentState::Working);
         assert_eq!(attention(&mut app), Some(AttentionKind::Failed));
         set_state(&mut app, AgentState::Idle);
-        assert_eq!(attention(&mut app), None);
+        assert_eq!(attention(&mut app), Some(AttentionKind::Finished));
         assert_eq!(brief_step(&mut app).0, WorkItemStepStatus::Failed);
     }
 }
