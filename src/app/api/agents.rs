@@ -130,8 +130,8 @@ impl App {
 
     /// `agent.dismiss`: the agent's finished turn counts as dealt with, as if you had typed to
     /// its pane after it, so the `finished` attention for it clears. A blocked agent has to be
-    /// answered instead. An agent whose turn does not need you yet, because it works, ended
-    /// its turn within the quiet period, or was dealt with already, is left as it is.
+    /// answered instead. An agent whose turn does not need you, because it works or was dealt
+    /// with already, is left as it is.
     pub(super) fn handle_agent_dismiss(&mut self, id: String, target: AgentTarget) -> String {
         let resolved = match self.resolve_agent_target(&target.target) {
             Ok(resolved) => resolved,

@@ -125,7 +125,7 @@ The result also carries `replies`, always as an array: up to three replies the u
 {"id":"1","result":{"type":"agent_last_message","last_message":{"terminal_id":"term_1","pane_id":"w1:p1","agent":"claude","status":"available","text":"Both lamps are tagged. Should I file the logbook entry as well?","replies":["Yes, file it","Show me the entry first"],"stop_reason":"end_turn","timestamp":"2026-10-04T19:40:03.040Z","transcript_path":"/home/me/.claude/projects/app/session.jsonl"}}}
 ```
 
-`agent.dismiss` counts an agent's finished turn as dealt with, as if you had typed to its pane after it, so the `finished` attention of its [work item](/docs/work-items/) clears. It takes the same `target` as `agent.last_message` and answers `{"type":"ok"}`. An agent that is `blocked` has to be answered instead and fails with `agent_blocked`. One whose turn does not need you yet, because it is working, ended its turn less than two minutes ago, or was dealt with already, is left as it is and still answers `ok`. A target that is not an agent fails with `agent_not_found`, as for the other agent methods.
+`agent.dismiss` counts an agent's finished turn as dealt with, as if you had typed to its pane after it, so the `finished` attention of its [work item](/docs/work-items/) clears. It takes the same `target` as `agent.last_message` and answers `{"type":"ok"}`. An agent that is `blocked` has to be answered instead and fails with `agent_blocked`. One whose turn does not need you, because it is working or was dealt with already, is left as it is and still answers `ok`. A target that is not an agent fails with `agent_not_found`, as for the other agent methods.
 
 ```json
 {"id":"1","method":"agent.dismiss","params":{"target":"w1:p1"}}

@@ -7,10 +7,6 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::api::schema::{AttentionInfo, AttentionKind};
 use crate::detect::AgentState;
 
-/// How long a finished agent's pane must be left alone before it needs you, so a turn
-/// that ends while you are at the desk is not reported.
-pub(crate) const FINISHED_QUIET_PERIOD: Duration = Duration::from_secs(120);
-
 /// A need before it is tracked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Need {
@@ -68,8 +64,8 @@ pub(crate) struct AgentVerdict {
     /// When the agent's latest turn ended, while it sits idle after one, whether or not you
     /// dealt with it since.
     pub turn_finished_at: Option<Instant>,
-    /// When the verdict may change without any new signal: a finished turn's quiet period
-    /// ending, or a running command having run for the stuck period.
+    /// When the verdict may change without any new signal: a running command having run for
+    /// the stuck period.
     pub recheck_at: Option<Instant>,
 }
 
@@ -82,9 +78,9 @@ impl AgentVerdict {
 }
 
 /// Blocked: needs you. Working: needs you once one command has been running for
-/// `stuck_after`, by the wall clock `wall_now`. Idle after a turn: needs you once the pane was
-/// left alone for `FINISHED_QUIET_PERIOD` since the turn ended; input after the turn ended, or
-/// dismissing the turn, means you already dealt with it.
+/// `stuck_after`, by the wall clock `wall_now`. Idle after a turn: needs you at once; input
+/// after the turn ended, or dismissing the turn, means you already dealt with it. Whether you
+/// are at the desk is for whoever alerts you to decide, not for what needs you.
 pub(crate) fn agent_verdict(
     signal: &AgentSignal<'_>,
     now: Instant,
@@ -137,13 +133,6 @@ pub(crate) fn agent_verdict(
                     .is_some_and(|input| input > finished_at);
             if dealt_with {
                 return turn;
-            }
-            let due = finished_at + FINISHED_QUIET_PERIOD;
-            if now < due {
-                return AgentVerdict {
-                    recheck_at: Some(due),
-                    ..turn
-                };
             }
             AgentVerdict {
                 need: Some(Need {
@@ -364,8 +353,8 @@ pub(crate) struct Update {
     pub items_changed: bool,
 }
 
-/// When attention must be worked out again: something it depends on changed, a finished turn's
-/// quiet period ends, or a command has run for the stuck period.
+/// When attention must be worked out again: something it depends on changed, or a command has
+/// run for the stuck period.
 #[derive(Debug)]
 pub(crate) struct Schedule {
     dirty: bool,
@@ -478,24 +467,21 @@ mod tests {
     }
 
     #[test]
-    fn finished_turn_needs_you_only_after_the_pane_was_left_alone() {
+    fn finished_turn_needs_you_at_once_until_the_pane_gets_input() {
         let finished_at = Instant::now();
         let mut idle = signal(AgentState::Idle);
         idle.turn_finished_at = Some(finished_at);
         idle.last_input_at = Some(finished_at - Duration::from_secs(5));
 
-        let early = verdict_of(&idle, finished_at + Duration::from_secs(60));
-        assert_eq!(early.need, None);
-        assert_eq!(early.recheck_at, Some(finished_at + FINISHED_QUIET_PERIOD));
-
-        let due = verdict_of(&idle, finished_at + FINISHED_QUIET_PERIOD);
+        let ended = verdict_of(&idle, finished_at);
         assert_eq!(
-            due.need.map(|need| need.kind),
+            ended.need.map(|need| need.kind),
             Some(AttentionKind::Finished)
         );
+        assert_eq!(ended.recheck_at, None);
 
-        idle.last_input_at = Some(finished_at + Duration::from_secs(30));
-        let touched = verdict_of(&idle, finished_at + Duration::from_secs(600));
+        idle.last_input_at = Some(finished_at + Duration::from_secs(1));
+        let touched = verdict_of(&idle, finished_at + Duration::from_secs(1));
         assert_eq!(touched.need, None);
         assert_eq!(touched.recheck_at, None);
     }
@@ -633,7 +619,7 @@ mod tests {
         let finished_at = Instant::now();
         let mut idle = signal(AgentState::Idle);
         idle.turn_finished_at = Some(finished_at);
-        let late = finished_at + FINISHED_QUIET_PERIOD + Duration::from_secs(1);
+        let late = finished_at + Duration::from_secs(1);
         assert_eq!(
             verdict_of(&idle, late).need.map(|need| need.kind),
             Some(AttentionKind::Finished)
@@ -648,9 +634,7 @@ mod tests {
         let next = finished_at + Duration::from_secs(300);
         idle.turn_finished_at = Some(next);
         assert_eq!(
-            verdict_of(&idle, next + FINISHED_QUIET_PERIOD)
-                .need
-                .map(|need| need.kind),
+            verdict_of(&idle, next).need.map(|need| need.kind),
             Some(AttentionKind::Finished)
         );
     }
@@ -663,8 +647,8 @@ mod tests {
         let mut idle = signal(AgentState::Idle);
         idle.turn_finished_at = Some(finished_at);
 
-        // Within the quiet period, once it is due, and after you dealt with it.
-        assert_eq!(turn(&idle, finished_at + seconds(10)), Some(finished_at));
+        // As soon as it ends, later on, and after you dealt with it.
+        assert_eq!(turn(&idle, finished_at), Some(finished_at));
         assert_eq!(turn(&idle, finished_at + seconds(300)), Some(finished_at));
         idle.last_input_at = Some(finished_at + seconds(1));
         assert_eq!(turn(&idle, finished_at + seconds(300)), Some(finished_at));
