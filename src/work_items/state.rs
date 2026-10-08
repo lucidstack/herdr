@@ -246,6 +246,7 @@ impl WorkItem {
             linked_ticket: self.linked_ticket.clone(),
             folded_into,
             attention,
+            project: None,
         }
     }
 
@@ -602,6 +603,15 @@ impl WorkItemsState {
         });
         self.source_errors
             .retain(|source_id, _| source_ids.contains(source_id.as_str()));
+        before != self.items.len()
+    }
+
+    /// Drops the items `matches` picks, except "Pick next" rows and items a workspace hangs
+    /// off: work already started stays. Returns whether any went.
+    pub(crate) fn drop_unworked(&mut self, matches: impl Fn(&WorkItem) -> bool) -> bool {
+        let before = self.items.len();
+        self.items
+            .retain(|item| item.is_pick_next || item.workspace_id.is_some() || !matches(item));
         before != self.items.len()
     }
 

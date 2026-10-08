@@ -127,6 +127,10 @@ pub enum Method {
     WorkItemImage(WorkItemImageParams),
     #[serde(rename = "work_item.pick_next_start")]
     WorkItemPickNextStart(WorkItemPickNextStartParams),
+    #[serde(rename = "work_item.ignore_project")]
+    WorkItemIgnoreProject(WorkItemProject),
+    #[serde(rename = "work_item.unignore_project")]
+    WorkItemUnignoreProject(WorkItemProject),
     #[serde(rename = "tab.create")]
     TabCreate(TabCreateParams),
     #[serde(rename = "tab.list")]

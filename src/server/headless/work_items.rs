@@ -57,6 +57,7 @@ impl HeadlessServer {
                 items: app.work_items.projection_items(),
                 pick_next: app.work_items.pick_next_info(),
                 repositories: app.work_items.repository_infos(),
+                ignored_projects: app.work_items.ignored_projects().to_vec(),
             },
         )
         .map_err(|err| err.to_string())?;

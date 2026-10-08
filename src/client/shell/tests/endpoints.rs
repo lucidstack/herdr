@@ -735,6 +735,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         linked_ticket: None,
         folded_into: None,
         attention: None,
+        project: None,
     };
     let projection = |boot: &str, items| EndpointWorkItemsProjection {
         boot_id: boot.into(),
@@ -747,6 +748,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         items,
         pick_next: Default::default(),
         repositories: Vec::new(),
+        ignored_projects: Vec::new(),
     };
     let (mut state, remote) = state_with_remote();
     let local_boot = snapshot().boot_id;

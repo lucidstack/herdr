@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::api::schema::{
     AttentionInfo, AttentionKind, WorkItemActionOutcome, WorkItemInfo, WorkItemPhase,
-    WorkItemProvisioningInfo, WorkItemSourceInfo,
+    WorkItemProject, WorkItemProvisioningInfo, WorkItemSourceInfo,
 };
 use crate::config::{GithubRepoConfig, WorkItemsConfig};
 
@@ -246,6 +246,8 @@ pub(crate) struct WorkItems {
     pick_next: PickNextState,
     /// Clones linked from items, used like those mapped in the config.
     linked_clones: Vec<LinkedClone>,
+    /// Repositories and tracker projects whose items stay out of this session's inbox.
+    ignored_projects: Vec<WorkItemProject>,
     /// Work items moved focus to a workspace outside an API request, e.g. a new
     /// "Pick next" workspace; the server moves its shell clients there too.
     focus_requested: bool,
@@ -382,6 +384,7 @@ impl WorkItems {
             follow_ups: Vec::new(),
             pick_next: PickNextState::default(),
             linked_clones: Vec::new(),
+            ignored_projects: Vec::new(),
             focus_requested: false,
             repositories: Vec::new(),
             pull_request_lookup: LookupSchedule::new(Instant::now()),
@@ -420,6 +423,7 @@ impl WorkItems {
                 self.owned_worktrees = stored.worktrees;
                 self.pick_next = stored.pick_next;
                 self.linked_clones = stored.linked_clones;
+                self.ignored_projects = stored.ignored_projects;
                 if !self.linked_clones.is_empty() {
                     self.rebuild_sources();
                 }
@@ -599,6 +603,7 @@ impl WorkItems {
                 };
                 self.next_poll
                     .insert(source_id.clone(), now + source.poll_interval());
+                let result = result.map(|polled| self.without_ignored(source.as_ref(), polled));
                 let (changed, arrivals) = self.state.apply_poll(&source_id, result);
                 // One notice per poll: a first poll can report many items at once.
                 let notices = arrivals
@@ -1010,6 +1015,91 @@ impl WorkItems {
         Ok(())
     }
 
+    /// Repositories and tracker projects whose items stay out of this session's inbox.
+    pub(crate) fn ignored_projects(&self) -> &[WorkItemProject] {
+        &self.ignored_projects
+    }
+
+    /// Keeps `project`'s items out of this session's inbox from now on. Those already in it
+    /// go, unless a workspace hangs off them: work already started stays.
+    pub(crate) fn ignore_project(
+        &mut self,
+        project: &WorkItemProject,
+    ) -> Result<(), (&'static str, String)> {
+        let Some(source) = self.source(&project.source_id).cloned() else {
+            return Err((
+                "work_item_source_not_found",
+                format!("unknown work item source {}", project.source_id),
+            ));
+        };
+        let name = project.project.trim();
+        if name.is_empty() {
+            return Err(("invalid_params", "project must not be empty".into()));
+        }
+        if self.is_ignored(source.id(), Some(name)) {
+            return Ok(());
+        }
+        self.ignored_projects.push(WorkItemProject {
+            source_id: source.id().to_string(),
+            project: name.to_string(),
+        });
+        self.state.drop_unworked(|item| {
+            item.source_id == source.id()
+                && source
+                    .project_of(&item.external_id)
+                    .is_some_and(|of| of.eq_ignore_ascii_case(name))
+        });
+        self.changed();
+        Ok(())
+    }
+
+    /// Lets `project`'s items into this session's inbox again; its source is polled at once
+    /// so they come back without waiting for the next round.
+    pub(crate) fn unignore_project(&mut self, project: &WorkItemProject) {
+        let name = project.project.trim();
+        let before = self.ignored_projects.len();
+        self.ignored_projects.retain(|ignored| {
+            ignored.source_id != project.source_id || !ignored.project.eq_ignore_ascii_case(name)
+        });
+        if self.ignored_projects.len() == before {
+            return;
+        }
+        if self.source(&project.source_id).is_some() {
+            self.next_poll
+                .insert(project.source_id.clone(), Instant::now());
+        }
+        self.changed();
+    }
+
+    /// Whether `project` of `source_id` is kept out of this session's inbox.
+    fn is_ignored(&self, source_id: &str, project: Option<&str>) -> bool {
+        project.is_some_and(|project| {
+            self.ignored_projects.iter().any(|ignored| {
+                ignored.source_id == source_id && ignored.project.eq_ignore_ascii_case(project)
+            })
+        })
+    }
+
+    /// `polled` without the items of ignored projects, except those already in the inbox
+    /// with a workspace: work already started is still followed to its end.
+    fn without_ignored(
+        &self,
+        source: &dyn WorkItemSource,
+        mut polled: Vec<SourceItem>,
+    ) -> Vec<SourceItem> {
+        if self.ignored_projects.is_empty() {
+            return polled;
+        }
+        polled.retain(|item| {
+            !self.is_ignored(source.id(), source.project_of(&item.external_id).as_deref())
+                || self
+                    .state
+                    .get(&state::item_key(source.id(), &item.external_id))
+                    .is_some_and(|existing| existing.workspace_id.is_some())
+        });
+        polled
+    }
+
     /// Marks a `Perform` choice as running: the item shows a spinner until the source stops
     /// reporting it. Fails while one is already running.
     pub(crate) fn begin_action(&mut self, key: &str, choice_id: &str) -> Result<(), &'static str> {
@@ -1165,14 +1255,21 @@ impl WorkItems {
 
     fn project(&self, item: &WorkItem, hosts: &HashMap<(String, u64), String>) -> WorkItemInfo {
         let (choices, reminder) = self.choices_and_reminder(item, hosts);
-        item.info(
-            choices,
-            reminder.map(|reminder| reminder.message),
-            self.folded_into(item, hosts),
-            self.attention
-                .get(&attention::Subject::Item(item.key.clone()))
-                .cloned(),
-        )
+        let project = (!item.is_pick_next)
+            .then(|| self.source(&item.source_id))
+            .flatten()
+            .and_then(|source| source.project_of(&item.external_id));
+        WorkItemInfo {
+            project,
+            ..item.info(
+                choices,
+                reminder.map(|reminder| reminder.message),
+                self.folded_into(item, hosts),
+                self.attention
+                    .get(&attention::Subject::Item(item.key.clone()))
+                    .cloned(),
+            )
+        }
     }
 
     /// The item whose linked pull request `item` is, if another item shows it.
@@ -1922,6 +2019,7 @@ impl WorkItems {
                 &self.owned_worktrees,
                 &self.pick_next,
                 &self.linked_clones,
+                &self.ignored_projects,
             );
         }
     }
@@ -3121,5 +3219,111 @@ projects = [
         // Through the one still under review, not once per item.
         assert_eq!(kind("fake:b"), Some(AttentionKind::Blocked));
         assert_eq!(kind("fake:a"), None);
+    }
+
+    fn fake_project(project: &str) -> WorkItemProject {
+        WorkItemProject {
+            source_id: "fake".into(),
+            project: project.into(),
+        }
+    }
+
+    fn keys(items: &WorkItems) -> Vec<&str> {
+        let mut keys: Vec<&str> = items
+            .state
+            .items()
+            .iter()
+            .map(|item| item.key.as_str())
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn an_ignored_project_leaves_the_inbox_and_stays_out_of_later_polls() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        poll(&mut items, &["work/1", "personal/2"]);
+
+        items
+            .ignore_project(&fake_project("PERSONAL"))
+            .expect("ignored");
+        assert_eq!(keys(&items), ["fake:work/1"]);
+
+        let notices = poll(&mut items, &["work/1", "personal/2", "personal/3"]);
+        assert_eq!(keys(&items), ["fake:work/1"]);
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    #[test]
+    fn work_started_on_an_ignored_project_is_followed_to_its_end() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        poll(&mut items, &["personal/2"]);
+        items
+            .state
+            .get_mut("fake:personal/2")
+            .expect("item")
+            .workspace_id = Some("w1".into());
+
+        items
+            .ignore_project(&fake_project("personal"))
+            .expect("ignored");
+        poll(&mut items, &["personal/2"]);
+        assert_eq!(keys(&items), ["fake:personal/2"]);
+        assert!(!items.get("fake:personal/2").expect("item").resolved);
+
+        // Its source stops listing it: it resolves like any other.
+        poll(&mut items, &[]);
+        assert!(items.get("fake:personal/2").expect("item").resolved);
+    }
+
+    #[test]
+    fn an_unignored_project_comes_back_at_the_next_poll_which_is_due_at_once() {
+        let start = Instant::now();
+        let mut items = WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], start);
+        assert_eq!(items.take_due_polls(start).len(), 1);
+        poll(&mut items, &["personal/2"]);
+        items
+            .ignore_project(&fake_project("personal"))
+            .expect("ignored");
+        assert!(items.take_due_polls(Instant::now()).is_empty());
+
+        items.unignore_project(&fake_project("Personal"));
+        assert!(items.ignored_projects().is_empty());
+        assert_eq!(items.take_due_polls(Instant::now()).len(), 1);
+        poll(&mut items, &["personal/2"]);
+        assert_eq!(keys(&items), ["fake:personal/2"]);
+    }
+
+    #[test]
+    fn only_a_configured_source_and_a_named_project_can_be_ignored() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        let unknown = WorkItemProject {
+            source_id: "jira".into(),
+            project: "APP".into(),
+        };
+        assert_eq!(
+            items.ignore_project(&unknown).map_err(|(code, _)| code),
+            Err("work_item_source_not_found")
+        );
+        assert_eq!(
+            items
+                .ignore_project(&fake_project("  "))
+                .map_err(|(code, _)| code),
+            Err("invalid_params")
+        );
+        assert!(items.ignored_projects().is_empty());
+    }
+
+    #[test]
+    fn items_report_the_project_they_belong_to() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        poll(&mut items, &["work/1", "loose"]);
+        let project = |key: &str| items.item_info(key).expect("item").project;
+        assert_eq!(project("fake:work/1").as_deref(), Some("work"));
+        assert_eq!(project("fake:loose"), None);
     }
 }

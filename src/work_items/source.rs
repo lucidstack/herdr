@@ -293,6 +293,11 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn remove_on_resolved(&self, item: &WorkItem) -> bool;
     /// Pure: notification text when an item arrives or is requested again.
     fn arrival_notice(&self, item: &SourceItem) -> (String, Option<String>);
+    /// Pure: the repository or tracker project the item with `external_id` belongs to, e.g.
+    /// `owner/name` or `APP`, compared without regard to case. `None` when it belongs to none.
+    fn project_of(&self, _external_id: &str) -> Option<String> {
+        None
+    }
     /// Blocking; background thread only. Searches the tracker with its own query syntax
     /// (JQL for Jira, GitHub search syntax for GitHub), read-only.
     fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String>;

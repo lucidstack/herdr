@@ -58,6 +58,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         linked_ticket: None,
         folded_into: None,
         attention: None,
+        project: Some("o/r".into()),
     }
 }
 
@@ -73,6 +74,7 @@ pub(super) fn projection(revision: u64, items: Vec<WorkItemInfo>) -> EndpointWor
         items,
         pick_next: Default::default(),
         repositories: Vec::new(),
+        ignored_projects: Vec::new(),
     }
 }
 
@@ -763,6 +765,127 @@ fn inbox_keybinding_lists_items_for_the_keyboard() {
     assert!(matches!(
         state.overlay.as_ref(),
         Some(ClientShellOverlay::WorkItem(overlay)) if overlay.item.item_id == "github:o/r#7"
+    ));
+}
+
+#[test]
+fn item_context_menu_ignores_the_items_project() {
+    let mut state = shell_with(vec![item("7")]);
+    state.compose(106, 30).expect("frame");
+    let rect = state.hits.work_items[0].rect;
+    mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Right),
+        rect.x + 2,
+        rect.y,
+    );
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    let ignore = menu
+        .items()
+        .iter()
+        .position(|entry| entry.label == "Ignore o/r in this session")
+        .expect("ignoring offered");
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[ignore];
+    let input = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(matches!(
+        endpoint_methods(&input)[..],
+        [Method::WorkItemIgnoreProject(project)]
+            if project.source_id == "github" && project.project == "o/r"
+    ));
+}
+
+#[test]
+fn an_item_without_a_project_offers_no_ignoring() {
+    let mut loose = item("7");
+    loose.project = None;
+    let mut state = shell_with(vec![loose]);
+    state.compose(106, 30).expect("frame");
+    assert!(state.open_work_item_context_menu("github:o/r#7", 2, 2));
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("item menu opens");
+    };
+    assert!(!menu
+        .items()
+        .iter()
+        .any(|entry| entry.label.starts_with("Ignore")));
+    state.overlay = None;
+    state.open_inbox_overlay();
+    assert!(endpoint_methods(&state.handle_input_bytes(b"x")).is_empty());
+}
+
+#[test]
+fn inbox_lists_ignored_projects_last_and_lets_them_in_again() {
+    let mut state = shell_with(Vec::new());
+    let mut with_ignored = projection(2, vec![item("7")]);
+    with_ignored.ignored_projects = vec![crate::api::schema::WorkItemProject {
+        source_id: "github".into(),
+        project: "o/personal".into(),
+    }];
+    state.set_endpoint_work_items(&ClientEndpointId::Local, with_ignored);
+    state.open_inbox_overlay();
+    let text = screen_text(&mut state);
+    assert!(
+        text.lines()
+            .any(|line| line.contains("o/personal") && line.contains("ignored here")),
+        "{text}"
+    );
+
+    let ignore = state.handle_input_bytes(b"x");
+    assert!(matches!(
+        endpoint_methods(&ignore)[..],
+        [Method::WorkItemIgnoreProject(project)] if project.project == "o/r"
+    ));
+    state.handle_input_bytes(b"j");
+    let unignore = state.handle_input_bytes(b"u");
+    assert!(matches!(
+        endpoint_methods(&unignore)[..],
+        [Method::WorkItemUnignoreProject(project)]
+            if project.source_id == "github" && project.project == "o/personal"
+    ));
+}
+
+#[test]
+fn clicking_an_ignored_project_offers_to_stop_ignoring_it() {
+    let mut state = shell_with(Vec::new());
+    let mut with_ignored = projection(2, Vec::new());
+    with_ignored.ignored_projects = vec![crate::api::schema::WorkItemProject {
+        source_id: "github".into(),
+        project: "o/personal".into(),
+    }];
+    state.set_endpoint_work_items(&ClientEndpointId::Local, with_ignored);
+    state.open_inbox_overlay();
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.overlay_choice_rows[0];
+    let click = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 2,
+        row.y,
+    );
+    assert!(endpoint_methods(&click).is_empty());
+    let Some(ClientShellOverlay::ContextMenu(menu)) = state.overlay.as_ref() else {
+        panic!("menu opens");
+    };
+    assert_eq!(menu.items()[0].label, "Stop ignoring o/personal");
+    state.compose(106, 30).expect("frame");
+    let (menu_row, _) = state.hits.context_menu_rows[0];
+    let stop = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        menu_row.x + 1,
+        menu_row.y,
+    );
+    assert!(matches!(
+        endpoint_methods(&stop)[..],
+        [Method::WorkItemUnignoreProject(project)] if project.project == "o/personal"
     ));
 }
 

@@ -398,14 +398,14 @@ fn render_checklist(
     })
 }
 
-/// Keyboard list of every item, hidden ones last.
+/// Keyboard list of every item, hidden ones last, then the ignored projects.
 pub(super) fn render_inbox_overlay(
     b: &mut Buffer,
     o: &ClientInboxOverlay,
     p: &Palette,
 ) -> Option<OverlayRender> {
     let max_rows = b.area.height.saturating_sub(8).max(1);
-    let list_rows = (o.items.len().max(1) as u16).min(max_rows);
+    let list_rows = (o.len().max(1) as u16).min(max_rows);
     let q = popup(b.area, WIDTH, list_rows + 4)?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
     put_text(
@@ -419,7 +419,7 @@ pub(super) fn render_inbox_overlay(
             .bg(p.panel_bg)
             .add_modifier(Modifier::BOLD),
     );
-    if o.items.is_empty() {
+    if o.len() == 0 {
         put_text(
             b,
             i.x,
@@ -484,12 +484,53 @@ pub(super) fn render_inbox_overlay(
         }
         menu_rows.push((rect, index));
     }
+    let shown = first..(first + usize::from(list_rows)).min(o.len());
+    for (index, ignored) in
+        shown.filter_map(|index| Some((index, o.ignored.get(index.checked_sub(o.items.len())?)?)))
+    {
+        let y = i.y + 1 + (index - first) as u16;
+        let rect = Rect::new(i.x, y, i.width, 1);
+        let base = if index == o.highlighted {
+            Style::default().fg(contrast(p)).bg(p.accent)
+        } else {
+            Style::default().fg(p.overlay0).bg(p.panel_bg)
+        };
+        b.set_style(rect, base);
+        let x = put_segment(b, i.x + 1, y, i.right(), "⊘", base);
+        let x = put_segment(
+            b,
+            x.saturating_add(1),
+            y,
+            i.right(),
+            &ignored.project.project,
+            base.add_modifier(Modifier::BOLD),
+        );
+        let state = "  ignored here";
+        let label_end = i.right().saturating_sub(display_width(state) + 1);
+        put_segment(
+            b,
+            x,
+            y,
+            label_end,
+            &format!("  {}", ignored.source_label),
+            base,
+        );
+        put_segment(b, label_end, y, i.right(), state, base);
+        menu_rows.push((rect, index));
+    }
+    let hint = match o.items.get(o.highlighted) {
+        None if !o.ignored.is_empty() => " ↑/↓ select · u stop ignoring · m more · esc close",
+        Some(item) if is_hidden(item) => {
+            " ↑/↓ select · ↵ open · m more · u show again · x ignore project · esc close"
+        }
+        _ => " ↵ open · m more · d dismiss · s snooze 1h · x ignore project · esc close",
+    };
     put_text(
         b,
         i.x,
         i.bottom().saturating_sub(1),
         i.width,
-        " ↑/↓ select · ↵ open · m more · d dismiss · s snooze 1 h · u show again · esc close",
+        hint,
         Style::default().fg(p.overlay0).bg(p.panel_bg),
     );
     Some(OverlayRender {

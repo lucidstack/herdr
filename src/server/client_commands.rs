@@ -45,10 +45,12 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.rename",
     "work_item.choose",
     "work_item.hide",
+    "work_item.ignore_project",
     "work_item.link",
     "work_item.mark_seen",
     "work_item.pick_next_start",
     "work_item.unhide",
+    "work_item.unignore_project",
     "workspace.close",
     "workspace.create",
     "workspace.focus",
@@ -330,6 +332,17 @@ mod tests {
         assert_eq!(
             actual.remove("work_item.pick_next_start").as_deref(),
             Some("69815e02e2976cc6f9808ac614f487736e9eab895b93912532afe1f00e50fdbd")
+        );
+        // A client offers ignoring only for an item whose projection names its `project`, and
+        // lists ignored projects only from `ignored_projects`, neither of which a server
+        // without these methods sends.
+        assert_eq!(
+            actual.remove("work_item.ignore_project").as_deref(),
+            Some("e9086facb37a03de13091bbd37c270e5658bcb4cd79832caa58872b3422ef731")
+        );
+        assert_eq!(
+            actual.remove("work_item.unignore_project").as_deref(),
+            Some("3ed019af10723c42a3446628555d2ec11b2923f6699788db09cd8564fe6b8ccf")
         );
 
         assert_eq!(

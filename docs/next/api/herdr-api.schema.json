@@ -1615,6 +1615,13 @@
             "phase": {
               "$ref": "#/schemas/event/$defs/WorkItemPhase"
             },
+            "project": {
+              "description": "The repository or tracker project the item belongs to, e.g. `owner/name` or `APP`:\nwhat `work_item.ignore_project` keeps out of this session's inbox.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "provisioning": {
               "anyOf": [
                 {
@@ -5549,6 +5556,22 @@
           ],
           "type": "object"
         },
+        "WorkItemProject": {
+          "description": "A repository or tracker project of a source, e.g. `owner/name` on GitHub or `APP` in\nJira. Items of an ignored one stay out of this session's inbox.",
+          "properties": {
+            "project": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "project"
+          ],
+          "type": "object"
+        },
         "WorkItemSearchParams": {
           "properties": {
             "query": {
@@ -6562,6 +6585,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemPickNextStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.ignore_project",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemProject"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.unignore_project",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemProject"
             }
           },
           "required": [
@@ -13047,6 +13102,14 @@
                   },
                   "type": "array"
                 },
+                "ignored_projects": {
+                  "default": [],
+                  "description": "Repositories and tracker projects kept out of this session's inbox.",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/WorkItemProject"
+                  },
+                  "type": "array"
+                },
                 "items": {
                   "items": {
                     "$ref": "#/schemas/success_response/$defs/WorkItemInfo"
@@ -13739,6 +13802,13 @@
             "phase": {
               "$ref": "#/schemas/success_response/$defs/WorkItemPhase"
             },
+            "project": {
+              "description": "The repository or tracker project the item belongs to, e.g. `owner/name` or `APP`:\nwhat `work_item.ignore_project` keeps out of this session's inbox.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "provisioning": {
               "anyOf": [
                 {
@@ -13888,6 +13958,22 @@
               ]
             }
           },
+          "type": "object"
+        },
+        "WorkItemProject": {
+          "description": "A repository or tracker project of a source, e.g. `owner/name` on GitHub or `APP` in\nJira. Items of an ignored one stay out of this session's inbox.",
+          "properties": {
+            "project": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "project"
+          ],
           "type": "object"
         },
         "WorkItemProvisioningInfo": {

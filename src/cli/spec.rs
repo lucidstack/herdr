@@ -310,6 +310,18 @@ fn work_item_command() -> Command {
                         .required(true),
                 ),
         )
+        .subcommand(
+            Command::new("ignore")
+                .about("Keep a repository or tracker project out of this session's inbox")
+                .arg(Arg::new("source_id").value_name("SOURCE").required(true))
+                .arg(Arg::new("project").value_name("PROJECT").required(true)),
+        )
+        .subcommand(
+            Command::new("unignore")
+                .about("Let an ignored repository or tracker project into the inbox again")
+                .arg(Arg::new("source_id").value_name("SOURCE").required(true))
+                .arg(Arg::new("project").value_name("PROJECT").required(true)),
+        )
 }
 
 fn tab_command() -> Command {

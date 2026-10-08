@@ -562,6 +562,10 @@ pub(super) enum ClientContextMenuAction {
     WorkItemDismiss,
     WorkItemUnhide,
     WorkItemLink,
+    /// Keep the item's repository or tracker project out of this session's inbox.
+    WorkItemIgnoreProject,
+    /// Let an ignored repository or tracker project into the inbox again.
+    StopIgnoringProject,
 }
 
 #[derive(Debug)]
@@ -598,7 +602,11 @@ pub(super) enum ClientContextMenuTarget {
         groups: Vec<WorkItemMenuGroup>,
         /// Where the item and its pull request open in the browser.
         links: Vec<WorkItemMenuLink>,
+        /// The item's repository or tracker project, when it can be ignored.
+        project: Option<String>,
     },
+    /// A repository or tracker project kept out of the inbox, listed so it can come back.
+    IgnoredProject(crate::api::schema::WorkItemProject),
 }
 
 /// Choices of one item offered straight from its menu.

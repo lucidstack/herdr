@@ -49,6 +49,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkItemLink(_)
             | Method::WorkItemAdd(_)
             | Method::WorkItemPickNextStart(_)
+            | Method::WorkItemIgnoreProject(_)
+            | Method::WorkItemUnignoreProject(_)
             | Method::TabCreate(_)
             | Method::TabFocus(_)
             | Method::TabRename(_)
