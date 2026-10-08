@@ -146,6 +146,7 @@ impl ClientContextMenuOverlay {
                 link_target,
                 groups,
                 links,
+                project,
                 ..
             } => {
                 for (group_index, group) in groups.iter().enumerate() {
@@ -186,6 +187,12 @@ impl ClientContextMenuOverlay {
                     menu.action("Snooze for 1 day", Action::WorkItemSnoozeDay);
                     menu.action("Dismiss", Action::WorkItemDismiss);
                 }
+                if let Some(project) = project {
+                    menu.action(
+                        format!("Ignore {project} in this session"),
+                        Action::WorkItemIgnoreProject,
+                    );
+                }
                 if workspace_id.is_some() {
                     menu.divide();
                     if *is_linked_worktree {
@@ -194,6 +201,12 @@ impl ClientContextMenuOverlay {
                         menu.action("Close workspace", Action::Close);
                     }
                 }
+            }
+            ClientContextMenuTarget::IgnoredProject(ignored) => {
+                menu.action(
+                    format!("Stop ignoring {}", ignored.project),
+                    Action::StopIgnoringProject,
+                );
             }
         }
         menu.rows
@@ -372,6 +385,14 @@ impl ClientShellState {
                 action,
                 outcome,
             ),
+            ClientContextMenuTarget::IgnoredProject(project) => {
+                if action == ClientContextMenuAction::StopIgnoringProject {
+                    self.push_endpoint_method(
+                        crate::api::schema::Method::WorkItemUnignoreProject(project),
+                        outcome,
+                    );
+                }
+            }
         }
         outcome.repaint = true;
     }

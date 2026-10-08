@@ -1,6 +1,6 @@
 use crate::api::schema::{
     EmptyParams, Method, WorkItemChooseParams, WorkItemHideParams, WorkItemLinkParams,
-    WorkItemSearchParams, WorkItemTarget, WorkItemTicketTarget,
+    WorkItemProject, WorkItemSearchParams, WorkItemTarget, WorkItemTicketTarget,
 };
 
 // Output is the JSON API response, like the other socket commands.
@@ -114,6 +114,26 @@ pub(super) fn run_work_item_command(args: &[String]) -> std::io::Result<i32> {
             ),
             _ => usage("herdr work-item add SOURCE KEY"),
         },
+        "ignore" => match rest {
+            [source_id, project] => send(
+                "cli:work-item:ignore",
+                Method::WorkItemIgnoreProject(WorkItemProject {
+                    source_id: source_id.clone(),
+                    project: project.clone(),
+                }),
+            ),
+            _ => usage("herdr work-item ignore SOURCE PROJECT"),
+        },
+        "unignore" => match rest {
+            [source_id, project] => send(
+                "cli:work-item:unignore",
+                Method::WorkItemUnignoreProject(WorkItemProject {
+                    source_id: source_id.clone(),
+                    project: project.clone(),
+                }),
+            ),
+            _ => usage("herdr work-item unignore SOURCE PROJECT"),
+        },
         "help" | "--help" | "-h" => {
             print_work_item_help();
             Ok(0)
@@ -165,6 +185,10 @@ fn print_work_item_help() {
     );
     eprintln!("  herdr work-item show SOURCE KEY       (e.g. jira TECH-123, github o/r#12)");
     eprintln!("  herdr work-item add SOURCE KEY        (fetches the ticket into the inbox)");
+    eprintln!(
+        "  herdr work-item ignore SOURCE PROJECT    (keeps e.g. github o/r or jira APP out of this session's inbox)"
+    );
+    eprintln!("  herdr work-item unignore SOURCE PROJECT");
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ use super::server::ServerCapabilities;
 use super::session::SessionSnapshot;
 use super::tabs::TabInfo;
 use super::work_items::{
-    AgentAttentionInfo, WorkItemImageInfo, WorkItemInfo, WorkItemPickNextInfo,
+    AgentAttentionInfo, WorkItemImageInfo, WorkItemInfo, WorkItemPickNextInfo, WorkItemProject,
     WorkItemRepositoryInfo, WorkItemSourceInfo, WorkItemTicketComment, WorkItemTicketInfo,
 };
 use super::workspaces::{WorkspaceDiffInfo, WorkspaceInfo};
@@ -314,6 +314,9 @@ pub enum ResponseResult {
         /// Agents in panes outside every item's workspace, so none goes unnoticed.
         #[serde(default)]
         agents: Vec<AgentAttentionInfo>,
+        /// Repositories and tracker projects kept out of this session's inbox.
+        #[serde(default)]
+        ignored_projects: Vec<WorkItemProject>,
     },
     WorkItemSearch {
         tickets: Vec<WorkItemTicketInfo>,

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ServerMessage;
 use crate::api::schema::{
-    WorkItemInfo, WorkItemPickNextInfo, WorkItemRepositoryInfo, WorkItemSourceInfo,
+    WorkItemInfo, WorkItemPickNextInfo, WorkItemProject, WorkItemRepositoryInfo, WorkItemSourceInfo,
 };
 
 pub const WORK_ITEMS_PROJECTION_KIND: &str = "endpoint.work-items.v1";
@@ -33,6 +33,9 @@ pub struct EndpointWorkItemsProjection {
     pub pick_next: WorkItemPickNextInfo,
     #[serde(default)]
     pub repositories: Vec<WorkItemRepositoryInfo>,
+    /// Repositories and tracker projects kept out of this session's inbox.
+    #[serde(default)]
+    pub ignored_projects: Vec<WorkItemProject>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +82,10 @@ mod tests {
                 path: "/src/app".into(),
                 label: "app".into(),
                 workspace_id: Some("w1".into()),
+            }],
+            ignored_projects: vec![WorkItemProject {
+                source_id: "github".into(),
+                project: "o/personal".into(),
             }],
         };
         let ServerMessage::EndpointControl { kind, data } =

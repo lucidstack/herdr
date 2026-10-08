@@ -622,6 +622,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::WorkItemImage(_) => "work_item.image",
         Method::WorkItemAdd(_) => "work_item.add",
         Method::WorkItemPickNextStart(_) => "work_item.pick_next_start",
+        Method::WorkItemIgnoreProject(_) => "work_item.ignore_project",
+        Method::WorkItemUnignoreProject(_) => "work_item.unignore_project",
         Method::TabCreate(_) => "tab.create",
         Method::TabList(_) => "tab.list",
         Method::TabGet(_) => "tab.get",

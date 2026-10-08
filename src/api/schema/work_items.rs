@@ -42,6 +42,14 @@ pub struct WorkItemHideParams {
     pub snooze_seconds: Option<u64>,
 }
 
+/// A repository or tracker project of a source, e.g. `owner/name` on GitHub or `APP` in
+/// Jira. Items of an ignored one stay out of this session's inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemProject {
+    pub source_id: String,
+    pub project: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItemSearchParams {
     /// Configured source to search, e.g. `github` or `jira`.
@@ -328,6 +336,10 @@ pub struct WorkItemInfo {
     /// Set while the item needs you, with the kind of need and why. Absent when it does not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<AttentionInfo>,
+    /// The repository or tracker project the item belongs to, e.g. `owner/name` or `APP`:
+    /// what `work_item.ignore_project` keeps out of this session's inbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 /// Why something needs you. Ordered from most to least urgent.

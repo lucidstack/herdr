@@ -1303,6 +1303,12 @@ impl WorkItemSource for JiraSource {
         )
     }
 
+    fn project_of(&self, external_id: &str) -> Option<String> {
+        external_id
+            .split_once('-')
+            .map(|(project, _)| project.to_string())
+    }
+
     fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {
         let reason = item.tracker_state.as_deref().unwrap_or("New ticket");
         Some(super::attention::Need::new(

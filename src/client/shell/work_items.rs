@@ -8,7 +8,7 @@ use super::*;
 use crate::api::schema::{
     Method, WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo,
     WorkItemChooseParams, WorkItemHideParams, WorkItemInfo, WorkItemLinkParams, WorkItemPhase,
-    WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
+    WorkItemProject, WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
     WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX,
 };
 use crate::client::endpoint::ClientEndpointId;
@@ -1132,7 +1132,40 @@ fn render_item_rows(
 pub(super) struct ClientInboxOverlay {
     /// Visible items first, then dismissed and snoozed ones.
     pub(super) items: Vec<WorkItemInfo>,
+    /// Listed after the items, so an ignored project can be let in again.
+    pub(super) ignored: Vec<IgnoredProjectRow>,
+    /// Over the items, then the ignored projects.
     pub(super) highlighted: usize,
+}
+
+/// A repository or tracker project kept out of the inbox, with its source's label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct IgnoredProjectRow {
+    pub(super) project: WorkItemProject,
+    /// E.g. "GitHub"; the source id when the source is no longer configured.
+    pub(super) source_label: String,
+}
+
+/// What a row of the inbox list is.
+enum InboxRow {
+    Item(Box<WorkItemInfo>),
+    Ignored(WorkItemProject),
+}
+
+impl ClientInboxOverlay {
+    fn row(&self, index: usize) -> Option<InboxRow> {
+        match self.items.get(index) {
+            Some(item) => Some(InboxRow::Item(Box::new(item.clone()))),
+            None => self
+                .ignored
+                .get(index - self.items.len())
+                .map(|row| InboxRow::Ignored(row.project.clone())),
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.items.len() + self.ignored.len()
+    }
 }
 
 fn inbox_order(projection: &EndpointWorkItemsProjection) -> Vec<WorkItemInfo> {
@@ -1144,6 +1177,21 @@ fn inbox_order(projection: &EndpointWorkItemsProjection) -> Vec<WorkItemInfo> {
         .partition(|item| !is_hidden(item));
     items.extend(hidden);
     items
+}
+
+fn ignored_rows(projection: &EndpointWorkItemsProjection) -> Vec<IgnoredProjectRow> {
+    projection
+        .ignored_projects
+        .iter()
+        .map(|project| IgnoredProjectRow {
+            source_label: projection
+                .sources
+                .iter()
+                .find(|source| source.source_id == project.source_id)
+                .map_or_else(|| project.source_id.clone(), |source| source.label.clone()),
+            project: project.clone(),
+        })
+        .collect()
 }
 
 impl ClientShellState {
@@ -1175,9 +1223,10 @@ impl ClientShellState {
         true
     }
 
-    fn local_items_in_inbox_order(&self) -> Option<Vec<WorkItemInfo>> {
+    fn local_inbox_rows(&self) -> Option<(Vec<WorkItemInfo>, Vec<IgnoredProjectRow>)> {
         let snapshot = self.snapshot.as_deref()?;
-        active_projection(&self.work_items, &self.active_endpoint_id, snapshot).map(inbox_order)
+        active_projection(&self.work_items, &self.active_endpoint_id, snapshot)
+            .map(|projection| (inbox_order(projection), ignored_rows(projection)))
     }
 
     /// A repository row: its main checkout's open workspace, or a new one there on
@@ -1244,10 +1293,11 @@ impl ClientShellState {
     }
 
     pub(super) fn open_inbox_overlay(&mut self) {
-        match self.local_items_in_inbox_order() {
-            Some(items) => {
+        match self.local_inbox_rows() {
+            Some((items, ignored)) => {
                 self.overlay = Some(ClientShellOverlay::Inbox(ClientInboxOverlay {
                     items,
+                    ignored,
                     highlighted: 0,
                 }));
             }
@@ -1259,18 +1309,24 @@ impl ClientShellState {
         if !matches!(self.overlay, Some(ClientShellOverlay::Inbox(_))) {
             return;
         }
-        let items = self.local_items_in_inbox_order().unwrap_or_default();
+        let (items, ignored) = self.local_inbox_rows().unwrap_or_default();
         if let Some(ClientShellOverlay::Inbox(inbox)) = self.overlay.as_mut() {
-            // Follow the highlighted item when the order changes.
-            let current = inbox
-                .items
-                .get(inbox.highlighted)
-                .map(|item| item.item_id.clone());
-            inbox.highlighted = current
-                .and_then(|id| items.iter().position(|item| item.item_id == id))
-                .unwrap_or(inbox.highlighted)
-                .min(items.len().saturating_sub(1));
+            // Follow the highlighted row when the order changes.
+            let followed = match inbox.row(inbox.highlighted) {
+                Some(InboxRow::Item(current)) => items
+                    .iter()
+                    .position(|item| item.item_id == current.item_id),
+                Some(InboxRow::Ignored(current)) => ignored
+                    .iter()
+                    .position(|row| row.project == current)
+                    .map(|index| items.len() + index),
+                None => None,
+            };
             inbox.items = items;
+            inbox.ignored = ignored;
+            inbox.highlighted = followed
+                .unwrap_or(inbox.highlighted)
+                .min(inbox.len().saturating_sub(1));
         }
     }
 
@@ -1284,8 +1340,8 @@ impl ClientShellState {
             return false;
         };
         outcome.repaint = true;
-        let last = inbox.items.len().saturating_sub(1);
-        let selected = inbox.items.get(inbox.highlighted).cloned();
+        let last = inbox.len().saturating_sub(1);
+        let selected = inbox.row(inbox.highlighted);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 inbox.highlighted = inbox.highlighted.saturating_sub(1)
@@ -1294,13 +1350,29 @@ impl ClientShellState {
                 inbox.highlighted = inbox.highlighted.saturating_add(1).min(last)
             }
             KeyCode::Esc => self.overlay = None,
-            _ => {
-                if let Some(item) = selected {
-                    self.inbox_item_key(key.code, item, outcome);
+            _ => match selected {
+                Some(InboxRow::Item(item)) => self.inbox_item_key(key.code, *item, outcome),
+                Some(InboxRow::Ignored(project)) => {
+                    self.inbox_ignored_key(key.code, project, outcome)
                 }
-            }
+                None => {}
+            },
         }
         true
+    }
+
+    /// Where the highlighted row of the inbox list is drawn, for a menu opened from it.
+    fn highlighted_inbox_row_point(&self) -> (u16, u16) {
+        self.hits
+            .overlay_choice_rows
+            .iter()
+            .find(|(_, index)| {
+                matches!(
+                    &self.overlay,
+                    Some(ClientShellOverlay::Inbox(inbox)) if inbox.highlighted == *index
+                )
+            })
+            .map_or((0, 0), |(rect, _)| (rect.x + 2, rect.y))
     }
 
     fn inbox_item_key(
@@ -1321,17 +1393,7 @@ impl ClientShellState {
                 self.activate_work_item(&item.item_id, outcome);
             }
             KeyCode::Right | KeyCode::Char('m') => {
-                let (x, y) = self
-                    .hits
-                    .overlay_choice_rows
-                    .iter()
-                    .find(|(_, index)| {
-                        matches!(
-                            &self.overlay,
-                            Some(ClientShellOverlay::Inbox(inbox)) if inbox.highlighted == *index
-                        )
-                    })
-                    .map_or((0, 0), |(rect, _)| (rect.x + 2, rect.y));
+                let (x, y) = self.highlighted_inbox_row_point();
                 self.open_work_item_context_menu(&item.item_id, x, y);
             }
             KeyCode::Char('d') if !is_hidden(&item) => {
@@ -1346,8 +1408,44 @@ impl ClientShellState {
                 }),
                 outcome,
             ),
+            KeyCode::Char('x') => {
+                if let Some(project) = item.project {
+                    self.push_endpoint_method(
+                        Method::WorkItemIgnoreProject(WorkItemProject {
+                            source_id: item.source_id,
+                            project,
+                        }),
+                        outcome,
+                    );
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Keys on an ignored project's row: `u` lets it in again, `m` opens its menu.
+    fn inbox_ignored_key(
+        &mut self,
+        code: KeyCode,
+        project: WorkItemProject,
+        outcome: &mut ClientShellInput,
+    ) {
+        match code {
+            KeyCode::Char('u') => {
+                self.push_endpoint_method(Method::WorkItemUnignoreProject(project), outcome)
+            }
+            KeyCode::Right | KeyCode::Char('m') => {
+                let (x, y) = self.highlighted_inbox_row_point();
+                self.open_ignored_project_menu(project, x, y);
+            }
+            _ => {}
+        }
+    }
+
+    fn open_ignored_project_menu(&mut self, project: WorkItemProject, x: u16, y: u16) {
+        self.overlay = Some(ClientShellOverlay::ContextMenu(
+            ClientContextMenuOverlay::new(ClientContextMenuTarget::IgnoredProject(project), x, y),
+        ));
     }
 
     pub(super) fn handle_inbox_overlay_click(
@@ -1373,14 +1471,19 @@ impl ClientShellState {
             return;
         };
         inbox.highlighted = index;
-        let Some(item_id) = inbox.items.get(index).map(|item| item.item_id.clone()) else {
-            return;
-        };
-        if right {
-            self.open_work_item_context_menu(&item_id, point.0, point.1);
-        } else {
-            self.overlay = None;
-            self.activate_work_item(&item_id, outcome);
+        match inbox.row(index) {
+            Some(InboxRow::Item(item)) if right => {
+                self.open_work_item_context_menu(&item.item_id, point.0, point.1);
+            }
+            Some(InboxRow::Item(item)) => {
+                self.overlay = None;
+                self.activate_work_item(&item.item_id, outcome);
+            }
+            // Nothing to open: either click offers to let it in again.
+            Some(InboxRow::Ignored(project)) => {
+                self.open_ignored_project_menu(project, point.0, point.1);
+            }
+            None => {}
         }
     }
 
@@ -1690,6 +1793,7 @@ impl ClientShellState {
                 .filter(|focused| item.workspace_id.as_deref() != Some(focused.as_str())),
             groups: menu_groups(item, pull_request),
             links: menu_links(item, pull_request, sources),
+            project: item.project.clone(),
         };
         self.overlay = Some(ClientShellOverlay::ContextMenu(
             ClientContextMenuOverlay::new(target, x, y),
@@ -1782,6 +1886,17 @@ impl ClientShellState {
             }
             ClientContextMenuAction::WorkItemUnhide => self
                 .push_endpoint_method(Method::WorkItemUnhide(WorkItemTarget { item_id }), outcome),
+            ClientContextMenuAction::WorkItemIgnoreProject => {
+                if let Some(project) = item.project {
+                    self.push_endpoint_method(
+                        Method::WorkItemIgnoreProject(WorkItemProject {
+                            source_id: item.source_id,
+                            project,
+                        }),
+                        outcome,
+                    );
+                }
+            }
             ClientContextMenuAction::RemoveWorktree | ClientContextMenuAction::Close => {
                 if let Some(workspace_id) = workspace_id {
                     // An item's workspace closes on its own, never as a group.

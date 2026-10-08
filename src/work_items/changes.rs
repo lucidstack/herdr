@@ -116,6 +116,7 @@ mod tests {
             linked_ticket: None,
             folded_into: None,
             attention: None,
+            project: None,
         }
     }
 

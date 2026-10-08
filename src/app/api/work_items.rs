@@ -1,6 +1,6 @@
 use crate::api::schema::{
     ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams,
-    WorkItemLinkParams, WorkItemPickNextStartParams, WorkItemTarget,
+    WorkItemLinkParams, WorkItemPickNextStartParams, WorkItemProject, WorkItemTarget,
 };
 use crate::app::App;
 
@@ -27,6 +27,7 @@ impl App {
                 pick_next: self.work_items.pick_next_info(),
                 repositories: self.work_items.repository_infos(),
                 agents: self.agents_outside_items(),
+                ignored_projects: self.work_items.ignored_projects().to_vec(),
             },
         )
     }
@@ -212,5 +213,31 @@ impl App {
             Ok(()) => encode_success(id, ResponseResult::Ok {}),
             Err((code, message)) => encode_error(id, code, message),
         }
+    }
+
+    pub(super) fn handle_work_item_ignore_project(
+        &mut self,
+        id: String,
+        params: WorkItemProject,
+    ) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        match self.work_items.ignore_project(&params) {
+            Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Err((code, message)) => encode_error(id, code, message),
+        }
+    }
+
+    pub(super) fn handle_work_item_unignore_project(
+        &mut self,
+        id: String,
+        params: WorkItemProject,
+    ) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        self.work_items.unignore_project(&params);
+        encode_success(id, ResponseResult::Ok {})
     }
 }

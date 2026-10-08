@@ -1142,6 +1142,16 @@ impl App {
                 self.sync_work_item_events();
                 return response;
             }
+            Method::WorkItemIgnoreProject(params) => {
+                let response = self.handle_work_item_ignore_project(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
+            Method::WorkItemUnignoreProject(params) => {
+                let response = self.handle_work_item_unignore_project(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
             Method::TabList(params) => return self.handle_tab_list(request.id, params),
             Method::TabGet(target) => return self.handle_tab_get(request.id, target),
             Method::TabCreate(params) => return self.handle_tab_create(request.id, params),

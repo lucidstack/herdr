@@ -9,6 +9,7 @@ use tracing::warn;
 use super::source::LinkedClone;
 use super::state::WorkItem;
 use super::{OwnedWorktree, PickNextState};
+use crate::api::schema::WorkItemProject;
 
 const STORE_VERSION: u32 = 1;
 
@@ -24,6 +25,9 @@ struct StoreFile {
     /// Clones linked from items, used like those mapped in the config.
     #[serde(default)]
     linked_clones: Vec<LinkedClone>,
+    /// Repositories and tracker projects kept out of this session's inbox.
+    #[serde(default)]
+    ignored_projects: Vec<WorkItemProject>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +37,7 @@ struct StoreFileRef<'a> {
     worktrees: &'a [OwnedWorktree],
     pick_next: &'a PickNextState,
     linked_clones: &'a [LinkedClone],
+    ignored_projects: &'a [WorkItemProject],
 }
 
 /// Persisted work-item state.
@@ -42,6 +47,7 @@ pub(crate) struct Stored {
     pub worktrees: Vec<OwnedWorktree>,
     pub pick_next: PickNextState,
     pub linked_clones: Vec<LinkedClone>,
+    pub ignored_projects: Vec<WorkItemProject>,
 }
 
 pub(crate) fn load(path: &Path) -> Stored {
@@ -59,6 +65,7 @@ pub(crate) fn load(path: &Path) -> Stored {
             worktrees: file.worktrees,
             pick_next: file.pick_next,
             linked_clones: file.linked_clones,
+            ignored_projects: file.ignored_projects,
         },
         Ok(file) => {
             warn!(
@@ -111,6 +118,7 @@ impl StoreWriter {
         worktrees: &[OwnedWorktree],
         pick_next: &PickNextState,
         linked_clones: &[LinkedClone],
+        ignored_projects: &[WorkItemProject],
     ) {
         match serde_json::to_string(&StoreFileRef {
             version: STORE_VERSION,
@@ -118,6 +126,7 @@ impl StoreWriter {
             worktrees,
             pick_next,
             linked_clones,
+            ignored_projects,
         }) {
             Ok(json) => {
                 let _ = self.tx.send(json);
@@ -212,6 +221,13 @@ mod tests {
         }
     }
 
+    fn ignored_project() -> WorkItemProject {
+        WorkItemProject {
+            source_id: "gh".into(),
+            project: "o/personal".into(),
+        }
+    }
+
     #[test]
     fn round_trip_keeps_persisted_fields_and_drops_transient_ones() {
         let path = temp_path("round-trip");
@@ -230,6 +246,7 @@ mod tests {
                 worktrees: &[worktree()],
                 pick_next: &pick_next,
                 linked_clones: &[linked_clone()],
+                ignored_projects: &[ignored_project()],
             })
             .expect("serialises"),
         )
@@ -255,6 +272,7 @@ mod tests {
                 worktrees: vec![worktree()],
                 pick_next,
                 linked_clones: vec![linked_clone()],
+                ignored_projects: vec![ignored_project()],
             }
         );
     }
@@ -270,6 +288,7 @@ mod tests {
                 worktrees: &[],
                 pick_next: &PickNextState::default(),
                 linked_clones: &[],
+                ignored_projects: &[],
             })
             .expect("serialises"),
         )

@@ -189,6 +189,7 @@ mod tests {
                     items: Vec::new(),
                     pick_next: Default::default(),
                     repositories: Vec::new(),
+                    ignored_projects: Vec::new(),
                 },
             )
             .unwrap()

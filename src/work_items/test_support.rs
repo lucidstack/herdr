@@ -320,6 +320,13 @@ impl WorkItemSource for FakeSource {
         ("Arrived".into(), Some(item.title.clone()))
     }
 
+    /// The part of the external id before its first `/`, if it has one.
+    fn project_of(&self, external_id: &str) -> Option<String> {
+        external_id
+            .split_once('/')
+            .map(|(project, _)| project.to_string())
+    }
+
     fn search(&self, _query: &str) -> Result<Vec<WorkItemTicketInfo>, String> {
         match self.search_error.lock().expect("fake source lock").clone() {
             Some(error) => Err(error),

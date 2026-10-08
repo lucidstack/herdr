@@ -3043,6 +3043,10 @@ impl WorkItemSource for GithubSource {
         )
     }
 
+    fn project_of(&self, external_id: &str) -> Option<String> {
+        parse_external_id(external_id).map(|(repo, _)| repo.to_string())
+    }
+
     fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {
         use crate::api::schema::AttentionKind;
         let event = Event::of(&item.external_id);
