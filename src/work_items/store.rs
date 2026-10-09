@@ -28,6 +28,10 @@ struct StoreFile {
     /// Repositories and tracker projects kept out of this session's inbox.
     #[serde(default)]
     ignored_projects: Vec<WorkItemProject>,
+    /// The number of the last local item made, which no later one may take again. Absent in
+    /// files written before local items existed.
+    #[serde(default)]
+    last_local_number: u64,
 }
 
 #[derive(Serialize)]
@@ -38,6 +42,7 @@ struct StoreFileRef<'a> {
     pick_next: &'a PickNextState,
     linked_clones: &'a [LinkedClone],
     ignored_projects: &'a [WorkItemProject],
+    last_local_number: u64,
 }
 
 /// Persisted work-item state.
@@ -48,6 +53,7 @@ pub(crate) struct Stored {
     pub pick_next: PickNextState,
     pub linked_clones: Vec<LinkedClone>,
     pub ignored_projects: Vec<WorkItemProject>,
+    pub last_local_number: u64,
 }
 
 pub(crate) fn load(path: &Path) -> Stored {
@@ -66,6 +72,7 @@ pub(crate) fn load(path: &Path) -> Stored {
             pick_next: file.pick_next,
             linked_clones: file.linked_clones,
             ignored_projects: file.ignored_projects,
+            last_local_number: file.last_local_number,
         },
         Ok(file) => {
             warn!(
@@ -119,6 +126,7 @@ impl StoreWriter {
         pick_next: &PickNextState,
         linked_clones: &[LinkedClone],
         ignored_projects: &[WorkItemProject],
+        last_local_number: u64,
     ) {
         match serde_json::to_string(&StoreFileRef {
             version: STORE_VERSION,
@@ -127,6 +135,7 @@ impl StoreWriter {
             pick_next,
             linked_clones,
             ignored_projects,
+            last_local_number,
         }) {
             Ok(json) => {
                 let _ = self.tx.send(json);
@@ -247,6 +256,7 @@ mod tests {
                 pick_next: &pick_next,
                 linked_clones: &[linked_clone()],
                 ignored_projects: &[ignored_project()],
+                last_local_number: 7,
             })
             .expect("serialises"),
         )
@@ -273,6 +283,7 @@ mod tests {
                 pick_next,
                 linked_clones: vec![linked_clone()],
                 ignored_projects: vec![ignored_project()],
+                last_local_number: 7,
             }
         );
     }
@@ -289,6 +300,7 @@ mod tests {
                 pick_next: &PickNextState::default(),
                 linked_clones: &[],
                 ignored_projects: &[],
+                last_local_number: 0,
             })
             .expect("serialises"),
         )
@@ -296,5 +308,28 @@ mod tests {
         let loaded = load(&path);
         let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
         assert_eq!(loaded, Stored::default());
+    }
+
+    #[test]
+    fn a_store_written_before_local_items_still_loads() {
+        let path = temp_path("before-local-items");
+        let mut file = serde_json::to_value(StoreFileRef {
+            version: STORE_VERSION,
+            items: &[item()],
+            worktrees: &[],
+            pick_next: &PickNextState::default(),
+            linked_clones: &[],
+            ignored_projects: &[],
+            last_local_number: 3,
+        })
+        .expect("serialises");
+        file.as_object_mut()
+            .expect("an object")
+            .remove("last_local_number");
+        write_atomically(&path, &file.to_string()).expect("writes");
+        let loaded = load(&path);
+        let _ = std::fs::remove_dir_all(path.parent().expect("parent"));
+        assert_eq!(loaded.items.len(), 1);
+        assert_eq!(loaded.last_local_number, 0);
     }
 }

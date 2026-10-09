@@ -1714,3 +1714,55 @@ fn right_click_menu_runs_a_choice_with_its_switches_at_their_defaults() {
     );
     assert_eq!(chosen_options(&input), None);
 }
+
+/// A local item as the server projects it: no context and no page, and Herdr's own choice.
+fn local_item(title: &str) -> WorkItemInfo {
+    WorkItemInfo {
+        item_id: "local:1".into(),
+        source_id: "local".into(),
+        context: String::new(),
+        title: title.into(),
+        author: None,
+        url: String::new(),
+        summary: None,
+        seen: true,
+        choices: vec![choice(
+            "done",
+            "Mark as done",
+            WorkItemChoiceAction::Perform,
+        )],
+        default_choice_id: None,
+        project: None,
+        ..item("1")
+    }
+}
+
+#[test]
+fn a_local_item_is_labelled_local_where_a_ticket_shows_its_reference() {
+    let mut state = shell_with(vec![local_item("Fix login")]);
+    let text = screen_text(&mut state);
+    let lines: Vec<&str> = text.lines().collect();
+    let title = lines
+        .iter()
+        .position(|line| line.contains("Fix login"))
+        .unwrap_or_else(|| panic!("title drawn: {text}"));
+    assert!(lines[title - 1].contains("Local"), "{text}");
+}
+
+#[test]
+fn a_local_items_dialog_offers_to_mark_it_done() {
+    let mut state = dialog_for(local_item("Fix login"));
+    let text = screen_text(&mut state);
+    assert!(text.contains("Mark as done"), "{text}");
+}
+
+#[test]
+fn a_local_items_menu_offers_its_choice_and_no_page_to_open() {
+    let state = state_with_item_menu(vec![local_item("Fix login")]);
+    let (labels, _) = menu_labels(&state);
+    assert!(labels.contains(&"Mark as done".to_string()), "{labels:?}");
+    assert!(
+        labels.iter().all(|label| !label.starts_with("Open ")),
+        "{labels:?}"
+    );
+}

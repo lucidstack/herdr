@@ -5486,6 +5486,26 @@
           ],
           "type": "object"
         },
+        "WorkItemCreateParams": {
+          "description": "A local item: work you name yourself, with no tracker behind it.",
+          "properties": {
+            "title": {
+              "description": "What the work is. Surrounding whitespace is trimmed; a blank title is an\n`invalid_title` error.",
+              "type": "string"
+            },
+            "workspace_id": {
+              "description": "Existing workspace the work goes on in, in any form `work_item.link` takes. Absent:\nthe item waits for one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
         "WorkItemHideParams": {
           "properties": {
             "item_id": {
@@ -6553,6 +6573,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkItemTicketTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "work_item.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkItemCreateParams"
             }
           },
           "required": [

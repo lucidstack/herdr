@@ -3848,4 +3848,392 @@ mod tests {
         assert_eq!(attention(&mut app), Some(AttentionKind::Finished));
         assert_eq!(brief_step(&mut app).0, WorkItemStepStatus::Failed);
     }
+
+    /// Local items: work named by hand, with no tracker behind it.
+    mod local_items {
+        use super::*;
+        use crate::api::schema::{
+            EventData, EventKind, WorkItemCreateParams, WorkItemHideParams, WorkItemImageParams,
+            WorkItemLinkParams, WorkItemTicketTarget, WorkspaceCloseParams,
+        };
+
+        /// An app whose work items are enabled, by a source with nothing to list, and that has
+        /// one open workspace.
+        fn app_with_workspace() -> (App, Arc<FakeSource>) {
+            let mut app = test_app();
+            app.state.workspaces = vec![crate::workspace::Workspace::test_new("started")];
+            let source = FakeSource::with_items(Vec::new());
+            app.work_items = WorkItems::for_test(vec![source.clone() as Arc<_>], Instant::now());
+            (app, source)
+        }
+
+        fn create(
+            app: &mut App,
+            title: &str,
+            workspace_id: Option<&str>,
+        ) -> Result<WorkItemInfo, String> {
+            match api(
+                app,
+                Method::WorkItemCreate(WorkItemCreateParams {
+                    title: title.into(),
+                    workspace_id: workspace_id.map(Into::into),
+                }),
+            )? {
+                ResponseResult::WorkItemAdded { item } => Ok(item),
+                other => panic!("expected work_item_added, got {other:?}"),
+            }
+        }
+
+        fn choose_item(
+            app: &mut App,
+            item_id: &str,
+            choice_id: &str,
+        ) -> Result<ResponseResult, String> {
+            api(
+                app,
+                Method::WorkItemChoose(WorkItemChooseParams {
+                    item_id: item_id.into(),
+                    choice_id: choice_id.into(),
+                    options: None,
+                    model: None,
+                    effort: None,
+                }),
+            )
+        }
+
+        fn close_workspace(app: &mut App, workspace_id: &str) {
+            api(
+                app,
+                Method::WorkspaceClose(WorkspaceCloseParams {
+                    workspace_id: workspace_id.into(),
+                    close_group: false,
+                }),
+            )
+            .expect("workspace closes");
+        }
+
+        #[test]
+        fn creating_in_a_workspace_answers_with_the_item_as_work_item_added() {
+            let (mut app, _source) = app_with_workspace();
+            let workspace_id = app.public_workspace_id(0);
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "id": "1",
+                "method": "work_item.create",
+                "params": {"title": "  Fix login  ", "workspace_id": workspace_id},
+            }))
+            .expect("a work_item.create request");
+
+            let response: serde_json::Value =
+                serde_json::from_str(&app.handle_api_request(request)).expect("json response");
+            assert_eq!(
+                response,
+                serde_json::json!({
+                    "id": "1",
+                    "result": {
+                        "type": "work_item_added",
+                        "item": {
+                            "item_id": "local:1",
+                            "source_id": "local",
+                            "context": "",
+                            "title": "Fix login",
+                            "url": "",
+                            "phase": "local",
+                            "seen": true,
+                            "resolved": false,
+                            "workspace_id": workspace_id,
+                            "dismissed": false,
+                            "choices": [{
+                                "choice_id": "done",
+                                "label": "Mark as done",
+                                "action": {"type": "perform"},
+                            }],
+                            "is_pick_next": false,
+                        },
+                    },
+                })
+            );
+        }
+
+        #[test]
+        fn an_item_made_without_a_workspace_waits_pending_and_is_listed() {
+            let (mut app, _source) = app_with_workspace();
+            let item = create(&mut app, "Fix login", None).expect("created");
+            assert_eq!(item.phase, WorkItemPhase::Pending);
+            assert_eq!(item.workspace_id, None);
+            assert_eq!(list(&mut app), vec![item]);
+        }
+
+        #[test]
+        fn each_item_gets_a_number_of_its_own() {
+            let (mut app, _source) = app_with_workspace();
+            let first = create(&mut app, "Fix login", None).expect("created");
+            let second = create(&mut app, "Fix login", None).expect("created");
+            assert_eq!(
+                (first.item_id.as_str(), second.item_id.as_str()),
+                ("local:1", "local:2")
+            );
+        }
+
+        #[test]
+        fn a_workspace_named_in_any_form_link_takes_is_stored_by_its_public_id() {
+            let (mut app, _source) = app_with_workspace();
+            let public = app.public_workspace_id(0);
+            for form in [public.as_str(), "w_1", "1"] {
+                let item = create(&mut app, "Fix login", Some(form)).expect("created");
+                assert_eq!(
+                    item.workspace_id.as_deref(),
+                    Some(public.as_str()),
+                    "{form}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_blank_title_creates_nothing() {
+            let (mut app, _source) = app_with_workspace();
+            for title in ["", "   ", " \t\n "] {
+                assert_eq!(
+                    create(&mut app, title, None),
+                    Err("invalid_title".to_string()),
+                    "{title:?}"
+                );
+            }
+            assert!(list(&mut app).is_empty());
+        }
+
+        #[test]
+        fn an_unknown_workspace_creates_nothing() {
+            let (mut app, _source) = app_with_workspace();
+            // The last two are numbers past the only open workspace.
+            for workspace_id in ["w-nope", "", "2", "w_9"] {
+                assert_eq!(
+                    create(&mut app, "Fix login", Some(workspace_id)),
+                    Err("workspace_not_found".to_string()),
+                    "{workspace_id:?}"
+                );
+            }
+            assert!(list(&mut app).is_empty());
+        }
+
+        #[test]
+        fn creating_needs_a_source_to_be_configured_like_every_work_item_method() {
+            let mut app = test_app();
+            assert_eq!(
+                create(&mut app, "Fix login", None),
+                Err("work_items_disabled".to_string())
+            );
+        }
+
+        #[test]
+        fn polls_leave_a_local_item_alone() {
+            let (mut app, source) = app_with_workspace();
+            let workspace_id = app.public_workspace_id(0);
+            let local = create(&mut app, "Fix login", Some(&workspace_id)).expect("created");
+
+            // The source lists an item and then drops it again; the local item is not its to
+            // update, resolve or remove.
+            source.set_items(vec![source_item("a")]);
+            app.work_items.schedule_all_for_test(Instant::now());
+            run_until(&mut app, |app| {
+                list(app).iter().any(|item| item.item_id == "fake:a")
+            });
+            source.set_items(Vec::new());
+            app.work_items.schedule_all_for_test(Instant::now());
+            run_until(&mut app, |app| {
+                list(app).iter().all(|item| item.item_id != "fake:a")
+            });
+
+            assert_eq!(list(&mut app), vec![local]);
+        }
+
+        #[test]
+        fn done_resolves_a_local_item_and_offers_to_take_it_back() {
+            let (mut app, _source) = app_with_workspace();
+            let item = create(&mut app, "Fix login", None).expect("created");
+
+            assert!(matches!(
+                choose_item(&mut app, &item.item_id, "done"),
+                Ok(ResponseResult::Ok {})
+            ));
+            let item = list(&mut app).remove(0);
+            assert!(item.resolved);
+            assert_eq!(item.default_choice_id, None);
+            let choices: Vec<_> = item
+                .choices
+                .iter()
+                .map(|choice| (choice.choice_id.as_str(), choice.label.as_str()))
+                .collect();
+            assert_eq!(choices, [("reopen", "Not done yet")]);
+        }
+
+        #[test]
+        fn reopening_makes_a_done_local_item_open_again() {
+            let (mut app, _source) = app_with_workspace();
+            let item = create(&mut app, "Fix login", None).expect("created");
+            choose_item(&mut app, &item.item_id, "done").expect("done");
+
+            assert!(matches!(
+                choose_item(&mut app, &item.item_id, "reopen"),
+                Ok(ResponseResult::Ok {})
+            ));
+            assert_eq!(list(&mut app), vec![item]);
+        }
+
+        #[test]
+        fn a_local_item_cannot_be_reopened_before_it_is_done_nor_done_twice() {
+            let (mut app, _source) = app_with_workspace();
+            let item = create(&mut app, "Fix login", None).expect("created");
+            assert_eq!(
+                choose_item(&mut app, &item.item_id, "reopen").map(|_| ()),
+                Err("work_item_choice_not_found".to_string())
+            );
+            choose_item(&mut app, &item.item_id, "done").expect("done");
+            assert_eq!(
+                choose_item(&mut app, &item.item_id, "done").map(|_| ()),
+                Err("work_item_choice_not_found".to_string())
+            );
+        }
+
+        #[test]
+        fn closing_the_workspace_of_a_done_local_item_drops_it() {
+            let (mut app, _source) = app_with_workspace();
+            let workspace_id = app.public_workspace_id(0);
+            let item = create(&mut app, "Fix login", Some(&workspace_id)).expect("created");
+            choose_item(&mut app, &item.item_id, "done").expect("done");
+
+            close_workspace(&mut app, &workspace_id);
+            assert!(list(&mut app).is_empty());
+        }
+
+        #[test]
+        fn closing_the_workspace_of_an_open_local_item_leaves_it_pending_without_one() {
+            let (mut app, _source) = app_with_workspace();
+            let workspace_id = app.public_workspace_id(0);
+            let item = create(&mut app, "Fix login", Some(&workspace_id)).expect("created");
+
+            close_workspace(&mut app, &workspace_id);
+            assert_eq!(
+                list(&mut app),
+                vec![WorkItemInfo {
+                    workspace_id: None,
+                    phase: WorkItemPhase::Pending,
+                    ..item
+                }]
+            );
+        }
+
+        #[test]
+        fn a_local_item_can_be_hidden_and_shown_again() {
+            let (mut app, _source) = app_with_workspace();
+            let item = create(&mut app, "Fix login", None).expect("created");
+            let hide = Method::WorkItemHide(WorkItemHideParams {
+                item_id: item.item_id.clone(),
+                snooze_seconds: None,
+            });
+            api(&mut app, hide).expect("hidden");
+            assert!(list(&mut app)[0].dismissed);
+
+            let show = Method::WorkItemUnhide(crate::api::schema::WorkItemTarget {
+                item_id: item.item_id.clone(),
+            });
+            api(&mut app, show).expect("shown");
+            assert_eq!(list(&mut app), vec![item]);
+        }
+
+        #[test]
+        fn a_local_item_made_without_a_workspace_can_be_linked_to_one() {
+            let (mut app, _source) = app_with_workspace();
+            let workspace_id = app.public_workspace_id(0);
+            let item = create(&mut app, "Fix login", None).expect("created");
+            let link = Method::WorkItemLink(WorkItemLinkParams {
+                item_id: item.item_id.clone(),
+                workspace_id: workspace_id.clone(),
+            });
+            api(&mut app, link).expect("linked");
+            assert_eq!(
+                list(&mut app),
+                vec![WorkItemInfo {
+                    workspace_id: Some(workspace_id),
+                    phase: WorkItemPhase::Local,
+                    ..item
+                }]
+            );
+        }
+
+        #[test]
+        fn linking_to_a_workspace_number_past_the_last_open_one_is_an_unknown_workspace() {
+            let (mut app, _source) = app_with_workspace();
+            let item = create(&mut app, "Fix login", None).expect("created");
+            let link = Method::WorkItemLink(WorkItemLinkParams {
+                item_id: item.item_id.clone(),
+                workspace_id: "9".into(),
+            });
+            assert_eq!(
+                api(&mut app, link).map(|_| ()),
+                Err("workspace_not_found".to_string())
+            );
+            assert_eq!(list(&mut app), vec![item]);
+        }
+
+        #[test]
+        fn a_local_source_has_no_tracker_to_show_from_to_fetch_images_from_or_to_add_from() {
+            let (mut app, _source) = app_with_workspace();
+            let ticket = || WorkItemTicketTarget {
+                source_id: "local".into(),
+                key: "1".into(),
+            };
+            for method in [
+                Method::WorkItemShow(ticket()),
+                Method::WorkItemImage(WorkItemImageParams {
+                    source_id: "local".into(),
+                    url: "https://example.test/a.png".into(),
+                }),
+                Method::WorkItemAdd(ticket()),
+            ] {
+                let (tx, rx) = std::sync::mpsc::channel();
+                assert!(app.handle_deferred_work_item_api_request(request(method), tx));
+                let reply = rx.recv_timeout(Duration::from_secs(5)).expect("a reply");
+                let error: ErrorResponse = serde_json::from_str(&reply).expect("an error");
+                assert_eq!(error.error.code, "work_item_source_not_found");
+            }
+            assert!(list(&mut app).is_empty());
+        }
+
+        #[test]
+        fn a_local_item_is_published_as_created_and_then_as_resolved() {
+            let hub = crate::api::EventHub::default();
+            let mut app = App::new(
+                &crate::config::Config::default(),
+                AppPolicy::TEST,
+                None,
+                tokio::sync::mpsc::unbounded_channel().1,
+                hub.clone(),
+            );
+            let source = FakeSource::with_items(Vec::new());
+            app.work_items = WorkItems::for_test(vec![source as Arc<_>], Instant::now());
+            // The first state is only recorded, as at start-up.
+            run_until(&mut app, |_| true);
+
+            let item = create(&mut app, "Fix login", None).expect("created");
+            choose_item(&mut app, &item.item_id, "done").expect("done");
+
+            let events: Vec<(EventKind, String, bool)> = hub
+                .events_after(0)
+                .into_iter()
+                .filter_map(|(_, event)| match event.data {
+                    EventData::WorkItemCreated { item } | EventData::WorkItemResolved { item } => {
+                        Some((event.event, item.item_id, item.resolved))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                events,
+                [
+                    (EventKind::WorkItemCreated, "local:1".to_string(), false),
+                    (EventKind::WorkItemResolved, "local:1".to_string(), true),
+                ]
+            );
+        }
+    }
 }

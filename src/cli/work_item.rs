@@ -1,6 +1,7 @@
 use crate::api::schema::{
-    EmptyParams, Method, WorkItemChooseParams, WorkItemHideParams, WorkItemLinkParams,
-    WorkItemProject, WorkItemSearchParams, WorkItemTarget, WorkItemTicketTarget,
+    EmptyParams, Method, WorkItemChooseParams, WorkItemCreateParams, WorkItemHideParams,
+    WorkItemLinkParams, WorkItemProject, WorkItemSearchParams, WorkItemTarget,
+    WorkItemTicketTarget,
 };
 
 // Output is the JSON API response, like the other socket commands.
@@ -74,6 +75,13 @@ pub(super) fn run_work_item_command(args: &[String]) -> std::io::Result<i32> {
                 }),
             ),
             _ => usage("herdr work-item link ITEM_ID WORKSPACE_ID"),
+        },
+        "create" => match create_params(rest) {
+            Ok(params) => send("cli:work-item:create", Method::WorkItemCreate(params)),
+            Err(message) => {
+                eprintln!("{message}");
+                usage("herdr work-item create TITLE [--workspace WORKSPACE_ID]")
+            }
         },
         "unhide" => match rest {
             [item_id] => send(
@@ -154,6 +162,35 @@ fn usage(line: &str) -> std::io::Result<i32> {
     Ok(2)
 }
 
+/// `TITLE`, and `--workspace WORKSPACE_ID` before or after it.
+fn create_params(args: &[String]) -> Result<WorkItemCreateParams, String> {
+    let mut title = None;
+    let mut workspace_id = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--workspace" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err("missing value for --workspace".into());
+                };
+                workspace_id = Some(super::normalize_workspace_id(value));
+                index += 2;
+            }
+            option if option.starts_with("--") => return Err(format!("unknown option: {option}")),
+            text if title.is_none() => {
+                title = Some(text.to_string());
+                index += 1;
+            }
+            text => return Err(format!("unexpected argument: {text}")),
+        }
+    }
+    let title = title.ok_or("missing title")?;
+    Ok(WorkItemCreateParams {
+        title,
+        workspace_id,
+    })
+}
+
 /// `90`, `90s`, `30m`, `2h` or `1d`, in seconds.
 fn parse_duration(value: &str) -> Option<u64> {
     let (number, unit) = match value.char_indices().last()? {
@@ -181,6 +218,9 @@ fn print_work_item_help() {
     eprintln!("  herdr work-item unhide ITEM_ID");
     eprintln!("  herdr work-item link ITEM_ID WORKSPACE_ID");
     eprintln!(
+        "  herdr work-item create TITLE [--workspace WORKSPACE_ID]   (a local item: a title and no tracker)"
+    );
+    eprintln!(
         "  herdr work-item search SOURCE QUERY   (JQL for jira, GitHub search syntax for github)"
     );
     eprintln!("  herdr work-item show SOURCE KEY       (e.g. jira TECH-123, github o/r#12)");
@@ -193,7 +233,7 @@ fn print_work_item_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_duration;
+    use super::{create_params, parse_duration};
 
     #[test]
     fn durations_accept_seconds_minutes_hours_and_days() {
@@ -204,5 +244,37 @@ mod tests {
         assert_eq!(parse_duration("0h"), None);
         assert_eq!(parse_duration("3w"), None);
         assert_eq!(parse_duration("h"), None);
+    }
+
+    fn args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn create_takes_a_title_and_the_workspace_before_or_after_it() {
+        let bare = create_params(&args(&["Fix login"])).expect("title alone");
+        assert_eq!(bare.title, "Fix login");
+        assert_eq!(bare.workspace_id, None);
+        for given in [
+            ["Fix login", "--workspace", "w1"],
+            ["--workspace", "w1", "Fix login"],
+        ] {
+            let params = create_params(&args(&given)).expect("title and workspace");
+            assert_eq!(params.title, "Fix login");
+            assert_eq!(params.workspace_id.as_deref(), Some("w1"));
+        }
+    }
+
+    #[test]
+    fn create_without_exactly_one_title_or_with_a_stray_option_is_refused() {
+        for given in [
+            &[][..],
+            &["--workspace", "w1"],
+            &["one", "two"],
+            &["Fix login", "--workspace"],
+            &["Fix login", "--focus"],
+        ] {
+            assert!(create_params(&args(given)).is_err(), "{given:?}");
+        }
     }
 }

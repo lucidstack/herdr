@@ -2,7 +2,7 @@ use super::*;
 use crate::api::schema::WorkItemStepStatus;
 
 use super::super::super::work_items::{
-    is_hidden, ClientInboxOverlay, ClientWorkItemOverlay, SPINNER_FRAMES,
+    is_hidden, item_context, ClientInboxOverlay, ClientWorkItemOverlay, SPINNER_FRAMES,
 };
 
 const WIDTH: u16 = 80;
@@ -53,7 +53,7 @@ fn render_choices(b: &mut Buffer, o: &ClientWorkItemOverlay, p: &Palette) -> Opt
         choice_count + 8 + status_height + option_rows,
     )?;
     let i = panel(b, q, p.accent, p.panel_bg)?;
-    let mut heading = format!(" {}", item.context);
+    let mut heading = format!(" {}", item_context(item));
     if let Some(state) = &item.tracker_state {
         heading.push_str(&format!(" · {state}"));
     }
@@ -307,7 +307,7 @@ fn render_checklist(
         i.x,
         i.y,
         i.width,
-        &format!(" Preparing {}", o.item.context),
+        &format!(" Preparing {}", item_context(&o.item)),
         Style::default()
             .fg(p.accent)
             .bg(p.panel_bg)
@@ -467,7 +467,7 @@ pub(super) fn render_inbox_overlay(
             x.saturating_add(1),
             y,
             i.right(),
-            &item.context,
+            item_context(item),
             base.add_modifier(Modifier::BOLD),
         );
         let state = if item.dismissed {

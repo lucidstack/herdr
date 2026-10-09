@@ -246,11 +246,15 @@ herdr work-item snooze 'github:acme/app#42' --for 2h
 herdr work-item dismiss 'jira:APP-7'
 herdr work-item unhide 'jira:APP-7'
 herdr work-item link 'jira:APP-7' w3
+herdr work-item create 'Fix the flaky login test'
+herdr work-item create 'Fix the flaky login test' --workspace w3
 herdr work-item ignore github acme/personal-site
 herdr work-item unignore github acme/personal-site
 ```
 
 `ignore` and `unignore` take a source and a repository (`owner/name`) or Jira project key, matched without regard to case, so a project can be ignored before any of its items arrive. `work_item.list` lists the ignored ones as `ignored_projects`, and each item names the one it belongs to as `project`. Ignored projects are kept per session in `work-items.json`. While a project is ignored, `search` leaves its tickets out, so **Pick next** does not suggest them, and `add` refuses them with `work_item_project_ignored`; `show` still reads them.
+
+`create` makes a local item: work with a title and no tracker behind it. The title is trimmed, and a blank one fails with `invalid_title`. With `--workspace`, in any form `link` takes, the work goes on in that workspace, which an item that had it loses; an unknown workspace fails with `workspace_not_found`, and nothing is made. `work_item.create` takes `title` and an optional `workspace_id` and answers with the item, as `work_item.add` does. A local item has the `source_id` `local` and the `item_id` `local:<n>`, a number never given out again, not even after the item is gone or Herdr restarted; its `context` and `url` are empty, and its inbox row reads **Local**. No source ever polls, updates or removes it, so it stays until you dismiss it or finish it. Its one choice, run with `work_item.choose`, is `done` (**Mark as done**), which resolves it and ends any attention for it, and, once it is done, `reopen` (**Not done yet**). Closing a local item's workspace drops it when it is done and otherwise leaves it without a workspace, waiting for another. `dismiss`, `snooze`, `unhide` and `link` work on it as on any item; `show`, `add` and `work_item.image` have no ticket to read for the source `local` and fail. Local items are kept in `work-items.json` and, like the rest of the inbox, need a configured source.
 
 `herdr work-item choose` runs a choice with its options at their defaults. `work_item.list` shows each choice's options as `{ "option_id", "label", "description", "default" }`, and `work_item.choose` takes `options`, the ids to switch on: leave it out for the defaults, or send `[]` to switch every option off. The review choice has the options `worktree` and `post`. An id the choice does not offer fails with `unknown_option`, and nothing runs.
 

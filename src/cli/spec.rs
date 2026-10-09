@@ -311,6 +311,12 @@ fn work_item_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("create")
+                .about("Make a local item: work with a title and no tracker")
+                .arg(Arg::new("title").value_name("TITLE").required(true))
+                .arg(option("workspace", "WORKSPACE_ID")),
+        )
+        .subcommand(
             Command::new("ignore")
                 .about("Keep a repository or tracker project out of this session's inbox")
                 .arg(Arg::new("source_id").value_name("SOURCE").required(true))

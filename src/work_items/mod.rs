@@ -45,6 +45,19 @@ pub(crate) fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// `unix` seconds as an RFC 3339 UTC time, the form GitHub gives its `updated_at` in, so that
+/// items of every source sort by recency together. The Unix time itself when out of range.
+fn rfc3339_utc(unix: u64) -> String {
+    i64::try_from(unix)
+        .ok()
+        .and_then(|seconds| time::OffsetDateTime::from_unix_timestamp(seconds).ok())
+        .and_then(|at| {
+            at.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_else(|| unix.to_string())
+}
+
 #[derive(Debug)]
 pub(crate) enum WorkItemsEvent {
     Polled {
@@ -420,6 +433,8 @@ impl WorkItems {
             if store.load {
                 let stored = store::load(&store.path);
                 self.state = WorkItemsState::from_items(stored.items);
+                self.state
+                    .restore_last_local_number(stored.last_local_number);
                 self.owned_worktrees = stored.worktrees;
                 self.pick_next = stored.pick_next;
                 self.linked_clones = stored.linked_clones;
@@ -922,9 +937,10 @@ impl WorkItems {
         Some(lookups)
     }
 
-    /// The ticket `item`'s title names, as (tracker, key), when another source tracks it.
+    /// The ticket `item`'s title names, as (tracker, key), when another source tracks it. A
+    /// local item has no tracker state, so its title names none.
     fn named_ticket(&self, item: &WorkItem) -> Option<(&Arc<dyn WorkItemSource>, String)> {
-        if item.is_pick_next {
+        if item.is_pick_next || item.is_local() {
             return None;
         }
         self.sources
@@ -1208,6 +1224,25 @@ impl WorkItems {
         item
     }
 
+    /// Makes a local item: work named by hand, with no tracker behind it. With `workspace_id`
+    /// the work goes on in that workspace, taken from any other item that has it. Returns the
+    /// new item's key.
+    pub(crate) fn create_local(&mut self, title: &str, workspace_id: Option<&str>) -> String {
+        let key = self
+            .state
+            .create_local(title, workspace_id, rfc3339_utc(unix_now()));
+        self.changed();
+        key
+    }
+
+    /// Marks a local item done, or not done after all.
+    pub(crate) fn set_local_resolved(&mut self, key: &str, resolved: bool) -> Result<(), NotFound> {
+        if self.state.set_local_resolved(key, resolved)? {
+            self.changed();
+        }
+        Ok(())
+    }
+
     /// The key of `source_id`'s "Pick next" discovery row, creating it if it does not exist
     /// yet.
     pub(crate) fn ensure_pick_next_item(&mut self, source_id: &str, label: &str) -> WorkItem {
@@ -1314,11 +1349,15 @@ impl WorkItems {
     /// behind, the reminder's fix (the default when available) and a way to mute it. A linked
     /// pull request adds what its own inbox item offers that the item can carry out for it,
     /// then a way to open it.
+    /// A local item has no source: it offers Herdr's own choice to mark it done or not.
     fn choices_and_reminder(
         &self,
         item: &WorkItem,
         hosts: &HashMap<(String, u64), String>,
     ) -> (source::ItemChoices, Option<source::StartReminder>) {
+        if item.is_local() {
+            return (source::local_choices(item.resolved), None);
+        }
         let Some(source) = self.source(&item.source_id) else {
             return (
                 source::ItemChoices {
@@ -1874,6 +1913,10 @@ impl WorkItems {
             if self.folded_into(item, &hosts).is_some() {
                 continue;
             }
+            // Done is done: a local item marked so needs nothing, whatever its agents do.
+            if item.is_local() && item.resolved {
+                continue;
+            }
             let verdict = item
                 .workspace_id
                 .as_deref()
@@ -2021,6 +2064,7 @@ impl WorkItems {
                 &self.pick_next,
                 &self.linked_clones,
                 &self.ignored_projects,
+                self.state.last_local_number(),
             );
         }
     }
@@ -3351,5 +3395,107 @@ projects = [
         let project = |key: &str| items.item_info(key).expect("item").project;
         assert_eq!(project("fake:work/1").as_deref(), Some("work"));
         assert_eq!(project("fake:loose"), None);
+    }
+
+    #[test]
+    fn a_local_item_is_dated_in_the_form_the_sources_date_theirs() {
+        assert_eq!(rfc3339_utc(1_767_225_600), "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn local_items_and_the_numbers_given_out_survive_a_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-local-items-{}-restart", std::process::id()));
+        let policy = StorePolicy {
+            path: dir.join("work-items.json"),
+            load: true,
+            persist: true,
+        };
+        let config = github_with_clone_root();
+        let mut items =
+            WorkItems::from_config(&config, policy.clone(), &HashSet::new(), Instant::now());
+        let kept = items.create_local("Fix login", None);
+        let finished = items.create_local("Tidy up", Some("w1"));
+        // Done, and its workspace closes: gone, but its number is not free again.
+        items
+            .set_local_resolved(&finished, true)
+            .expect("local item");
+        items.workspace_closed("w1");
+        assert_eq!((kept.as_str(), finished.as_str()), ("local:1", "local:2"));
+
+        // The store is written on a thread of its own: wait for the last state to land.
+        let written = |policy: &StorePolicy| {
+            let stored = store::load(&policy.path);
+            stored.last_local_number == 2 && stored.items.len() == 1
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !written(&policy) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(written(&policy), "the inbox was not stored in time");
+        drop(items);
+
+        let policy = StorePolicy {
+            persist: false,
+            ..policy
+        };
+        let mut restarted =
+            WorkItems::from_config(&config, policy, &HashSet::new(), Instant::now());
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(
+            restarted.item_info(&kept).map(|item| item.title),
+            Some("Fix login".to_string())
+        );
+        assert!(restarted.item_info(&finished).is_none());
+        assert_eq!(restarted.create_local("Next", None), "local:3");
+    }
+
+    #[test]
+    fn a_local_item_titled_with_a_ticket_key_is_not_linked_to_that_ticket() {
+        let mut items = with_tracker();
+        let local = items.create_local("T-1 Fix login", None);
+        // An item of another source with the same title is looked up, so the setup is sound.
+        poll_source(&mut items, "fake", vec![titled("pr", "T-1 Fix login")]);
+
+        let lookups = items
+            .take_due_ticket_lookup(Instant::now())
+            .expect("lookup due");
+        let asked: Vec<&str> = lookups.iter().map(|(item, _, _)| item.as_str()).collect();
+        assert_eq!(asked, ["fake:pr"]);
+        assert_eq!(linked_ticket(&items, &local), None);
+    }
+
+    #[test]
+    fn a_done_local_item_needs_nothing_whatever_its_agents_do() {
+        let mut items =
+            WorkItems::for_test(vec![FakeSource::with_items(Vec::new())], Instant::now());
+        let key = items.create_local("Fix login", Some("w1"));
+        let finished = HashMap::from([(
+            "w1".to_string(),
+            attention::AgentVerdict {
+                need: Some(attention::Need::new(
+                    AttentionKind::Finished,
+                    "claude finished its turn",
+                )),
+                ..attention::AgentVerdict::default()
+            },
+        )]);
+        let attention_of = |items: &WorkItems| {
+            items
+                .attention(&attention::Subject::Item(key.clone()))
+                .map(|attention| attention.kind)
+        };
+
+        items.update_attention(&finished, Vec::new(), 2_000);
+        assert_eq!(attention_of(&items), Some(AttentionKind::Finished));
+
+        items.set_local_resolved(&key, true).expect("local item");
+        items.update_attention(&finished, Vec::new(), 2_001);
+        assert_eq!(attention_of(&items), None);
+
+        // Not done after all: what the agent finished needs you again.
+        items.set_local_resolved(&key, false).expect("local item");
+        items.update_attention(&finished, Vec::new(), 2_002);
+        assert_eq!(attention_of(&items), Some(AttentionKind::Finished));
     }
 }

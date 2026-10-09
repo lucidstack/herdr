@@ -621,6 +621,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::WorkItemShow(_) => "work_item.show",
         Method::WorkItemImage(_) => "work_item.image",
         Method::WorkItemAdd(_) => "work_item.add",
+        Method::WorkItemCreate(_) => "work_item.create",
         Method::WorkItemPickNextStart(_) => "work_item.pick_next_start",
         Method::WorkItemIgnoreProject(_) => "work_item.ignore_project",
         Method::WorkItemUnignoreProject(_) => "work_item.unignore_project",

@@ -34,6 +34,18 @@ pub struct WorkItemLinkParams {
     pub workspace_id: String,
 }
 
+/// A local item: work you name yourself, with no tracker behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemCreateParams {
+    /// What the work is. Surrounding whitespace is trimmed; a blank title is an
+    /// `invalid_title` error.
+    pub title: String,
+    /// Existing workspace the work goes on in, in any form `work_item.link` takes. Absent:
+    /// the item waits for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkItemHideParams {
     pub item_id: String,
@@ -227,6 +239,11 @@ pub struct WorkItemChoiceOptionInfo {
 /// opaque; one that also lists the pull request item can use this to skip choices the ticket
 /// already offers.
 pub const WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX: &str = "pull_request:";
+
+/// The `source_id` of local items, which `work_item.create` makes: work you name yourself,
+/// with no tracker behind it, which no poll ever touches. Their `item_id` is `local:<n>`, a
+/// number never given out again.
+pub const LOCAL_WORK_ITEM_SOURCE_ID: &str = "local";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]

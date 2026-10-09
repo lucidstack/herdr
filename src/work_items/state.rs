@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::schema::{
     WorkItemActionOutcome, WorkItemInfo, WorkItemLinkedTicketInfo, WorkItemPhase,
-    WorkItemProvisioningInfo, WorkItemPullRequestInfo,
+    WorkItemProvisioningInfo, WorkItemPullRequestInfo, LOCAL_WORK_ITEM_SOURCE_ID,
 };
 
 use super::source::{ItemChoices, PreparedItem, SourceItem};
@@ -193,6 +193,33 @@ impl WorkItem {
         }
     }
 
+    /// A local item: work named by hand, with no tracker behind it. Its `item_id` is
+    /// `local:<number>`. `updated_at` is when it was made, in the form the sources give theirs,
+    /// so that items of every source sort by recency together.
+    fn new_local(number: u64, title: &str, updated_at: String) -> Self {
+        Self {
+            seen: true,
+            ..Self::new(
+                LOCAL_WORK_ITEM_SOURCE_ID,
+                SourceItem {
+                    external_id: number.to_string(),
+                    title: title.to_string(),
+                    context: String::new(),
+                    author: None,
+                    url: String::new(),
+                    updated_at,
+                    tracker_state: None,
+                },
+            )
+        }
+    }
+
+    /// Made by hand with `work_item.create`. No source polls, prepares or acts on it, and no
+    /// poll resolves, updates or removes it.
+    pub(crate) fn is_local(&self) -> bool {
+        self.source_id == LOCAL_WORK_ITEM_SOURCE_ID
+    }
+
     pub(crate) fn source_item(&self) -> SourceItem {
         SourceItem {
             external_id: self.external_id.clone(),
@@ -277,6 +304,9 @@ pub(crate) struct WorkItemsState {
     source_errors: HashMap<String, String>,
     /// Keys that became resolved since the last `take_newly_resolved`.
     newly_resolved: Vec<String>,
+    /// The number of the last local item made. Persisted, so that no number is given out
+    /// twice, not after its item is gone and not after a restart.
+    last_local_number: u64,
 }
 
 impl WorkItemsState {
@@ -291,6 +321,7 @@ impl WorkItemsState {
             items,
             source_errors: HashMap::new(),
             newly_resolved: Vec::new(),
+            last_local_number: 0,
         }
     }
 
@@ -343,6 +374,64 @@ impl WorkItemsState {
         }
     }
 
+    /// The number the next local item gets: past every one given out, including those of
+    /// items gone since, and past any `local:<number>` the inbox holds.
+    fn next_local_number(&self) -> u64 {
+        self.items
+            .iter()
+            .filter(|item| item.is_local())
+            .filter_map(|item| item.external_id.parse::<u64>().ok())
+            .fold(self.last_local_number, u64::max)
+            .saturating_add(1)
+    }
+
+    /// The number of the last local item made, to keep across restarts.
+    pub(crate) fn last_local_number(&self) -> u64 {
+        self.last_local_number
+    }
+
+    /// Takes up the number a stored inbox left off at, so that none is given out twice.
+    pub(crate) fn restore_last_local_number(&mut self, last: u64) {
+        self.last_local_number = self.last_local_number.max(last);
+    }
+
+    /// Makes a local item and returns its key. With `workspace_id` the work goes on there, the
+    /// workspace taken from any other item that has it, as `link` does.
+    pub(crate) fn create_local(
+        &mut self,
+        title: &str,
+        workspace_id: Option<&str>,
+        updated_at: String,
+    ) -> String {
+        let number = self.next_local_number();
+        self.last_local_number = number;
+        let item = WorkItem::new_local(number, title, updated_at);
+        let key = item.key.clone();
+        self.items.push(item);
+        if let Some(workspace_id) = workspace_id {
+            // Pushed just above, so there is an item under that key to link.
+            let _ = self.link(&key, workspace_id);
+        }
+        key
+    }
+
+    /// Marks a local item done, or not done after all. Choosing either means it was seen.
+    /// Returns whether anything changed. Only local items are Herdr's to resolve.
+    pub(crate) fn set_local_resolved(
+        &mut self,
+        key: &str,
+        resolved: bool,
+    ) -> Result<bool, NotFound> {
+        let item = self
+            .get_mut(key)
+            .filter(|item| item.is_local())
+            .ok_or(NotFound)?;
+        let before = (item.resolved, item.seen);
+        item.resolved = resolved;
+        item.seen = true;
+        Ok(before != (item.resolved, item.seen))
+    }
+
     pub(crate) fn source_error(&self, source_id: &str) -> Option<&str> {
         self.source_errors.get(source_id).map(String::as_str)
     }
@@ -354,6 +443,12 @@ impl WorkItemsState {
         source_id: &str,
         result: Result<Vec<SourceItem>, String>,
     ) -> (bool, Vec<String>) {
+        // Local items belong to no source and no source has their id, so a poll under it applies
+        // to nothing. The polls of real sources cannot touch them either: the `source_id` and
+        // keys they go by are other ones.
+        if source_id == LOCAL_WORK_ITEM_SOURCE_ID {
+            return (false, Vec::new());
+        }
         let polled = match result {
             Ok(polled) => polled,
             Err(message) => {
@@ -595,23 +690,27 @@ impl WorkItemsState {
         changed
     }
 
-    /// Drops items of unconfigured sources unless a workspace hangs off them.
+    /// Drops items of unconfigured sources unless a workspace hangs off them. Local items
+    /// belong to no source and stay.
     pub(crate) fn retain_sources(&mut self, source_ids: &HashSet<&str>) -> bool {
         let before = self.items.len();
         self.items.retain(|item| {
-            source_ids.contains(item.source_id.as_str()) || item.workspace_id.is_some()
+            item.is_local()
+                || source_ids.contains(item.source_id.as_str())
+                || item.workspace_id.is_some()
         });
         self.source_errors
             .retain(|source_id, _| source_ids.contains(source_id.as_str()));
         before != self.items.len()
     }
 
-    /// Drops the items `matches` picks, except "Pick next" rows and items a workspace hangs
-    /// off: work already started stays. Returns whether any went.
+    /// Drops the items `matches` picks, except "Pick next" rows, local items and items a
+    /// workspace hangs off: work already started stays. Returns whether any went.
     pub(crate) fn drop_unworked(&mut self, matches: impl Fn(&WorkItem) -> bool) -> bool {
         let before = self.items.len();
-        self.items
-            .retain(|item| item.is_pick_next || item.workspace_id.is_some() || !matches(item));
+        self.items.retain(|item| {
+            item.is_pick_next || item.is_local() || item.workspace_id.is_some() || !matches(item)
+        });
         before != self.items.len()
     }
 
@@ -1008,5 +1107,94 @@ mod tests {
         let item = state.get("gh:pick-next").expect("item");
         assert_eq!(item.context, "fix the login bug");
         assert_eq!(item.updated_at, "100");
+    }
+
+    fn made(state: &mut WorkItemsState, title: &str, workspace_id: Option<&str>) -> String {
+        state.create_local(title, workspace_id, "2026-10-09T12:00:00Z".into())
+    }
+
+    #[test]
+    fn a_local_number_is_never_given_out_again_once_its_item_is_gone() {
+        let mut state = WorkItemsState::default();
+        assert_eq!(made(&mut state, "first", None), "local:1");
+        let last = made(&mut state, "second", Some("w1"));
+        assert_eq!(last, "local:2");
+
+        // Done, and its workspace closes: the item goes, the number does not come back.
+        state.set_local_resolved(&last, true).expect("local item");
+        state.workspace_closed("w1");
+        assert!(state.get(&last).is_none());
+        assert_eq!(made(&mut state, "third", None), "local:3");
+    }
+
+    #[test]
+    fn numbers_continue_after_the_one_a_store_left_off_at() {
+        let mut state = WorkItemsState::default();
+        state.restore_last_local_number(9);
+        assert_eq!(made(&mut state, "next", None), "local:10");
+    }
+
+    #[test]
+    fn numbers_continue_after_every_local_item_a_store_holds_whatever_its_counter() {
+        // A store written before the counter existed has none, and so reads as 0.
+        let held = WorkItem::new_local(5, "held", "2026-10-09T12:00:00Z".into());
+        let mut state = WorkItemsState::from_items(vec![held]);
+        state.restore_last_local_number(0);
+        assert_eq!(made(&mut state, "next", None), "local:6");
+    }
+
+    #[test]
+    fn a_local_item_stays_when_its_source_is_gone_or_its_project_ignored() {
+        let mut state = state_with("gh", &["a"]);
+        let key = made(&mut state, "mine", None);
+        let before = state.get(&key).cloned();
+
+        // No source is configured any more, and every item of one is dropped.
+        state.retain_sources(&HashSet::new());
+        state.drop_unworked(|_| true);
+
+        assert!(state.get("gh:a").is_none());
+        assert_eq!(state.get(&key).cloned(), before);
+    }
+
+    #[test]
+    fn a_local_item_made_in_a_workspace_takes_it_from_the_item_that_had_it() {
+        let mut state = state_with("gh", &["a"]);
+        state.link("gh:a", "w1").expect("item");
+
+        let key = made(&mut state, "mine", Some("w1"));
+
+        let mine = state.get(&key).expect("local item");
+        assert_eq!(mine.workspace_id.as_deref(), Some("w1"));
+        assert_eq!(mine.phase, WorkItemPhase::Local);
+        let other = state.get("gh:a").expect("item");
+        assert_eq!(other.workspace_id, None);
+        assert_eq!(other.phase, WorkItemPhase::Pending);
+    }
+
+    #[test]
+    fn only_a_local_item_is_marked_done_by_hand() {
+        let mut state = state_with("gh", &["a"]);
+        assert_eq!(state.set_local_resolved("gh:a", true), Err(NotFound));
+        assert!(!state.get("gh:a").expect("item").resolved);
+        assert_eq!(state.set_local_resolved("local:1", true), Err(NotFound));
+    }
+
+    #[test]
+    fn no_poll_resolves_updates_or_removes_a_local_item() {
+        let mut state = WorkItemsState::default();
+        let key = made(&mut state, "mine", Some("w1"));
+        let before = state.get(&key).cloned();
+
+        // Polls of real sources, which list items and then none.
+        state.apply_poll("gh", Ok(vec![polled("1", "t1")]));
+        state.apply_poll("gh", Ok(Vec::new()));
+        // And polls under the id local items have, which no source has.
+        let (changed, arrivals) = state.apply_poll("local", Ok(vec![polled("1", "t2")]));
+        assert!(!changed && arrivals.is_empty());
+        state.apply_poll("local", Ok(Vec::new()));
+
+        assert_eq!(state.get(&key).cloned(), before);
+        assert!(state.take_newly_resolved().is_empty());
     }
 }
