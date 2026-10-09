@@ -1137,6 +1137,11 @@ impl App {
                 self.sync_work_item_events();
                 return response;
             }
+            Method::WorkItemCreate(params) => {
+                let response = self.handle_work_item_create(request.id, params);
+                self.sync_work_item_events();
+                return response;
+            }
             Method::WorkItemPickNextStart(params) => {
                 let response = self.handle_work_item_pick_next_start(request.id, params);
                 self.sync_work_item_events();

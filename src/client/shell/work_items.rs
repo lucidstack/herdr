@@ -9,7 +9,7 @@ use crate::api::schema::{
     Method, WorkItemChoiceAction, WorkItemChoiceInfo, WorkItemChoiceOptionInfo,
     WorkItemChooseParams, WorkItemHideParams, WorkItemInfo, WorkItemLinkParams, WorkItemPhase,
     WorkItemProject, WorkItemRepositoryInfo, WorkItemStepStatus, WorkItemTarget, WorkspaceTarget,
-    WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX,
+    LOCAL_WORK_ITEM_SOURCE_ID, WORK_ITEM_PULL_REQUEST_CHOICE_PREFIX,
 };
 use crate::client::endpoint::ClientEndpointId;
 use crate::protocol::work_items::EndpointWorkItemsProjection;
@@ -130,6 +130,16 @@ pub(super) fn render_inbox_badge(
 /// Dismissed and snoozed items stay out of the sidebar.
 pub(super) fn is_hidden(item: &WorkItemInfo) -> bool {
     item.dismissed || item.snoozed_until.is_some()
+}
+
+/// What names an item on its first row: its context, such as `TECH-7` or `o/r #12`. A local
+/// item has none, so it shows the label of its source: "Local".
+pub(super) fn item_context(item: &WorkItemInfo) -> &str {
+    if item.context.is_empty() && item.source_id == LOCAL_WORK_ITEM_SOURCE_ID {
+        "Local"
+    } else {
+        &item.context
+    }
 }
 
 /// Items the inbox lists as tickets: not hidden, not a provider's "Pick next" discovery
@@ -401,7 +411,11 @@ fn menu_links(
             url: url.to_string(),
         }
     };
-    let mut links = vec![link(display_key(item), &item.source_id, &item.url)];
+    // A local item has no page of its own to open.
+    let mut links = Vec::new();
+    if !item.url.is_empty() {
+        links.push(link(display_key(item), &item.source_id, &item.url));
+    }
     let pull_request = match pull_request {
         Some(pull_request) => Some(link(
             display_key(pull_request),
@@ -1028,7 +1042,7 @@ fn render_item_rows(
         x,
         rect.y,
         context_right,
-        &item.context,
+        item_context(item),
         context_style,
     );
     if let Some((glyph, color)) = status {

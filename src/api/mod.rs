@@ -48,6 +48,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::WorkItemUnhide(_)
             | Method::WorkItemLink(_)
             | Method::WorkItemAdd(_)
+            | Method::WorkItemCreate(_)
             | Method::WorkItemPickNextStart(_)
             | Method::WorkItemIgnoreProject(_)
             | Method::WorkItemUnignoreProject(_)

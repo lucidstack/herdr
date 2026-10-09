@@ -1,8 +1,10 @@
 use crate::api::schema::{
-    ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemHideParams,
-    WorkItemLinkParams, WorkItemPickNextStartParams, WorkItemProject, WorkItemTarget,
+    ResponseResult, WorkItemChoiceAction, WorkItemChooseParams, WorkItemCreateParams,
+    WorkItemHideParams, WorkItemLinkParams, WorkItemPickNextStartParams, WorkItemProject,
+    WorkItemTarget,
 };
 use crate::app::App;
+use crate::work_items::source::{LOCAL_DONE_CHOICE_ID, LOCAL_REOPEN_CHOICE_ID};
 
 use super::responses::{encode_error, encode_success};
 
@@ -57,6 +59,7 @@ impl App {
         let Some(item) = self.work_items.get(&params.item_id) else {
             return not_found(id, &params.item_id);
         };
+        let is_local = item.is_local();
         let Some(choice) = self
             .work_items
             .item_choices(item)
@@ -108,6 +111,23 @@ impl App {
                 Ok(()) => encode_success(id, ResponseResult::Ok {}),
                 Err(_) => not_found(id, &params.item_id),
             };
+        }
+        // Herdr's own choices for a local item, which no source knows.
+        if is_local {
+            let resolved = match choice.choice_id.as_str() {
+                LOCAL_DONE_CHOICE_ID => Some(true),
+                LOCAL_REOPEN_CHOICE_ID => Some(false),
+                _ => None,
+            };
+            if let Some(resolved) = resolved {
+                return match self
+                    .work_items
+                    .set_local_resolved(&params.item_id, resolved)
+                {
+                    Ok(()) => encode_success(id, ResponseResult::Ok {}),
+                    Err(_) => not_found(id, &params.item_id),
+                };
+            }
         }
         if let Some(reason) = choice.disabled_reason {
             return encode_error(id, "work_item_choice_unavailable", reason);
@@ -176,18 +196,60 @@ impl App {
         if !self.work_items.is_enabled() {
             return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
         }
-        let Some(ws_idx) = self.parse_workspace_id(&params.workspace_id) else {
+        let Some(workspace_id) = self.work_item_workspace_id(&params.workspace_id) else {
             return encode_error(
                 id,
                 "workspace_not_found",
                 format!("unknown workspace {}", params.workspace_id),
             );
         };
-        // Stored as the stable public id, whatever form the caller used.
-        let workspace_id = self.public_workspace_id(ws_idx);
         match self.work_items.link(&params.item_id, &workspace_id) {
             Ok(()) => encode_success(id, ResponseResult::Ok {}),
             Err(_) => not_found(id, &params.item_id),
+        }
+    }
+
+    /// The stable public id of the open workspace `requested` names, in any form
+    /// `work_item.link` takes: its public id, `w_<n>` or the number. `None` when there is no
+    /// such workspace; the numeric forms are not looked up among the open ones, so a number
+    /// past the last workspace is checked here.
+    fn work_item_workspace_id(&self, requested: &str) -> Option<String> {
+        let ws_idx = self
+            .parse_workspace_id(requested)
+            .filter(|ws_idx| *ws_idx < self.state.workspaces.len())?;
+        // Stored as the stable public id, whatever form the caller used.
+        Some(self.public_workspace_id(ws_idx))
+    }
+
+    pub(super) fn handle_work_item_create(
+        &mut self,
+        id: String,
+        params: WorkItemCreateParams,
+    ) -> String {
+        if !self.work_items.is_enabled() {
+            return encode_error(id, DISABLED_CODE, DISABLED_MESSAGE);
+        }
+        let title = params.title.trim();
+        if title.is_empty() {
+            return encode_error(id, "invalid_title", "title must not be empty");
+        }
+        let workspace_id = match params.workspace_id.as_deref() {
+            None => None,
+            Some(requested) => match self.work_item_workspace_id(requested) {
+                Some(workspace_id) => Some(workspace_id),
+                None => {
+                    return encode_error(
+                        id,
+                        "workspace_not_found",
+                        format!("unknown workspace {requested}"),
+                    );
+                }
+            },
+        };
+        let key = self.work_items.create_local(title, workspace_id.as_deref());
+        match self.work_items.item_info(&key) {
+            Some(item) => encode_success(id, ResponseResult::WorkItemAdded { item }),
+            None => not_found(id, &key),
         }
     }
 
