@@ -250,7 +250,7 @@ herdr work-item ignore github acme/personal-site
 herdr work-item unignore github acme/personal-site
 ```
 
-`ignore` and `unignore` take a source and a repository (`owner/name`) or Jira project key, matched without regard to case, so a project can be ignored before any of its items arrive. `work_item.list` lists the ignored ones as `ignored_projects`, and each item names the one it belongs to as `project`. Ignored projects are kept per session in `work-items.json`.
+`ignore` and `unignore` take a source and a repository (`owner/name`) or Jira project key, matched without regard to case, so a project can be ignored before any of its items arrive. `work_item.list` lists the ignored ones as `ignored_projects`, and each item names the one it belongs to as `project`. Ignored projects are kept per session in `work-items.json`. While a project is ignored, `search` leaves its tickets out, so **Pick next** does not suggest them, and `add` refuses them with `work_item_project_ignored`; `show` still reads them.
 
 `herdr work-item choose` runs a choice with its options at their defaults. `work_item.list` shows each choice's options as `{ "option_id", "label", "description", "default" }`, and `work_item.choose` takes `options`, the ids to switch on: leave it out for the defaults, or send `[]` to switch every option off. The review choice has the options `worktree` and `post`. An id the choice does not offer fails with `unknown_option`, and nothing runs.
 

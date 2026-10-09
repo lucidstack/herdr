@@ -497,9 +497,20 @@ impl App {
         let Some(source) = self.work_item_source_for(&params.source_id, &id, &respond_to) else {
             return;
         };
+        // Not to be suggested, e.g. by "Pick next", while kept out of this session's inbox.
+        let ignored = self.work_items.ignored_projects().to_vec();
         std::thread::spawn(move || {
             let response = match source.search(&params.query) {
-                Ok(tickets) => encode_success(id, ResponseResult::WorkItemSearch { tickets }),
+                Ok(tickets) => encode_success(
+                    id,
+                    ResponseResult::WorkItemSearch {
+                        tickets: crate::work_items::without_ignored_tickets(
+                            source.as_ref(),
+                            &ignored,
+                            tickets,
+                        ),
+                    },
+                ),
                 Err(message) => encode_error(id, "work_item_search_failed", message),
             };
             let _ = respond_to.send(response);
@@ -600,6 +611,30 @@ impl App {
     ) {
         let response = match result {
             Ok(detail) => {
+                // One already in the inbox, still followed for its workspace, is returned as is.
+                let in_inbox = self
+                    .work_items
+                    .get(&crate::work_items::state::item_key(
+                        source_id,
+                        &detail.source_item.external_id,
+                    ))
+                    .is_some();
+                let ignored = (!in_inbox)
+                    .then(|| {
+                        self.work_items
+                            .ignored_project_of(source_id, &detail.source_item.external_id)
+                    })
+                    .flatten();
+                if let Some(project) = ignored {
+                    let _ = respond_to.send(encode_error(
+                        id,
+                        "work_item_project_ignored",
+                        format!(
+                            "{project} is ignored in this session; `herdr work-item unignore {source_id} {project}` lets it in again"
+                        ),
+                    ));
+                    return;
+                }
                 let item = self.work_items.add_ticket(source_id, detail.source_item);
                 // Prepare it now rather than at the next poll, so a choice made straight
                 // away (as "Pick next" does) finds its details.
@@ -1981,6 +2016,79 @@ mod tests {
                 .iter()
                 .any(|item| item.item_id == "fake:b" && item.summary.is_some())
         });
+    }
+
+    #[test]
+    fn a_ticket_of_an_ignored_project_is_neither_found_nor_added() {
+        use crate::api::schema::{
+            WorkItemProject, WorkItemSearchParams, WorkItemTicketInfo, WorkItemTicketTarget,
+        };
+        use crate::work_items::TicketDetail;
+
+        let ticket = |key: &str| WorkItemTicketInfo {
+            key: key.into(),
+            title: format!("Title {key}"),
+            status: "open".into(),
+            done: false,
+            assignee: None,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            url: format!("https://example.test/{key}"),
+        };
+        let mut app = test_app();
+        let source = FakeSource::with_items(Vec::new());
+        *source.search_results.lock().unwrap() = vec![ticket("Personal/1"), ticket("work/2")];
+        *source.fetch_ticket.lock().unwrap() = Some(TicketDetail {
+            ticket: ticket("personal/1"),
+            description: String::new(),
+            comments: Vec::new(),
+            source_item: source_item("personal/1"),
+        });
+        app.work_items = WorkItems::for_test(vec![source], Instant::now());
+        app.work_items
+            .ignore_project(&WorkItemProject {
+                source_id: "fake".into(),
+                project: "personal".into(),
+            })
+            .expect("ignored");
+        // Waits for the deferred reply, running the app loop the add finishes on.
+        let reply = |app: &mut App, method: Method| -> serde_json::Value {
+            let (tx, rx) = std::sync::mpsc::channel();
+            assert!(app.handle_deferred_work_item_api_request(request(method), tx));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                app.drain_all_internal_events();
+                if let Ok(reply) = rx.try_recv() {
+                    return serde_json::from_str(&reply).expect("json reply");
+                }
+                assert!(Instant::now() < deadline, "no reply within 5 s");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+
+        let found = reply(
+            &mut app,
+            Method::WorkItemSearch(WorkItemSearchParams {
+                source_id: "fake".into(),
+                query: "anything".into(),
+            }),
+        );
+        let keys: Vec<&str> = found["result"]["tickets"]
+            .as_array()
+            .expect("tickets")
+            .iter()
+            .filter_map(|ticket| ticket["key"].as_str())
+            .collect();
+        assert_eq!(keys, ["work/2"]);
+
+        let added = reply(
+            &mut app,
+            Method::WorkItemAdd(WorkItemTicketTarget {
+                source_id: "fake".into(),
+                key: "personal/1".into(),
+            }),
+        );
+        assert_eq!(added["error"]["code"], "work_item_project_ignored");
+        assert!(app.work_items.get("fake:personal/1").is_none());
     }
 
     #[test]

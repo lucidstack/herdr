@@ -1036,7 +1036,7 @@ impl WorkItems {
         if name.is_empty() {
             return Err(("invalid_params", "project must not be empty".into()));
         }
-        if self.is_ignored(source.id(), Some(name)) {
+        if is_ignored(&self.ignored_projects, source.id(), Some(name)) {
             return Ok(());
         }
         self.ignored_projects.push(WorkItemProject {
@@ -1071,13 +1071,11 @@ impl WorkItems {
         self.changed();
     }
 
-    /// Whether `project` of `source_id` is kept out of this session's inbox.
-    fn is_ignored(&self, source_id: &str, project: Option<&str>) -> bool {
-        project.is_some_and(|project| {
-            self.ignored_projects.iter().any(|ignored| {
-                ignored.source_id == source_id && ignored.project.eq_ignore_ascii_case(project)
-            })
-        })
+    /// The project `key` belongs to, an item's external id or a ticket key of `source_id`,
+    /// when it is kept out of this session's inbox.
+    pub(crate) fn ignored_project_of(&self, source_id: &str, key: &str) -> Option<String> {
+        let project = self.source(source_id)?.project_of(key)?;
+        is_ignored(&self.ignored_projects, source_id, Some(&project)).then_some(project)
     }
 
     /// `polled` without the items of ignored projects, except those already in the inbox
@@ -1091,11 +1089,14 @@ impl WorkItems {
             return polled;
         }
         polled.retain(|item| {
-            !self.is_ignored(source.id(), source.project_of(&item.external_id).as_deref())
-                || self
-                    .state
-                    .get(&state::item_key(source.id(), &item.external_id))
-                    .is_some_and(|existing| existing.workspace_id.is_some())
+            !is_ignored(
+                &self.ignored_projects,
+                source.id(),
+                source.project_of(&item.external_id).as_deref(),
+            ) || self
+                .state
+                .get(&state::item_key(source.id(), &item.external_id))
+                .is_some_and(|existing| existing.workspace_id.is_some())
         });
         polled
     }
@@ -2052,6 +2053,31 @@ struct CarriedChoice<'a> {
     choice: crate::api::schema::WorkItemChoiceInfo,
     /// Whether the folded item's source makes it that item's default.
     is_default: bool,
+}
+
+/// Whether `ignored` keeps `project` of `source_id` out of the inbox.
+fn is_ignored(ignored: &[WorkItemProject], source_id: &str, project: Option<&str>) -> bool {
+    project.is_some_and(|project| {
+        ignored.iter().any(|ignored| {
+            ignored.source_id == source_id && ignored.project.eq_ignore_ascii_case(project)
+        })
+    })
+}
+
+/// `tickets` found by `source` without those of the projects in `ignored`.
+pub(crate) fn without_ignored_tickets(
+    source: &dyn WorkItemSource,
+    ignored: &[WorkItemProject],
+    mut tickets: Vec<crate::api::schema::WorkItemTicketInfo>,
+) -> Vec<crate::api::schema::WorkItemTicketInfo> {
+    tickets.retain(|ticket| {
+        !is_ignored(
+            ignored,
+            source.id(),
+            source.project_of(&ticket.key).as_deref(),
+        )
+    });
+    tickets
 }
 
 /// A failed choice, a failed provisioning step, or a workspace that could not be removed. A
