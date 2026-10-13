@@ -93,3 +93,34 @@ fn repository_row_focuses_its_open_checkout_or_opens_one() {
         "opens a workspace on the clone"
     );
 }
+
+#[test]
+fn worktrees_of_a_repository_home_stay_top_level_spaces() {
+    let mut snapshot = two_workspace_snapshot();
+    snapshot.workspaces[1].worktree = Some(ClientShellWorktree {
+        key: "app".into(),
+        label: "app".into(),
+        is_linked_worktree: false,
+    });
+    let mut feature = snapshot.workspaces[1].clone();
+    feature.workspace_id = "ws_3".into();
+    feature.number = 3;
+    feature.label = "app #37".into();
+    feature.custom_label = true;
+    feature.worktree = Some(ClientShellWorktree {
+        key: "app".into(),
+        label: "app".into(),
+        is_linked_worktree: true,
+    });
+    snapshot.workspaces.push(feature);
+    let mut state = shell(snapshot, Some("ws_2"));
+    let text = screen_text(&mut state);
+    let row = text
+        .lines()
+        .find(|line| line.contains("app #37"))
+        .unwrap_or_else(|| panic!("worktree listed in spaces:\n{text}"));
+    assert!(
+        !row.contains('─'),
+        "not drawn as a child of the space above it:\n{text}"
+    );
+}

@@ -341,13 +341,11 @@ pub(crate) fn render_sidebar(
                 .add_modifier(Modifier::BOLD),
         );
 
-        let mut entries = workspace_entries(snapshot, state.collapsed_groups);
-        if !nested_workspace_ids.is_empty() {
-            entries.retain(|entry| {
-                !nested_workspace_ids
-                    .contains(&snapshot.workspaces[entry.index].workspace_id.as_str())
-            });
-        }
+        let entries = without_nested_workspaces(
+            snapshot,
+            workspace_entries(snapshot, state.collapsed_groups),
+            |workspace_id| nested_workspace_ids.contains(&workspace_id),
+        );
         let body = Rect::new(
             workspace_area.x,
             workspace_area.y.saturating_add(WORKSPACE_HEADER_ROWS),
@@ -670,6 +668,45 @@ pub(crate) fn workspace_entries(
                 indented: true,
                 last_child: child_index + 1 == children.len(),
             });
+        }
+    }
+    entries
+}
+
+/// Drops the workspaces drawn under inbox items from the spaces list. A linked
+/// worktree whose primary checkout was dropped becomes a top-level row, so it
+/// isn't drawn as a child of whichever space happens to sit above it, and the
+/// tree connectors close on the last child that is still listed.
+pub(crate) fn without_nested_workspaces(
+    snapshot: &ClientShellSnapshot,
+    mut entries: Vec<WorkspaceEntry>,
+    is_nested: impl Fn(&str) -> bool,
+) -> Vec<WorkspaceEntry> {
+    let orphaned_groups = entries
+        .iter()
+        .filter(|entry| !entry.indented)
+        .filter_map(|entry| {
+            let workspace = &snapshot.workspaces[entry.index];
+            let worktree = workspace.worktree.as_ref()?;
+            (!worktree.is_linked_worktree && is_nested(&workspace.workspace_id))
+                .then_some(worktree.key.as_str())
+        })
+        .collect::<HashSet<_>>();
+    entries.retain(|entry| !is_nested(&snapshot.workspaces[entry.index].workspace_id));
+    for entry in &mut entries {
+        let orphaned = entry.indented
+            && snapshot.workspaces[entry.index]
+                .worktree
+                .as_ref()
+                .is_some_and(|worktree| orphaned_groups.contains(worktree.key.as_str()));
+        if orphaned {
+            entry.indented = false;
+        }
+    }
+    for position in 0..entries.len() {
+        if entries[position].indented {
+            entries[position].last_child =
+                entries.get(position + 1).is_none_or(|next| !next.indented);
         }
     }
     entries

@@ -326,20 +326,21 @@ pub(super) fn render_expanded(
             let collapsed_groups = collapsed_groups_for_endpoint(state, &endpoint.endpoint_id)
                 .unwrap_or(&empty_collapsed_groups);
             let active = endpoint.endpoint_id == *state.active_endpoint_id;
-            rows.extend(
-                super::sidebar::workspace_entries(snapshot, collapsed_groups)
-                    .into_iter()
-                    // Workspaces drawn under their inbox items are not listed twice.
-                    .filter(|entry| {
-                        !active
-                            || !nested_workspace_ids
-                                .contains(&snapshot.workspaces[entry.index].workspace_id)
-                    })
-                    .map(|entry| Row::Workspace {
-                        endpoint: endpoint_index,
-                        entry,
-                    }),
-            );
+            let entries = super::sidebar::workspace_entries(snapshot, collapsed_groups);
+            // Workspaces drawn under their inbox items are not listed twice.
+            let entries = if active {
+                super::sidebar::without_nested_workspaces(snapshot, entries, |workspace_id| {
+                    nested_workspace_ids
+                        .iter()
+                        .any(|nested| nested == workspace_id)
+                })
+            } else {
+                entries
+            };
+            rows.extend(entries.into_iter().map(|entry| Row::Workspace {
+                endpoint: endpoint_index,
+                entry,
+            }));
         }
     }
     let body = Rect::new(
