@@ -10,6 +10,7 @@ pub(crate) mod attention;
 pub(crate) mod changes;
 pub(crate) mod github;
 pub(crate) mod jira;
+pub(crate) mod local;
 pub(crate) mod process;
 pub(crate) mod provision;
 pub(crate) mod source;
@@ -280,6 +281,10 @@ pub(crate) struct Repository {
     pub info: crate::api::schema::WorkItemRepositoryInfo,
     /// `None` when the path is not a Git repository: it then never has a home.
     pub repo_key: Option<String>,
+    /// Git remote new work's base is fetched from.
+    pub remote: String,
+    /// Branch new work starts from; `None` takes the remote's HEAD branch.
+    pub base_branch: Option<String>,
 }
 
 impl std::fmt::Debug for WorkItems {
@@ -349,22 +354,43 @@ fn build_repositories(config: &WorkItemsConfig) -> Vec<Repository> {
         .as_ref()
         .filter(|github| github.enabled)
         .into_iter()
-        .flat_map(|github| github.repos.iter().map(|repo| repo.path.as_str()));
+        .flat_map(|github| {
+            github
+                .repos
+                .iter()
+                .map(|repo| (repo.path.as_str(), repo.remote.as_str(), None))
+        });
     let jira = config
         .jira
         .as_ref()
         .filter(|jira| jira.enabled)
         .into_iter()
-        .flat_map(|jira| jira.projects.iter().map(|project| project.path.as_str()));
+        .flat_map(|jira| {
+            jira.projects.iter().map(|project| {
+                (
+                    project.path.as_str(),
+                    project.remote.as_str(),
+                    project.base_branch.as_deref(),
+                )
+            })
+        });
     let mut seen = HashSet::new();
     github
         .chain(jira)
-        .filter(|path| !path.trim().is_empty())
-        .map(crate::worktree::expand_tilde_absolute_path)
-        .filter(|path| seen.insert(crate::worktree::canonical_or_original(path)))
-        .map(|path| Repository {
+        .filter(|(path, _, _)| !path.trim().is_empty())
+        .map(|(path, remote, base_branch)| {
+            (
+                crate::worktree::expand_tilde_absolute_path(path),
+                remote,
+                base_branch,
+            )
+        })
+        .filter(|(path, _, _)| seen.insert(crate::worktree::canonical_or_original(path)))
+        .map(|(path, remote, base_branch)| Repository {
             // Once per config load, not per projection: this asks Git.
             repo_key: crate::workspace::git_space_metadata(&path).map(|space| space.key),
+            remote: remote.to_string(),
+            base_branch: base_branch.map(str::to_string),
             info: crate::api::schema::WorkItemRepositoryInfo {
                 label: path.file_name().map_or_else(
                     || path.display().to_string(),
@@ -1243,6 +1269,23 @@ impl WorkItems {
         Ok(())
     }
 
+    /// The workspace `choice_id` starts for the local item `item`, with the agent from
+    /// `work_items.agent`.
+    pub(crate) fn local_provision_plan(
+        &self,
+        item: &state::WorkItem,
+        choice_id: &str,
+        worktree_directory: &Path,
+    ) -> Result<ProvisionPlan, String> {
+        local::provision_plan(
+            item,
+            choice_id,
+            &self.repositories,
+            worktree_directory,
+            &self.config.default_agent(),
+        )
+    }
+
     /// The key of `source_id`'s "Pick next" discovery row, creating it if it does not exist
     /// yet.
     pub(crate) fn ensure_pick_next_item(&mut self, source_id: &str, label: &str) -> WorkItem {
@@ -1356,7 +1399,7 @@ impl WorkItems {
         hosts: &HashMap<(String, u64), String>,
     ) -> (source::ItemChoices, Option<source::StartReminder>) {
         if item.is_local() {
-            return (source::local_choices(item.resolved), None);
+            return (local::choices(item, &self.repositories), None);
         }
         let Some(source) = self.source(&item.source_id) else {
             return (

@@ -41,7 +41,7 @@ impl WorkspaceTabConfig {
 }
 
 /// Editor and lazygit.
-fn default_branch_tabs() -> Vec<WorkspaceTabConfig> {
+pub fn default_branch_tabs() -> Vec<WorkspaceTabConfig> {
     vec![
         WorkspaceTabConfig::new("editor", "nvim .", ""),
         WorkspaceTabConfig::new("lazygit", "lazygit", ""),

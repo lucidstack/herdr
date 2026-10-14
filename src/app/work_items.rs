@@ -919,12 +919,16 @@ impl App {
                 format!("{key} already has a workspace"),
             ));
         }
-        let Some(source) = self.work_items.source(&item.source_id).cloned() else {
-            return Err(("work_item_not_found", format!("unknown work item {key}")));
-        };
-        let mut plan = source
-            .provision_plan(&item, choice_id, options, &self.state.worktree_directory)
-            .map_err(|message| ("work_item_unavailable", message))?;
+        let mut plan = if item.is_local() {
+            self.work_items
+                .local_provision_plan(&item, choice_id, &self.state.worktree_directory)
+        } else {
+            let Some(source) = self.work_items.source(&item.source_id).cloned() else {
+                return Err(("work_item_not_found", format!("unknown work item {key}")));
+            };
+            source.provision_plan(&item, choice_id, options, &self.state.worktree_directory)
+        }
+        .map_err(|message| ("work_item_unavailable", message))?;
         plan.layout.agent_args = crate::work_items::agent_settings::with_settings(
             &plan.layout.agent,
             &plan.layout.agent_args,
@@ -1512,15 +1516,26 @@ impl App {
                 timeout_ms: None,
             })) {
                 Ok(_) => {
+                    // With no brief and no plan command, you write the first prompt yourself.
+                    let unbriefed = self.work_items.job(job_id).is_some_and(|job| {
+                        job.plan.brief.is_empty() && job.plan.plan_command.is_empty()
+                    });
                     if let Some(job) = self.work_items.job_mut(job_id) {
                         job.agent_start = None;
                         job.agent_name = Some(name);
-                        job.brief = Some(AgentAttempt {
+                        job.brief = (!unbriefed).then_some(AgentAttempt {
                             started: now,
                             next_attempt: now + AGENT_RETRY_INTERVAL,
                             pending: None,
                             blocked: false,
                         });
+                    }
+                    if unbriefed {
+                        self.set_work_item_agent_step(
+                            job_id,
+                            WorkItemStepStatus::Done,
+                            Some("started; no brief".into()),
+                        );
                     }
                     return;
                 }
@@ -4112,14 +4127,18 @@ mod tests {
             let item = create(&mut app, "Fix login", Some(&workspace_id)).expect("created");
 
             close_workspace(&mut app, &workspace_id);
+            // Without its workspace the work can start again.
+            let listed = list(&mut app);
             assert_eq!(
-                list(&mut app),
+                listed,
                 vec![WorkItemInfo {
                     workspace_id: None,
                     phase: WorkItemPhase::Pending,
+                    choices: listed[0].choices.clone(),
                     ..item
                 }]
             );
+            assert_eq!(choice_ids(&listed[0]), ["start_scratch", "done"]);
         }
 
         #[test]
@@ -4150,14 +4169,25 @@ mod tests {
                 workspace_id: workspace_id.clone(),
             });
             api(&mut app, link).expect("linked");
+            // Its workspace is where the work goes on: there is nothing left to start.
+            let listed = list(&mut app);
             assert_eq!(
-                list(&mut app),
+                listed,
                 vec![WorkItemInfo {
                     workspace_id: Some(workspace_id),
                     phase: WorkItemPhase::Local,
+                    choices: listed[0].choices.clone(),
                     ..item
                 }]
             );
+            assert_eq!(choice_ids(&listed[0]), ["done"]);
+        }
+
+        fn choice_ids(item: &WorkItemInfo) -> Vec<&str> {
+            item.choices
+                .iter()
+                .map(|choice| choice.choice_id.as_str())
+                .collect()
         }
 
         #[test]

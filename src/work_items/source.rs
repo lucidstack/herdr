@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::api::schema::{WorkItemChoiceAction, WorkItemChoiceInfo};
+use crate::api::schema::WorkItemChoiceInfo;
 
 use super::state::WorkItem;
 
@@ -223,29 +223,6 @@ pub(crate) const LINK_CLONE_CHOICE_ID: &str = "link_clone";
 pub(crate) const LOCAL_DONE_CHOICE_ID: &str = "done";
 /// Takes a local item's `done` back. Handled like [`LOCAL_DONE_CHOICE_ID`].
 pub(crate) const LOCAL_REOPEN_CHOICE_ID: &str = "reopen";
-
-/// What a local item offers. No source knows it, so the only choice is Herdr's own: to mark it
-/// done, or, once it is, to take that back. Neither is a default.
-pub(crate) fn local_choices(resolved: bool) -> ItemChoices {
-    let (choice_id, label) = if resolved {
-        (LOCAL_REOPEN_CHOICE_ID, "Not done yet")
-    } else {
-        (LOCAL_DONE_CHOICE_ID, "Mark as done")
-    };
-    ItemChoices {
-        choices: vec![WorkItemChoiceInfo {
-            choice_id: choice_id.into(),
-            label: label.into(),
-            description: None,
-            action: WorkItemChoiceAction::Perform,
-            disabled_reason: None,
-            confirm: None,
-            options: Vec::new(),
-            agent: None,
-        }],
-        default_choice_id: None,
-    }
-}
 
 /// A local clone linked from an item at runtime. Kept in `work-items.json` and used by its
 /// source like a clone mapped in the config, which wins for the same repository.
