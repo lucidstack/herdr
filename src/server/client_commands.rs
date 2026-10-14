@@ -44,6 +44,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "tab.move",
     "tab.rename",
     "work_item.choose",
+    "work_item.create",
     "work_item.hide",
     "work_item.ignore_project",
     "work_item.link",
@@ -312,6 +313,12 @@ mod tests {
         assert_eq!(
             actual.remove("work_item.choose").as_deref(),
             Some("0c48b6ef401179a0a17b5a6c41b8377d76d9be62b28263af4c8e5b6599e178c3")
+        );
+        // The "Pick next" dialog's Local provider makes a local item with it. On a server
+        // without it, the request fails like any missing method and nothing else changes.
+        assert_eq!(
+            actual.remove("work_item.create").as_deref(),
+            Some("f58d11c4459a5b531975456c0b36415f2a1efa363f39168c83c35f9afcce14a3")
         );
         assert_eq!(
             actual.remove("work_item.mark_seen").as_deref(),

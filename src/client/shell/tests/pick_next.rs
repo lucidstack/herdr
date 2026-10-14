@@ -83,7 +83,7 @@ fn pick_next_dialog_starts_the_chosen_provider_with_its_last_context() {
         modifiers: KeyModifiers::NONE,
     })]);
     // The last provider is preselected; switching pre-fills that provider's last text.
-    key(&mut state, KeyCode::Tab);
+    key(&mut state, KeyCode::BackTab);
     let started = key(&mut state, KeyCode::Enter);
     let methods: Vec<&Method> = started
         .actions
@@ -100,5 +100,45 @@ fn pick_next_dialog_starts_the_chosen_provider_with_its_last_context() {
                 if params.source_id == "github" && params.context == "open PRs"
         ),
         "{methods:?}"
+    );
+}
+
+fn endpoint_methods(input: &ClientShellInput) -> Vec<&Method> {
+    input
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => Some(&request.method),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn pick_next_local_makes_a_work_item_titled_with_the_text() {
+    let mut state = shell(two_workspace_snapshot(), vec![item("7")]);
+    screen_text(&mut state);
+    state.open_pick_next_overlay();
+    // Local comes after the configured sources.
+    key(&mut state, KeyCode::Tab);
+    let text = screen_text(&mut state);
+    assert!(text.contains("title of the new work item"), "{text}");
+
+    // A work item needs a title: an empty one makes nothing.
+    let blank = key(&mut state, KeyCode::Enter);
+    assert!(endpoint_methods(&blank).is_empty());
+
+    state.open_pick_next_overlay();
+    key(&mut state, KeyCode::Tab);
+    state.handle_input_bytes(b"Answer the Teams request");
+    let added = key(&mut state, KeyCode::Enter);
+    assert!(
+        matches!(
+            endpoint_methods(&added).as_slice(),
+            [Method::WorkItemCreate(params)]
+                if params.title == "Answer the Teams request" && params.workspace_id.is_none()
+        ),
+        "{:?}",
+        endpoint_methods(&added)
     );
 }

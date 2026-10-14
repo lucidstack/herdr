@@ -711,16 +711,21 @@ fn render_rename_overlay(
                 provider_rows.push((Rect::new(start, i.y, x.saturating_sub(start), 1), index));
                 x = put_segment(b, x, i.y, i.right(), " ", Style::default().bg(p.panel_bg));
             }
+            let local = sources.get(selected).is_some_and(|(source_id, _)| {
+                source_id == crate::api::schema::LOCAL_WORK_ITEM_SOURCE_ID
+            });
+            let hint = match (local, sources.len() > 1) {
+                (true, true) => "title of the new work item · tab switches provider",
+                (true, false) => "title of the new work item",
+                (false, true) => "optional context · tab switches provider",
+                (false, false) => "optional context for the agent",
+            };
             put_text(
                 b,
                 i.x,
                 i.y + 1,
                 i.width,
-                if sources.len() > 1 {
-                    "optional context · tab switches provider"
-                } else {
-                    "optional context for the agent"
-                },
+                hint,
                 Style::default().fg(p.overlay0).bg(p.panel_bg),
             );
         }
@@ -739,14 +744,21 @@ fn render_rename_overlay(
     let [save, clear, cancel] = rs.as_slice() else {
         return None;
     };
+    let start_label = match pick_next {
+        Some((sources, selected))
+            if sources.get(selected).is_some_and(|(source_id, _)| {
+                source_id == crate::api::schema::LOCAL_WORK_ITEM_SOURCE_ID
+            }) =>
+        {
+            " ↵ add   "
+        }
+        Some(_) => " ↵ start ",
+        None => " ↵ save ",
+    };
     button(
         b,
         *save,
-        if pick_next.is_some() {
-            " ↵ start "
-        } else {
-            " ↵ save "
-        },
+        start_label,
         Style::default()
             .fg(contrast(p))
             .bg(p.accent)

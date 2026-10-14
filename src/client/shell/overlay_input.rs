@@ -993,13 +993,25 @@ impl ClientShellState {
             )),
             ClientRenameTarget::PickNext {
                 sources, selected, ..
-            } => sources.get(selected).map(|(source_id, _)| {
-                crate::api::schema::Method::WorkItemPickNextStart(
-                    crate::api::schema::WorkItemPickNextStartParams {
-                        source_id: source_id.clone(),
-                        context: trimmed.to_owned(),
-                    },
-                )
+            } => sources.get(selected).and_then(|(source_id, _)| {
+                if source_id == crate::api::schema::LOCAL_WORK_ITEM_SOURCE_ID {
+                    // Local makes a work item titled with the text, which it needs.
+                    (!trimmed.is_empty()).then(|| {
+                        crate::api::schema::Method::WorkItemCreate(
+                            crate::api::schema::WorkItemCreateParams {
+                                title: trimmed.to_owned(),
+                                workspace_id: None,
+                            },
+                        )
+                    })
+                } else {
+                    Some(crate::api::schema::Method::WorkItemPickNextStart(
+                        crate::api::schema::WorkItemPickNextStartParams {
+                            source_id: source_id.clone(),
+                            context: trimmed.to_owned(),
+                        },
+                    ))
+                }
             }),
         };
         if let Some(method) = method {

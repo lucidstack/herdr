@@ -1286,7 +1286,8 @@ impl ClientShellState {
     }
 
     /// The "Pick next task" dialog: the provider (preselecting the last one used) and
-    /// optional context, pre-filled with the last text sent to that provider.
+    /// optional context, pre-filled with the last text sent to that provider. Last comes
+    /// "Local", which makes a local item titled with the text instead.
     pub(super) fn open_pick_next_overlay(&mut self) {
         let Some(projection) = self.snapshot.as_deref().and_then(|snapshot| {
             active_projection(&self.work_items, &self.active_endpoint_id, snapshot)
@@ -1298,6 +1299,7 @@ impl ClientShellState {
             .sources
             .iter()
             .map(|source| (source.source_id.clone(), source.label.clone()))
+            .chain([(LOCAL_WORK_ITEM_SOURCE_ID.to_string(), "Local".to_string())])
             .collect();
         let selected = projection
             .pick_next
