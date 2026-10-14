@@ -1595,6 +1595,13 @@
               ],
               "description": "The tracker ticket this item's title names, for items of another source, e.g. the\nJira issue a pull request titled \"[TECH-12] Fix login\" is for."
             },
+            "links": {
+              "description": "Other places the item opens in, besides `url`, e.g. a review request in Olori.\nOmitted when there are none.",
+              "items": {
+                "$ref": "#/schemas/event/$defs/WorkItemLinkInfo"
+              },
+              "type": "array"
+            },
             "notice": {
               "type": [
                 "string",
@@ -1699,6 +1706,22 @@
             "url",
             "phase",
             "seen"
+          ],
+          "type": "object"
+        },
+        "WorkItemLinkInfo": {
+          "description": "A page an item opens in, named for the user, e.g. \"Read in Olori\".",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "url"
           ],
           "type": "object"
         },
@@ -13818,6 +13841,13 @@
               ],
               "description": "The tracker ticket this item's title names, for items of another source, e.g. the\nJira issue a pull request titled \"[TECH-12] Fix login\" is for."
             },
+            "links": {
+              "description": "Other places the item opens in, besides `url`, e.g. a review request in Olori.\nOmitted when there are none.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/WorkItemLinkInfo"
+              },
+              "type": "array"
+            },
             "notice": {
               "type": [
                 "string",
@@ -13922,6 +13952,22 @@
             "url",
             "phase",
             "seen"
+          ],
+          "type": "object"
+        },
+        "WorkItemLinkInfo": {
+          "description": "A page an item opens in, named for the user, e.g. \"Read in Olori\".",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "url"
           ],
           "type": "object"
         },

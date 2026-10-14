@@ -390,7 +390,8 @@ fn menu_groups(item: &WorkItemInfo, pull_request: Option<&WorkItemInfo>) -> Vec<
 }
 
 /// Where the item, and its pull request, open in the browser, each named by key and
-/// service: "Open TECH-7 in Jira", "Open #12 on GitHub".
+/// service: "Open TECH-7 in Jira", "Open #12 on GitHub". Then the other places their
+/// sources name, such as "Read in Olori".
 fn menu_links(
     item: &WorkItemInfo,
     pull_request: Option<&WorkItemInfo>,
@@ -416,6 +417,7 @@ fn menu_links(
     if !item.url.is_empty() {
         links.push(link(display_key(item), &item.source_id, &item.url));
     }
+    let pull_request_item = pull_request;
     let pull_request = match pull_request {
         Some(pull_request) => Some(link(
             display_key(pull_request),
@@ -431,6 +433,19 @@ fn menu_links(
         }),
     };
     links.extend(pull_request.filter(|pull_request| pull_request.url != item.url));
+    let others = item.links.iter().chain(
+        pull_request_item
+            .into_iter()
+            .flat_map(|pull_request| &pull_request.links),
+    );
+    for other in others {
+        if !links.iter().any(|link| link.url == other.url) {
+            links.push(WorkItemMenuLink {
+                label: other.label.clone(),
+                url: other.url.clone(),
+            });
+        }
+    }
     links
 }
 

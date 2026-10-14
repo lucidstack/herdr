@@ -357,6 +357,17 @@ pub struct WorkItemInfo {
     /// what `work_item.ignore_project` keeps out of this session's inbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Other places the item opens in, besides `url`, e.g. a review request in Olori.
+    /// Omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<WorkItemLinkInfo>,
+}
+
+/// A page an item opens in, named for the user, e.g. "Read in Olori".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkItemLinkInfo {
+    pub label: String,
+    pub url: String,
 }
 
 /// Why something needs you. Ordered from most to least urgent.

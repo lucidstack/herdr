@@ -266,6 +266,8 @@ pub struct GithubWorkItemsConfig {
     pub repos: Vec<GithubRepoConfig>,
     /// Directory holding your clones, e.g. "~/projects". An item of a repository without a `repos` entry then offers to link its clone there, cloning it there first when there is none. Empty disables this. Default: "".
     pub clone_root: String,
+    /// Where Olori runs, e.g. "http://localhost:3000". Review requests then link to their pull request's narrative there. Empty disables this. Default: "".
+    pub olori_url: String,
     /// Workflows for review requests; the first block whose repos match applies.
     pub review_requested: Vec<ReviewRequestedConfig>,
     /// Workflows for your pull requests with changes requested; the first block whose repos match applies.
@@ -288,6 +290,7 @@ impl Default for GithubWorkItemsConfig {
             queries: GithubQueriesConfig::default(),
             repos: Vec::new(),
             clone_root: String::new(),
+            olori_url: String::new(),
             review_requested: Vec::new(),
             changes_requested: Vec::new(),
             ci_failing: Vec::new(),

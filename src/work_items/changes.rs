@@ -117,6 +117,7 @@ mod tests {
             folded_into: None,
             attention: None,
             project: None,
+            links: Vec::new(),
         }
     }
 

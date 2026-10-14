@@ -59,6 +59,7 @@ pub(super) fn item(id: &str) -> WorkItemInfo {
         folded_into: None,
         attention: None,
         project: Some("o/r".into()),
+        links: Vec::new(),
     }
 }
 
@@ -1671,6 +1672,36 @@ fn a_review_request_is_still_opened_in_the_browser_from_its_menu() {
             ClientShellAction::OpenSafeWebUrl(url) if url == "https://github.com/o/r/pull/7"
         )),
         "the link opens the pull request"
+    );
+}
+
+#[test]
+fn a_review_request_opens_in_olori_from_its_menu() {
+    let mut review = review_item("7");
+    review.links = vec![crate::api::schema::WorkItemLinkInfo {
+        label: "Read in Olori".into(),
+        url: "http://mac:3000/o/r/pull/7".into(),
+    }];
+    let mut state = state_with_item_menu(vec![review]);
+    let (labels, _) = menu_labels(&state);
+    let index = labels
+        .iter()
+        .position(|label| label == "Read in Olori")
+        .unwrap_or_else(|| panic!("the Olori link is listed: {labels:?}"));
+    state.compose(106, 30).expect("frame");
+    let (row, _) = state.hits.context_menu_rows[index];
+    let input = mouse(
+        &mut state,
+        MouseEventKind::Down(MouseButton::Left),
+        row.x + 1,
+        row.y,
+    );
+    assert!(
+        input.actions.iter().any(|action| matches!(
+            action,
+            ClientShellAction::OpenSafeWebUrl(url) if url == "http://mac:3000/o/r/pull/7"
+        )),
+        "the link opens the narrative"
     );
 }
 

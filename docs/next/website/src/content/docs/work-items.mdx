@@ -83,6 +83,13 @@ A review request offers one choice, **Review**. The agent always reviews: it rea
 
 GitHub items offer no choice that only opens them in the browser. What you do on GitHub reaches Herdr through the pull request's own events, so the item updates anyway. To read the pull request there, use **Open #12 on GitHub** in the item's right-click menu.
 
+If you read pull requests in [Olori](https://github.com/lucidstack/olori), tell Herdr where it runs and each review request's right-click menu also offers **Read in Olori**, which opens the pull request's narrative there:
+
+```toml
+[work_items.github]
+olori_url = "http://localhost:3000"
+```
+
 ### Stacked pull requests
 
 A pull request that is part of a [GitHub stack](https://docs.github.com/en/pull-requests/how-tos/stacked-pull-requests) shows its place in it in front of its number, for example `≡ 2/3 #812 acme/app` for the second of three pull requests counting from the bottom. Merged ones count too. The choices dialog also names it, for example `2 of 3 in a stack`. Herdr reads stacks with the pull request state, so they appear within a minute. Only stacks created with GitHub's stacked pull requests are recognised; a chain built by hand or with another tool shows as separate pull requests.

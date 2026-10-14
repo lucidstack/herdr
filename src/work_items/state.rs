@@ -274,6 +274,7 @@ impl WorkItem {
             folded_into,
             attention,
             project: None,
+            links: Vec::new(),
         }
     }
 

@@ -736,6 +736,7 @@ fn multi_machine_sidebar_shows_only_the_active_machines_inbox() {
         folded_into: None,
         attention: None,
         project: None,
+        links: Vec::new(),
     };
     let projection = |boot: &str, items| EndpointWorkItemsProjection {
         boot_id: boot.into(),

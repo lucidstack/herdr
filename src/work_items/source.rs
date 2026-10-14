@@ -326,6 +326,11 @@ pub(crate) trait WorkItemSource: Send + Sync {
     fn project_of(&self, _external_id: &str) -> Option<String> {
         None
     }
+    /// Pure: other places the item opens in, besides its own URL, e.g. a review request in
+    /// Olori. Sources with none leave this as is.
+    fn links(&self, _item: &WorkItem) -> Vec<crate::api::schema::WorkItemLinkInfo> {
+        Vec::new()
+    }
     /// Blocking; background thread only. Searches the tracker with its own query syntax
     /// (JQL for Jira, GitHub search syntax for GitHub), read-only.
     fn search(&self, query: &str) -> Result<Vec<crate::api::schema::WorkItemTicketInfo>, String>;

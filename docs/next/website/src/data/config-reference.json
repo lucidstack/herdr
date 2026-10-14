@@ -1577,6 +1577,12 @@
           "description": "Directory holding your clones, e.g. \"~/projects\". An item of a repository without a [[work_items.github.repos]] entry then offers Link or clone, which links the clone of that repository directly inside this directory, or clones it there with gh when there is none. Linked clones are kept in work-items.json. Empty disables this."
         },
         {
+          "key": "work_items.github.olori_url",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Where Olori runs, e.g. \"http://localhost:3000\". A review request's right-click menu then offers Read in Olori, which opens the pull request's narrative there. Empty disables this."
+        },
+        {
           "key": "work_items.github.queries.review_requested",
           "type": "string",
           "default": "\"is:pr is:open review-requested:@me archived:false\"",

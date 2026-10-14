@@ -3047,6 +3047,20 @@ impl WorkItemSource for GithubSource {
         parse_external_id(external_id).map(|(repo, _)| repo.to_string())
     }
 
+    fn links(&self, item: &WorkItem) -> Vec<crate::api::schema::WorkItemLinkInfo> {
+        let base = self.config.olori_url.trim().trim_end_matches('/');
+        if base.is_empty() || Event::of(&item.external_id) != Event::ReviewRequested {
+            return Vec::new();
+        }
+        parse_external_id(&item.external_id)
+            .map(|(repo, number)| crate::api::schema::WorkItemLinkInfo {
+                label: "Read in Olori".into(),
+                url: format!("{base}/{repo}/pull/{number}"),
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn tracker_need(&self, item: &WorkItem) -> Option<super::attention::Need> {
         use crate::api::schema::AttentionKind;
         let event = Event::of(&item.external_id);
@@ -4114,6 +4128,40 @@ mod tests {
         assert_eq!(
             source.choices(&item).default_choice_id.as_deref(),
             Some("review")
+        );
+    }
+
+    #[test]
+    fn review_requests_link_to_their_narrative_in_olori_when_configured() {
+        let source = |olori_url: &str| {
+            GithubSource::new(
+                GithubWorkItemsConfig {
+                    olori_url: olori_url.into(),
+                    ..GithubWorkItemsConfig::default()
+                },
+                AgentLaunch::default(),
+            )
+        };
+        let review = work_item("o/r", None);
+        let urls = |source: &GithubSource, item: &WorkItem| {
+            source
+                .links(item)
+                .into_iter()
+                .map(|link| link.url)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            urls(&source("http://mac:3000/"), &review),
+            ["http://mac:3000/o/r/pull/5"]
+        );
+        assert!(urls(&source(""), &review).is_empty(), "off by default");
+        let changes = WorkItem {
+            external_id: format!("{CHANGES_PREFIX}o/r#5"),
+            ..review
+        };
+        assert!(
+            urls(&source("http://mac:3000"), &changes).is_empty(),
+            "only review requests are narrated"
         );
     }
 

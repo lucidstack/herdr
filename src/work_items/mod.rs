@@ -1291,12 +1291,12 @@ impl WorkItems {
 
     fn project(&self, item: &WorkItem, hosts: &HashMap<(String, u64), String>) -> WorkItemInfo {
         let (choices, reminder) = self.choices_and_reminder(item, hosts);
-        let project = (!item.is_pick_next)
+        let source = (!item.is_pick_next)
             .then(|| self.source(&item.source_id))
-            .flatten()
-            .and_then(|source| source.project_of(&item.external_id));
+            .flatten();
         WorkItemInfo {
-            project,
+            project: source.and_then(|source| source.project_of(&item.external_id)),
+            links: source.map(|source| source.links(item)).unwrap_or_default(),
             ..item.info(
                 choices,
                 reminder.map(|reminder| reminder.message),
